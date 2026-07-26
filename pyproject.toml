@@ -84,7 +84,7 @@ ignore = ["B018", "B904"]
 
 [tool.ruff.lint.isort]
 lines-after-imports = 2
-known-first-party = ["upet"]
+known-first-party = ["upet", "Uncertainty_Quantification"]
 known-third-party = ["torch"]
 
 [tool.ruff.format]
@@ -98,6 +98,10 @@ exclude = [
 ]
 
 [tool.pytest.ini_options]
+markers = [
+    "llpr_n20: runs the real checkpoint on the 20-structure smoke dataset",
+    "llpr_legacy: reads the audited external legacy result tree",
+]
 # ignore" a bunch of internal warnings with Python 3.13 and PyTorch
 filterwarnings = [
     "error",
