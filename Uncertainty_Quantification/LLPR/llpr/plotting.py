@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import numpy as np
+import yaml
 from pydantic import Field, model_validator
 from scipy.stats import pearsonr, spearmanr
 
@@ -36,6 +37,14 @@ class PlotConfig(StrictModel):
         if not root.is_absolute():
             object.__setattr__(self, "run_root", resolve_repo_path(root))
         return self
+
+
+def load_plot_config(path: Path) -> PlotConfig:
+    """Load and strictly validate plotting configuration."""
+    loaded = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict):
+        raise ValueError("plot configuration must contain a YAML mapping")
+    return PlotConfig.model_validate(loaded)
 
 
 @dataclass(frozen=True)

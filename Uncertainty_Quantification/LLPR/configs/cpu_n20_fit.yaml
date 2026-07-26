@@ -1,0 +1,33 @@
+checkpoint:
+  path: data/checkpoint/pet-omatpes-l-v0.1.0.ckpt
+  expected_sha256: 879b1045391d88869522605a8b8b3cedeed74668e7062fdd7487548ab7b08004
+data:
+  build: data/dataset/matpes_n20.extxyz
+  calibration: data/dataset/matpes_n20.extxyz
+  test: data/dataset/matpes_n20.extxyz
+  build_expected_sha256: c92161329aab539064a2c2438a395cb01e38bfc91211c558aebbc1ff94702e3d
+  calibration_expected_sha256: c92161329aab539064a2c2438a395cb01e38bfc91211c558aebbc1ff94702e3d
+  test_expected_sha256: c92161329aab539064a2c2438a395cb01e38bfc91211c558aebbc1ff94702e3d
+curvature:
+  energy_loss_weight: 1.0
+  force_loss_weight: 0.1
+  energy_huber_delta: 0.015
+  force_huber_delta: 0.01
+  checkpoint_interval: 5
+calibration:
+  ridge:
+    mode: fit
+    max_condition_number: 1.0e10
+    fit:
+      candidate_multipliers: [1, 3, 10, 30, 100, 300, 1000]
+      score: gaussian_nll
+runtime:
+  device: cpu
+  matrix_dtype: float64
+  jacobian_backend: scalar
+  force_component_chunk_size: 64
+output:
+  root: Uncertainty_Quantification/LLPR/outputs
+  experiment: n20_smoke
+  shard_structure_count: 10
+  keep_shards: false
