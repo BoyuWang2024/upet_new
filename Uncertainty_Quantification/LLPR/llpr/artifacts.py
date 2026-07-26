@@ -202,9 +202,12 @@ def verify_run(
     for path in manifests:
         manifest = load_complete_manifest(path)
         verified_files += _verify_declared_files(path.parent, manifest)
-    if level == "full":
-        for path in root.rglob("*.npz"):
-            _verify_npz(path)
+        if level == "full":
+            declared = manifest.get("files", {})
+            assert isinstance(declared, dict)
+            for relative in declared:
+                if isinstance(relative, str) and relative.endswith(".npz"):
+                    _verify_npz(path.parent / relative)
     if not math.isfinite(float(verified_files)):
         raise AssertionError("unreachable non-finite file count")
     return {
