@@ -132,10 +132,9 @@ def build_system(
     device: torch.device,
     dtype: torch.dtype,
 ):
-    """Build one metatomic System; private API use is isolated here."""
-    from metatomic.torch import register_autograd_neighbors
-    from metatomic.torch.ase_calculator import _compute_ase_neighbors
+    """Build one metatomic System with the public vesin neighbor-list API."""
     from metatomic.torch.systems_to_torch import systems_to_torch
+    from vesin.metatomic import NeighborList
 
     system = systems_to_torch(
         sample.atoms,
@@ -145,9 +144,10 @@ def build_system(
         cell_requires_grad=False,
     )
     for options in model.requested_neighbor_lists():
-        neighbors = _compute_ase_neighbors(
-            sample.atoms, options, dtype=dtype, device=device
+        calculator = NeighborList(
+            options=options,
+            length_unit="angstrom",
+            check_consistency=False,
         )
-        register_autograd_neighbors(system, neighbors, check_consistency=False)
-        system.add_neighbor_list(options, neighbors)
+        calculator.add_neighbor_list(system, copy=True)
     return system

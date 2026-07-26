@@ -95,6 +95,7 @@ follow_imports = 'skip'
 ignore_missing_imports = true
 exclude = [
     '^docs/src/generated_examples/',
+    '^Uncertainty_Quantification/LLPR/outputs/',
 ]
 
 [tool.pytest.ini_options]

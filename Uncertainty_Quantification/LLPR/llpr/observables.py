@@ -109,19 +109,19 @@ def compute_structure_jacobians(
     """Run the canonical outputs and compute target-specific Jacobians."""
     from metatomic.torch import ModelOutput
 
+    force_key = layout.force.source_target
+
     outputs = model(
         [system],
         {
             "energy": ModelOutput(quantity="energy", unit="eV", per_atom=False),
-            "non_conservative_force": ModelOutput(
-                quantity="force", unit="eV/A", per_atom=True
-            ),
+            force_key: ModelOutput(quantity="force", unit="eV/A", per_atom=True),
         },
     )
     energy_total = outputs["energy"].block().values.reshape(-1)[0]
     atom_count = int(system.positions.shape[0])
     energy_per_atom = energy_total / atom_count
-    force_values = outputs["non_conservative_force"].block().values.reshape(-1)
+    force_values = outputs[force_key].block().values.reshape(-1)
     energy_jacobian = parameter_jacobian(
         energy_per_atom.reshape(1),
         layout.energy.parameters,
