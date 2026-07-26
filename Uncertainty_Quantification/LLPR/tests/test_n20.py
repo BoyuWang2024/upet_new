@@ -6,6 +6,7 @@ from typing import Any
 import numpy as np
 import pytest
 
+from Uncertainty_Quantification.LLPR.llpr import calibration as calibration_module
 from Uncertainty_Quantification.LLPR.llpr.artifacts import verify_run
 from Uncertainty_Quantification.LLPR.llpr.calibration import run_calibrate
 from Uncertainty_Quantification.LLPR.llpr.config import load_llpr_config
@@ -48,7 +49,10 @@ def _assert_positive_finite_variances(evaluation: Path) -> None:
     not bool(os.environ.get("UPET_RUN_LLPR_N20")),
     reason="set UPET_RUN_LLPR_N20=1 to run the real n20 full path",
 )
-def test_n20_fixed_and_fit_full_paths() -> None:
+def test_n20_fixed_and_fit_full_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     fixed = load_llpr_config(CONFIGS / "cpu_n20_fixed.yaml")
     fitted = load_llpr_config(CONFIGS / "cpu_n20_fit.yaml")
 
@@ -98,3 +102,40 @@ def test_n20_fixed_and_fit_full_paths() -> None:
 
     result = verify_run(run_root, level="full")
     assert result["status"] == "complete"
+
+    resume_output = fixed.output.model_copy(
+        update={"root": tmp_path / "outputs", "experiment": "n20_resume_smoke"}
+    )
+    resume_config = fixed.model_copy(update={"output": resume_output})
+    run_build(resume_config)
+
+    original_compute = calibration_module.compute_structure_jacobians
+    call_count = 0
+
+    def interrupt_after_checkpoint(*args: Any, **kwargs: Any) -> Any:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 6:
+            raise RuntimeError("injected calibration interruption")
+        return original_compute(*args, **kwargs)
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(
+            calibration_module,
+            "compute_structure_jacobians",
+            interrupt_after_checkpoint,
+        )
+        with pytest.raises(RuntimeError, match="injected calibration interruption"):
+            run_calibrate(resume_config)
+
+    progress_files = list(
+        (resume_output.root / resume_output.experiment / "calibration").glob(
+            "*/progress.npz"
+        )
+    )
+    assert len(progress_files) == 1
+    progress_path = progress_files[0]
+
+    resumed_calibration = run_calibrate(resume_config)
+    assert not progress_path.exists()
+    assert _summary(resumed_calibration)["selected"] == fixed_selected

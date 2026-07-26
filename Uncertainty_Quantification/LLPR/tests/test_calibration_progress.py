@@ -35,6 +35,7 @@ def test_calibration_progress_round_trip_and_resume_equivalence(
         path,
         expected_identity="cal",
         candidate_counts={"energy": 2, "force": 1},
+        expected_structure_count=2,
     )
     loaded_energy.append(torch.tensor([6.0], dtype=torch.float64))
     loaded_force.append(torch.tensor([7.0], dtype=torch.float64))
@@ -59,4 +60,28 @@ def test_calibration_progress_round_trip_and_resume_equivalence(
             path,
             expected_identity="different",
             candidate_counts={"energy": 2, "force": 1},
+            expected_structure_count=2,
+        )
+
+
+def test_calibration_progress_rejects_corrupted_next_index(tmp_path: Path) -> None:
+    path = tmp_path / "progress.npz"
+    save_calibration_progress(
+        path,
+        identity="cal",
+        next_structure_index=3,
+        energy_residuals=[torch.tensor([1.0, 2.0], dtype=torch.float64)],
+        force_residuals=[torch.tensor([3.0], dtype=torch.float64)],
+        q_values={
+            "energy": [[torch.tensor([0.1, 0.2], dtype=torch.float64)]],
+            "force": [[torch.tensor([0.3], dtype=torch.float64)]],
+        },
+    )
+
+    with pytest.raises(ValueError, match="next index"):
+        load_calibration_progress(
+            path,
+            expected_identity="cal",
+            candidate_counts={"energy": 1, "force": 1},
+            expected_structure_count=4,
         )

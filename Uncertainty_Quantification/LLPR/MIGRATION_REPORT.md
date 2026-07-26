@@ -212,6 +212,9 @@ energy 与 force 分别在 validation 上以 Gaussian NLL 选 η；test 未参�
 full verify = 5 manifests / 12 declared files; residual progress files = 0
 ```
 
+此外，n20 门控测试在第 6 个校准结构处注入中断，确认第 5 个结构后的原子进度文件存在；
+恢复运行后进度文件被清理，且所选 fixed η/Alpha 与不中断运行完全一致。
+
 ```bash
 tox -e llpr-tests -- -m "not llpr_n20 and not llpr_legacy" -q
 
@@ -235,9 +238,9 @@ tox -e lint
 结果：
 
 ```text
-fast LLPR tests = 61 passed, 2 deselected
-n20 tests       = 2 passed, 53 deselected
-lint            = ruff + mypy (56 files) + sphinx-lint passed
+fast LLPR tests = 62 passed, 2 deselected
+n20 tests       = 2 passed, 62 deselected
+lint            = ruff + mypy (59 files) + sphinx-lint passed
 formal verify   = full, 5 manifests, 69 verified files
 ```
 

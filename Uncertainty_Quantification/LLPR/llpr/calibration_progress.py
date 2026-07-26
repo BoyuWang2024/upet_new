@@ -46,6 +46,7 @@ def save_calibration_progress(
 def load_calibration_progress(
     path: Path,
     *,
+    expected_structure_count: int,
     expected_identity: str,
     candidate_counts: Mapping[str, int],
 ) -> tuple[
@@ -65,8 +66,14 @@ def load_calibration_progress(
         next_index = int(archive["next_structure_index"].item())
         if next_index < 0:
             raise ValueError("calibration progress next index must be non-negative")
+        if next_index > expected_structure_count:
+            raise ValueError("calibration progress next index exceeds validation size")
         energy = torch.from_numpy(archive["energy_residuals"].copy()).to(torch.float64)
         force = torch.from_numpy(archive["force_residuals"].copy()).to(torch.float64)
+        if energy.numel() != next_index:
+            raise ValueError(
+                "calibration progress next index does not match energy residual count"
+            )
         if not bool(torch.isfinite(energy).all()) or not bool(
             torch.isfinite(force).all()
         ):

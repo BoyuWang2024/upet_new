@@ -201,6 +201,7 @@ def run_calibrate(config: LLPRConfig) -> Path:
             progress_path,
             expected_identity=identity_value,
             candidate_counts=candidate_counts,
+            expected_structure_count=validation.structure_count,
         )
     else:
         energy_residuals = []
