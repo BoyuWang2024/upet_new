@@ -1,11 +1,18 @@
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
 from ase import Atoms
 
+from Uncertainty_Quantification.LLPR.llpr.artifacts import sha256_file
 from Uncertainty_Quantification.LLPR.llpr.calibration import CalibrationRecord
 from Uncertainty_Quantification.LLPR.llpr.data import LLPRSample
+from Uncertainty_Quantification.LLPR.llpr.evaluation_shards import (
+    validate_evaluation_shard,
+)
 from Uncertainty_Quantification.LLPR.llpr.inference import (
+    _flush_shard,
     evaluate_structure,
     merge_structure_results,
     summarize_evaluation,
@@ -129,7 +136,30 @@ def test_merge_results_rebuilds_global_force_offsets() -> None:
 
     assert merged["structure_index"].tolist() == [7, 8]
     assert merged["force_offsets"].tolist() == [0, 6, 12]
+
     assert merged["force_structure_index"].tolist() == [7] * 6 + [8] * 6
+
+
+def test_resume_rejects_corrupted_shard_counts(tmp_path: Path) -> None:
+    sample, jacobians, calibration, solvers = _fixture()
+    first = evaluate_structure(sample, jacobians, calibration, solvers)
+    second_sample = LLPRSample(
+        index=8,
+        atoms=sample.atoms,
+        energy_reference_total=sample.energy_reference_total,
+        force_reference=sample.force_reference,
+    )
+    second = evaluate_structure(second_sample, jacobians, calibration, solvers)
+    shard, arrays = _flush_shard(tmp_path, 0, [first, second])
+    record = {
+        "path": shard.name,
+        "sha256": sha256_file(shard),
+        "structure_count": len(arrays["structure_index"]) + 1,
+        "force_component_count": len(arrays["force_residual"]),
+    }
+
+    with pytest.raises(ValueError, match="structure count"):
+        validate_evaluation_shard(tmp_path, record, expected_next_index=7)
 
 
 def test_summary_counts_and_rmse_use_canonical_rows() -> None:

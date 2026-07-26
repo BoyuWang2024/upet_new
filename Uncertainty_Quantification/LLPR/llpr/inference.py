@@ -28,6 +28,7 @@ from .checkpoint import load_checkpoint
 from .config import LLPRConfig
 from .curvature import run_build
 from .data import LLPRSample, build_system, dataset_identity, iter_samples
+from .evaluation_shards import validate_evaluation_shard
 from .observables import StructureJacobians, compute_structure_jacobians
 from .readout import discover_readout_layout
 from .ridge import quadratic_forms
@@ -281,11 +282,16 @@ def run_evaluate(config: LLPRConfig) -> Path:
         if progress["identity"] != identity_value:
             raise ValueError("evaluation identity mismatch in progress")
         shard_records = list(progress["shards"])
+        derived_next_index = 0
         for record in shard_records:
-            path = stage_dir / record["path"]
-            if sha256_file(path) != record["sha256"]:
-                raise ValueError(f"evaluation shard hash mismatch: {path}")
+            if not isinstance(record, dict):
+                raise ValueError("evaluation shard record must be an object")
+            derived_next_index = validate_evaluation_shard(
+                stage_dir, record, expected_next_index=derived_next_index
+            )
         next_index = int(progress["next_structure_index"])
+        if next_index != derived_next_index:
+            raise ValueError("evaluation progress next structure index mismatch")
     else:
         shard_records = []
         next_index = 0

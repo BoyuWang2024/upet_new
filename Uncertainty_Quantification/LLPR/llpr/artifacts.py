@@ -190,6 +190,48 @@ def _verify_npz(path: Path) -> None:
                 raise ValueError(f"non-finite array {name!r} in {path}")
 
 
+def _verify_legacy_raw(root: Path) -> int:
+    inventory_path = root / "inventory.json"
+    if not inventory_path.is_file():
+        return 0
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    rows = inventory.get("files") if isinstance(inventory, dict) else None
+    if not isinstance(rows, list):
+        raise ValueError("legacy raw inventory files must be a list")
+    raw_root = (root / "legacy_raw").resolve()
+    verified = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("legacy raw inventory row must be an object")
+        relative_value = row.get("destination_relative")
+        expected_sha = row.get("sha256")
+        expected_bytes = row.get("bytes")
+        if (
+            not isinstance(relative_value, str)
+            or not isinstance(expected_sha, str)
+            or not isinstance(expected_bytes, int)
+        ):
+            raise ValueError("legacy raw inventory row has invalid fields")
+        relative = Path(relative_value)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"legacy raw path escapes inventory root: {relative}")
+        path = (raw_root / relative).resolve()
+        try:
+            path.relative_to(raw_root)
+        except ValueError as error:
+            raise ValueError(
+                f"legacy raw path escapes inventory root: {relative}"
+            ) from error
+        if not path.is_file():
+            raise ValueError(f"legacy raw file is missing: {path}")
+        if path.stat().st_size != expected_bytes:
+            raise ValueError(f"legacy raw size mismatch: {path}")
+        if sha256_file(path) != expected_sha:
+            raise ValueError(f"legacy raw SHA mismatch: {path}")
+        verified += 1
+    return verified
+
+
 def verify_run(
     root: Path, level: Literal["metadata", "full"] = "metadata"
 ) -> dict[str, object]:
@@ -208,6 +250,8 @@ def verify_run(
             for relative in declared:
                 if isinstance(relative, str) and relative.endswith(".npz"):
                     _verify_npz(path.parent / relative)
+    if level == "full":
+        verified_files += _verify_legacy_raw(root)
     if not math.isfinite(float(verified_files)):
         raise AssertionError("unreachable non-finite file count")
     return {

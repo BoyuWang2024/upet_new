@@ -15,6 +15,10 @@ from .artifacts import (
     sha256_file,
     stage_identity,
 )
+from .calibration_progress import (
+    load_calibration_progress,
+    save_calibration_progress,
+)
 from .checkpoint import load_checkpoint
 from .config import LLPRConfig
 from .curvature import run_build
@@ -182,13 +186,33 @@ def run_calibrate(config: LLPRConfig) -> Path:
     device = torch.device(config.runtime.device)
     loaded = load_checkpoint(config.checkpoint, device=device, dtype=torch.float64)
     layout = discover_readout_layout(loaded.model)
-    energy_residuals: list[torch.Tensor] = []
-    force_residuals: list[torch.Tensor] = []
-    q_values: dict[str, list[list[torch.Tensor]]] = {
-        target: [[] for _ in target_candidates]
+    progress_path = stage_dir / "progress.npz"
+    candidate_counts = {
+        target: len(target_candidates)
         for target, target_candidates in candidates.items()
     }
+    if progress_path.exists():
+        (
+            energy_residuals,
+            force_residuals,
+            q_values,
+            next_index,
+        ) = load_calibration_progress(
+            progress_path,
+            expected_identity=identity_value,
+            candidate_counts=candidate_counts,
+        )
+    else:
+        energy_residuals = []
+        force_residuals = []
+        q_values = {
+            target: [[] for _ in target_candidates]
+            for target, target_candidates in candidates.items()
+        }
+        next_index = 0
     for sample in iter_samples(config.data.calibration):
+        if sample.index < next_index:
+            continue
         system = build_system(sample, loaded.model, device=device, dtype=torch.float64)
         jacobians = compute_structure_jacobians(
             loaded.model,
@@ -214,6 +238,26 @@ def run_calibrate(config: LLPRConfig) -> Path:
                 q_values[target][index].append(
                     quadratic_forms(candidate.cholesky, gradients)
                 )
+
+        next_index = sample.index + 1
+        if next_index % config.curvature.checkpoint_interval == 0:
+            save_calibration_progress(
+                progress_path,
+                identity=identity_value,
+                next_structure_index=next_index,
+                energy_residuals=energy_residuals,
+                force_residuals=force_residuals,
+                q_values=q_values,
+            )
+
+    save_calibration_progress(
+        progress_path,
+        identity=identity_value,
+        next_structure_index=next_index,
+        energy_residuals=energy_residuals,
+        force_residuals=force_residuals,
+        q_values=q_values,
+    )
 
     residuals = {
         "energy": torch.cat(energy_residuals),
@@ -263,4 +307,5 @@ def run_calibrate(config: LLPRConfig) -> Path:
             },
         },
     )
+    progress_path.unlink(missing_ok=True)
     return stage_dir

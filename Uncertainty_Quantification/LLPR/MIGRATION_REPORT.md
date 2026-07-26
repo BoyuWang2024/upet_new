@@ -133,7 +133,7 @@ force Spearman       = 0.45650505211915415
 ```
 
 生成 9 个绘图/统计文件；加入 plot manifest 后，full verify 检查 5 个
-manifest 和 17 个声明文件。
+manifest 和 69 个验证文件（17 个规范文件及 52 个 raw 审计文件）。
 
 ## 4. 旧文件分类
 
@@ -205,6 +205,12 @@ energy 与 force 分别在 validation 上以 Gaussian NLL 选 η；test 未参�
 ## 6. 执行与验证证据
 
 主要命令（均在 `upet_new` 环境运行）：
+复核修复后又在独立的 `n20_progress_acceptance` 实验目录从零执行 fixed/fit，
+用于真实覆盖 calibration checkpoint 写入和成功清理：
+
+```text
+full verify = 5 manifests / 12 declared files; residual progress files = 0
+```
 
 ```bash
 tox -e llpr-tests -- -m "not llpr_n20 and not llpr_legacy" -q
@@ -229,10 +235,10 @@ tox -e lint
 结果：
 
 ```text
-fast LLPR tests = 53 passed, 2 deselected
+fast LLPR tests = 61 passed, 2 deselected
 n20 tests       = 2 passed, 53 deselected
 lint            = ruff + mypy (56 files) + sphinx-lint passed
-formal verify   = full, 5 manifests, 17 declared files
+formal verify   = full, 5 manifests, 69 verified files
 ```
 
 第一次 full verify、第二次 identity-matched import、第二次 full verify 均退出
@@ -258,3 +264,11 @@ canonical curvature SHA/mtime unchanged = true/true
   `non_conservative_forces` 调用模型，同时保持规范制品字段命名不变。
 
 两处修复均先由真实验收失败定位，再重跑快速测试和 n20 全链路确认。
+
+独立代码复核后增加的完整性与恢复修复：
+
+- import 配置中的 checkpoint/train/validation/test SHA 必须与实际文件重新计算
+  的 SHA 一致，否则在 staging 前失败；
+- full verify 逐条校验 inventory 中 52 个 `legacy_raw` 文件的安全相对路径、
+  大小和 SHA；
+- calibration 保存 identity-bound、结构原子的进度并可等价恢复；

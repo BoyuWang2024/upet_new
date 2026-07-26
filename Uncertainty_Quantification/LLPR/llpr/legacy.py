@@ -55,6 +55,10 @@ class LegacyImportConfig(StrictModel):
     source_root: Path
     destination_root: Path
     experiment: str = Field(min_length=1)
+    checkpoint_path: Path
+    build_path: Path
+    validation_path: Path
+    test_path: Path
     checkpoint_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     build_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     validation_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -284,7 +288,14 @@ def _load_config(path: Path) -> LegacyImportConfig:
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError("legacy import config must be a mapping")
-    for name in ("source_root", "destination_root"):
+    for name in (
+        "source_root",
+        "destination_root",
+        "checkpoint_path",
+        "build_path",
+        "validation_path",
+        "test_path",
+    ):
         raw[name] = Path(raw[name]).expanduser().resolve()
     return LegacyImportConfig.model_validate(raw)
 
@@ -348,9 +359,27 @@ def _copy_inventory(
             raise ValueError(f"legacy raw copy hash mismatch: {target}")
 
 
+def _validate_input_identities(config: LegacyImportConfig) -> None:
+    inputs = {
+        "checkpoint": (config.checkpoint_path, config.checkpoint_sha256),
+        "build": (config.build_path, config.build_sha256),
+        "validation": (config.validation_path, config.validation_sha256),
+        "test": (config.test_path, config.test_sha256),
+    }
+    for name, (path, expected) in inputs.items():
+        if not path.is_file():
+            raise ValueError(f"{name} identity input does not exist: {path}")
+        actual = sha256_file(path)
+        if actual != expected:
+            raise ValueError(
+                f"{name} SHA mismatch: configured {expected}, actual {actual}"
+            )
+
+
 def import_legacy(config_path: Path) -> Path:
     """Audit, convert, verify, and atomically publish legacy artifacts."""
     config = _load_config(config_path)
+    _validate_input_identities(config)
     inventory = build_source_inventory(config.source_root)
     inventory_payload = [asdict(entry) for entry in inventory]
     inventory_hash = stable_id(inventory_payload, length=64)

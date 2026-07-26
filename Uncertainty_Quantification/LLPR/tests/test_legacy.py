@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import yaml
 
+from Uncertainty_Quantification.LLPR.llpr.artifacts import sha256_file, verify_run
 from Uncertainty_Quantification.LLPR.llpr.legacy import import_legacy
 
 
@@ -87,16 +88,28 @@ def _write_legacy_tree(root: Path) -> Path:
 
 def _write_config(tmp_path: Path, source: Path) -> Path:
     path = tmp_path / "import.yaml"
+    inputs = tmp_path / "inputs"
+    inputs.mkdir(exist_ok=True)
+    input_paths = {}
+    for name in ("checkpoint", "build", "validation", "test"):
+        input_path = inputs / f"{name}.bin"
+        input_path.write_bytes(f"audited-{name}".encode())
+        input_paths[name] = input_path
+
     path.write_text(
         yaml.safe_dump(
             {
                 "source_root": str(source),
                 "destination_root": str(tmp_path / "outputs"),
                 "experiment": "legacy",
-                "checkpoint_sha256": "a" * 64,
-                "build_sha256": "b" * 64,
-                "validation_sha256": "c" * 64,
-                "test_sha256": "d" * 64,
+                "checkpoint_path": str(input_paths["checkpoint"]),
+                "build_path": str(input_paths["build"]),
+                "validation_path": str(input_paths["validation"]),
+                "test_path": str(input_paths["test"]),
+                "checkpoint_sha256": sha256_file(input_paths["checkpoint"]),
+                "build_sha256": sha256_file(input_paths["build"]),
+                "validation_sha256": sha256_file(input_paths["validation"]),
+                "test_sha256": sha256_file(input_paths["test"]),
                 "expected_eta": {"energy": 1.0e-6, "force": 1.0e-6},
                 "expected_alpha": {"energy": 2.0, "force": 0.5},
                 "expected_dimensions": {
@@ -172,6 +185,35 @@ def test_changed_alpha_fails(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="Alpha"):
         import_legacy(_write_config(tmp_path, source))
+
+
+@pytest.mark.parametrize("name", ["checkpoint", "build", "validation", "test"])
+def test_changed_input_identity_fails(tmp_path: Path, name: str) -> None:
+    source = _write_legacy_tree(tmp_path / "old")
+    config = _write_config(tmp_path, source)
+    raw = yaml.safe_load(config.read_text())
+    raw[f"{name}_sha256"] = "0" * 64
+    config.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=f"{name}.*SHA mismatch"):
+        import_legacy(config)
+
+
+@pytest.mark.parametrize("mutation", ["tamper", "delete"])
+def test_full_verify_protects_legacy_raw(tmp_path: Path, mutation: str) -> None:
+    source = _write_legacy_tree(tmp_path / "old")
+    config = _write_config(tmp_path, source)
+    destination = import_legacy(config)
+    raw = destination / "legacy_raw/scripts/compute.py"
+    if mutation == "tamper":
+        raw.write_text("changed\n", encoding="utf-8")
+    else:
+        raw.unlink()
+
+    with pytest.raises(ValueError, match="legacy raw"):
+        verify_run(destination, level="full")
+    with pytest.raises(ValueError, match="legacy raw"):
+        import_legacy(config)
 
 
 def test_existing_different_identity_is_not_overwritten(tmp_path: Path) -> None:
