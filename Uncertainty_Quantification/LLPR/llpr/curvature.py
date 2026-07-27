@@ -18,6 +18,7 @@ from .artifacts import (
 )
 from .checkpoint import load_checkpoint
 from .config import LLPRConfig
+from .curvature_progress import load_validated_curvature_progress
 from .data import build_system, dataset_identity, iter_samples
 from .observables import (
     compute_structure_jacobians,
@@ -107,23 +108,28 @@ def save_curvature_progress(
 
 
 def load_curvature_progress(
-    path: Path, *, expected_identity: str
+    path: Path,
+    *,
+    expected_identity: str,
+    expected_energy_dimension: int,
+    expected_force_dimension: int,
+    expected_structure_count: int,
 ) -> tuple[CurvatureAccumulator, int]:
-    with np.load(path, allow_pickle=False) as archive:
-        identity = str(archive["identity"].item())
-        if identity != expected_identity:
-            raise ValueError(
-                f"curvature identity mismatch: {identity} != {expected_identity}"
-            )
-        accumulator = CurvatureAccumulator(
-            energy=torch.from_numpy(archive["energy"].copy()).to(torch.float64),
-            force=torch.from_numpy(archive["force"].copy()).to(torch.float64),
-            structure_count=int(archive["structure_count"].item()),
-            atom_count=int(archive["atom_count"].item()),
-            force_component_count=int(archive["force_component_count"].item()),
-        )
-        next_index = int(archive["next_structure_index"].item())
-    return accumulator, next_index
+    progress = load_validated_curvature_progress(
+        path,
+        expected_identity=expected_identity,
+        expected_energy_dimension=expected_energy_dimension,
+        expected_force_dimension=expected_force_dimension,
+        expected_structure_count=expected_structure_count,
+    )
+    accumulator = CurvatureAccumulator(
+        energy=torch.from_numpy(progress.energy).to(torch.float64),
+        force=torch.from_numpy(progress.force).to(torch.float64),
+        structure_count=progress.structure_count,
+        atom_count=progress.atom_count,
+        force_component_count=progress.force_component_count,
+    )
+    return accumulator, progress.next_structure_index
 
 
 def _curvature_identity(config: LLPRConfig, build_sha256: str) -> dict[str, object]:
@@ -169,7 +175,11 @@ def run_build(config: LLPRConfig) -> Path:
     layout = discover_readout_layout(loaded.model)
     if progress_path.exists():
         accumulator, next_index = load_curvature_progress(
-            progress_path, expected_identity=identity_value
+            progress_path,
+            expected_identity=identity_value,
+            expected_energy_dimension=layout.energy.dimension,
+            expected_force_dimension=layout.force.dimension,
+            expected_structure_count=data_identity.structure_count,
         )
     else:
         accumulator = CurvatureAccumulator.zeros(

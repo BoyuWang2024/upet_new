@@ -80,8 +80,13 @@ def test_progress_round_trip_and_identity_guard(tmp_path: Path) -> None:
     accumulator.force[:] = torch.eye(3, dtype=torch.float64)
 
     save_curvature_progress(path, accumulator, next_structure_index=2, identity="abc")
-    restored, next_index = load_curvature_progress(path, expected_identity="abc")
-
+    restored, next_index = load_curvature_progress(
+        path,
+        expected_identity="abc",
+        expected_energy_dimension=2,
+        expected_force_dimension=3,
+        expected_structure_count=2,
+    )
     assert next_index == 2
     assert restored.structure_count == 2
     assert restored.atom_count == 5
@@ -89,4 +94,10 @@ def test_progress_round_trip_and_identity_guard(tmp_path: Path) -> None:
     np.testing.assert_array_equal(restored.energy.numpy(), np.eye(2))
     np.testing.assert_array_equal(restored.force.numpy(), np.eye(3))
     with pytest.raises(ValueError, match="curvature identity mismatch"):
-        load_curvature_progress(path, expected_identity="different")
+        load_curvature_progress(
+            path,
+            expected_identity="different",
+            expected_energy_dimension=2,
+            expected_force_dimension=3,
+            expected_structure_count=2,
+        )
