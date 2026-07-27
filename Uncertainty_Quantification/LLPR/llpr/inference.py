@@ -16,7 +16,7 @@ from .artifacts import (
     RunPaths,
     atomic_json_dump,
     atomic_npz_save,
-    load_complete_manifest,
+    load_verified_manifest,
     sha256_file,
     stage_identity,
 )
@@ -244,8 +244,10 @@ def run_evaluate(config: LLPRConfig) -> Path:
     """Evaluate the configured test dataset with resumable complete shards."""
     curvature_dir = run_build(config)
     calibration_dir = run_calibrate(config)
-    curvature_manifest = load_complete_manifest(curvature_dir / "manifest.json")
-    calibration_manifest = load_complete_manifest(calibration_dir / "manifest.json")
+    curvature_manifest = load_verified_manifest(
+        curvature_dir / "manifest.json", verify_npz=True
+    )
+    calibration_manifest = load_verified_manifest(calibration_dir / "manifest.json")
     test = dataset_identity(config.data.test)
     if (
         config.data.test_expected_sha256 is not None
@@ -270,7 +272,9 @@ def run_evaluate(config: LLPRConfig) -> Path:
     )
     manifest_path = stage_dir / "manifest.json"
     if manifest_path.exists():
-        load_complete_manifest(manifest_path, {"identity": identity_value})
+        load_verified_manifest(
+            manifest_path, {"identity": identity_value}, verify_npz=True
+        )
         return stage_dir
     stage_dir.mkdir(parents=True, exist_ok=True)
     shards_dir = stage_dir / "shards"

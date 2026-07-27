@@ -12,6 +12,7 @@ from Uncertainty_Quantification.LLPR.llpr.artifacts import (
     atomic_npz_save,
     canonical_json,
     load_complete_manifest,
+    load_verified_manifest,
     sha256_file,
     stable_id,
     stage_identity,
@@ -115,3 +116,40 @@ def test_atomic_json_is_stable_and_terminated(tmp_path: Path) -> None:
         path.read_text(encoding="utf-8")
         == json.dumps({"a": 2, "z": 1}, indent=2, sort_keys=True) + "\n"
     )
+
+
+def test_verified_manifest_rejects_escaping_declared_path(tmp_path: Path) -> None:
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"data")
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    atomic_json_dump(
+        stage / "manifest.json",
+        {
+            "status": "complete",
+            "identity": "x",
+            "files": {"../outside.bin": sha256_file(outside)},
+        },
+    )
+
+    with pytest.raises(ValueError, match="escapes"):
+        load_verified_manifest(stage / "manifest.json")
+
+
+def test_verified_manifest_rejects_tampered_declared_file(tmp_path: Path) -> None:
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    artifact = stage / "artifact.bin"
+    artifact.write_bytes(b"original")
+    atomic_json_dump(
+        stage / "manifest.json",
+        {
+            "status": "complete",
+            "identity": "x",
+            "files": {"artifact.bin": sha256_file(artifact)},
+        },
+    )
+    artifact.write_bytes(b"changed")
+
+    with pytest.raises(ValueError, match="SHA mismatch"):
+        load_verified_manifest(stage / "manifest.json")

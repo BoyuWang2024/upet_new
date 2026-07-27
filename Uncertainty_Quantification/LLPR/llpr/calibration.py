@@ -11,7 +11,7 @@ import torch
 from .artifacts import (
     RunPaths,
     atomic_json_dump,
-    load_complete_manifest,
+    load_verified_manifest,
     sha256_file,
     stage_identity,
 )
@@ -155,7 +155,9 @@ def _candidates(
 def run_calibrate(config: LLPRConfig) -> Path:
     """Calibrate Alpha and optionally eta using validation data only."""
     curvature_dir = run_build(config)
-    curvature_manifest = load_complete_manifest(curvature_dir / "manifest.json")
+    curvature_manifest = load_verified_manifest(
+        curvature_dir / "manifest.json", verify_npz=True
+    )
     validation = dataset_identity(config.data.calibration)
     if (
         config.data.calibration_expected_sha256 is not None
@@ -175,7 +177,7 @@ def run_calibrate(config: LLPRConfig) -> Path:
     stage_dir = RunPaths(root).calibration / identity_value
     manifest_path = stage_dir / "manifest.json"
     if manifest_path.exists():
-        load_complete_manifest(manifest_path, {"identity": identity_value})
+        load_verified_manifest(manifest_path, {"identity": identity_value})
         return stage_dir
     stage_dir.mkdir(parents=True, exist_ok=True)
 

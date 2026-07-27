@@ -162,7 +162,27 @@ class RunPaths:
         return self.root / "legacy_raw"
 
 
-def _verify_declared_files(root: Path, manifest: Mapping[str, object]) -> int:
+def _resolve_declared_path(root: Path, relative_value: str) -> Path:
+    relative = Path(relative_value)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"declared artifact path escapes manifest root: {relative}")
+    resolved_root = Path(root).resolve()
+    path = (resolved_root / relative).resolve()
+    try:
+        path.relative_to(resolved_root)
+    except ValueError as error:
+        raise ValueError(
+            f"declared artifact path escapes manifest root: {relative}"
+        ) from error
+    return path
+
+
+def _verify_declared_files(
+    root: Path,
+    manifest: Mapping[str, object],
+    *,
+    verify_npz: bool = False,
+) -> int:
     files = manifest.get("files", {})
     if not isinstance(files, dict):
         raise ValueError("manifest files must be an object")
@@ -170,7 +190,7 @@ def _verify_declared_files(root: Path, manifest: Mapping[str, object]) -> int:
     for relative, expected_sha in files.items():
         if not isinstance(relative, str) or not isinstance(expected_sha, str):
             raise ValueError("manifest file hashes must map strings to strings")
-        path = root / relative
+        path = _resolve_declared_path(root, relative)
         if not path.is_file():
             raise ValueError(f"declared artifact is missing: {path}")
         actual_sha = sha256_file(path)
@@ -178,8 +198,23 @@ def _verify_declared_files(root: Path, manifest: Mapping[str, object]) -> int:
             raise ValueError(
                 f"artifact SHA mismatch for {path}: {actual_sha} != {expected_sha}"
             )
+        if verify_npz and path.suffix == ".npz":
+            _verify_npz(path)
         verified += 1
     return verified
+
+
+def load_verified_manifest(
+    path: Path,
+    expected_identity: Mapping[str, object] | None = None,
+    *,
+    verify_npz: bool = False,
+) -> dict[str, object]:
+    """Load a complete manifest and verify all declared artifacts."""
+    path = Path(path)
+    manifest = load_complete_manifest(path, expected_identity)
+    _verify_declared_files(path.parent, manifest, verify_npz=verify_npz)
+    return manifest
 
 
 def _verify_npz(path: Path) -> None:
@@ -243,13 +278,9 @@ def verify_run(
     verified_files = 0
     for path in manifests:
         manifest = load_complete_manifest(path)
-        verified_files += _verify_declared_files(path.parent, manifest)
-        if level == "full":
-            declared = manifest.get("files", {})
-            assert isinstance(declared, dict)
-            for relative in declared:
-                if isinstance(relative, str) and relative.endswith(".npz"):
-                    _verify_npz(path.parent / relative)
+        verified_files += _verify_declared_files(
+            path.parent, manifest, verify_npz=level == "full"
+        )
     if level == "full":
         verified_files += _verify_legacy_raw(root)
     if not math.isfinite(float(verified_files)):

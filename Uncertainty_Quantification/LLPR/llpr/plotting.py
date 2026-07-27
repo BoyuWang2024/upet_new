@@ -15,7 +15,7 @@ from scipy.stats import pearsonr, spearmanr
 
 from .artifacts import (
     atomic_json_dump,
-    load_complete_manifest,
+    load_verified_manifest,
     sha256_file,
     stage_identity,
 )
@@ -165,7 +165,7 @@ def standardized_residual_cdf(
 def _find_evaluation(config: PlotConfig) -> tuple[Path, dict[str, object]]:
     candidates: list[tuple[Path, dict[str, object]]] = []
     for path in sorted((config.run_root / "evaluation").glob("*/*/manifest.json")):
-        manifest = load_complete_manifest(path)
+        manifest = load_verified_manifest(path, verify_npz=True)
         identity = str(manifest.get("identity", ""))
         if config.evaluation_identity is None or identity == config.evaluation_identity:
             candidates.append((path.parent, manifest))
@@ -330,7 +330,7 @@ def run_plot(config: PlotConfig) -> Path:
     destination = config.run_root / "plots" / plot_id
     manifest_path = destination / "manifest.json"
     if manifest_path.exists():
-        load_complete_manifest(manifest_path, {"identity": plot_id})
+        load_verified_manifest(manifest_path, {"identity": plot_id})
         return destination
 
     staging = destination.parent / f".{plot_id}.{uuid.uuid4().hex}.staging"

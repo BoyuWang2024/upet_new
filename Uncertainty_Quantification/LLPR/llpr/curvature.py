@@ -12,7 +12,7 @@ from .artifacts import (
     RunPaths,
     atomic_json_dump,
     atomic_npz_save,
-    load_complete_manifest,
+    load_verified_manifest,
     sha256_file,
     stage_identity,
 )
@@ -157,7 +157,9 @@ def run_build(config: LLPRConfig) -> Path:
     stage_dir = paths.curvature / identity_value
     manifest_path = stage_dir / "manifest.json"
     if manifest_path.exists():
-        load_complete_manifest(manifest_path, {"identity": identity_value})
+        load_verified_manifest(
+            manifest_path, {"identity": identity_value}, verify_npz=True
+        )
         return stage_dir
     stage_dir.mkdir(parents=True, exist_ok=True)
     progress_path = stage_dir / "progress.npz"
