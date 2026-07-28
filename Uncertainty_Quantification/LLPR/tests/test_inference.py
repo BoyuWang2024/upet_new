@@ -6,12 +6,12 @@ import torch
 from ase import Atoms
 
 from Uncertainty_Quantification.LLPR.llpr.artifacts import sha256_file
-from Uncertainty_Quantification.LLPR.llpr.calibration import CalibrationRecord
 from Uncertainty_Quantification.LLPR.llpr.data import LLPRSample
 from Uncertainty_Quantification.LLPR.llpr.evaluation_shards import (
     validate_evaluation_shard,
 )
 from Uncertainty_Quantification.LLPR.llpr.inference import (
+    AppliedCalibration,
     _flush_shard,
     evaluate_structure,
     merge_structure_results,
@@ -20,26 +20,19 @@ from Uncertainty_Quantification.LLPR.llpr.inference import (
 from Uncertainty_Quantification.LLPR.llpr.observables import StructureJacobians
 
 
-def _calibration(target: str, alpha: float) -> CalibrationRecord:
-    return CalibrationRecord(
+def _calibration(target: str, alpha: float) -> AppliedCalibration:
+    return AppliedCalibration(
         target=target,
         eta=1.0e-6,
         alpha=alpha,
         alpha_sq=alpha**2,
-        gaussian_nll=1.0,
-        condition_number=2.0,
-        condition_warning=False,
-        count=10,
-        coverage_1sigma=0.5,
-        coverage_2sigma=0.9,
-        coverage_3sigma=1.0,
     )
 
 
 def _fixture() -> tuple[
     LLPRSample,
     StructureJacobians,
-    dict[str, CalibrationRecord],
+    dict[str, AppliedCalibration],
     dict[str, torch.Tensor],
 ]:
     atoms = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.7]])

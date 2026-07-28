@@ -23,7 +23,6 @@ from .artifacts import (
     stage_identity,
     verify_run,
 )
-from .calibration import gaussian_nll
 from .inference import summarize_evaluation
 
 
@@ -45,7 +44,16 @@ class LegacyDimensions(StrictModel):
     total: int = Field(gt=0)
 
 
-class LegacyCounts(StrictModel):
+class LegacyBuildCounts(StrictModel):
+    structures: int = Field(gt=0)
+
+
+class LegacyValidationCounts(StrictModel):
+    energy: int = Field(gt=0)
+    force_components: int = Field(gt=0)
+
+
+class LegacyTestCounts(StrictModel):
     structures: int = Field(gt=0)
     atoms: int = Field(gt=0)
     force_components: int = Field(gt=0)
@@ -66,7 +74,9 @@ class LegacyImportConfig(StrictModel):
     expected_eta: LegacyTargets
     expected_alpha: LegacyTargets
     expected_dimensions: LegacyDimensions
-    expected_counts: LegacyCounts
+    expected_build_counts: LegacyBuildCounts
+    expected_validation_counts: LegacyValidationCounts
+    expected_test_counts: LegacyTestCounts
 
 
 @dataclass(frozen=True)
@@ -210,13 +220,30 @@ def validate_legacy_calibration(
     ):
         raise ValueError("legacy readout dimensions mismatch")
 
+    counts = config.expected_validation_counts
+    energy_count = int(summary["energy_calibration"]["valid_count"])
+    force_count = int(summary["force_calibration"]["valid_count"])
+    if (energy_count, force_count) != (counts.energy, counts.force_components):
+        raise ValueError(
+            f"legacy validation counts mismatch: {(energy_count, force_count)}"
+        )
+
+
+def validate_legacy_build(
+    summary: dict[str, Any],
+    config: LegacyImportConfig,
+) -> None:
+    structures = int(summary["num_structures_used"])
+    if structures != config.expected_build_counts.structures:
+        raise ValueError(f"legacy build structure count mismatch: {structures}")
+
 
 def validate_legacy_evaluation(
     details: dict[str, np.ndarray],
     summary: dict[str, Any],
     config: LegacyImportConfig,
 ) -> None:
-    counts = config.expected_counts
+    counts = config.expected_test_counts
     structures = len(details["structure_index"])
     atoms = int(np.sum(details["num_atoms"]))
     components = len(details["force_residual"])
@@ -305,40 +332,27 @@ def _load_details(path: Path) -> dict[str, np.ndarray]:
         return {name: archive[name].copy() for name in archive.files}
 
 
-def _coverage(residual: np.ndarray, variance: np.ndarray, level: int) -> float:
-    return float(np.mean(np.abs(residual) <= level * np.sqrt(variance)))
-
-
-def _calibration_record(
+def _legacy_calibration_record(
     target: str,
     eta: float,
     alpha: float,
-    residual: np.ndarray,
-    raw_variance: np.ndarray,
+    count: int,
     condition_number: float,
 ) -> dict[str, object]:
-    variance = alpha**2 * raw_variance
     return {
         "target": target,
         "eta": eta,
         "alpha": alpha,
         "alpha_sq": alpha**2,
-        "gaussian_nll": gaussian_nll(
-            torch_from_numpy(residual), torch_from_numpy(variance)
-        ),
+        "gaussian_nll": None,
         "condition_number": condition_number,
         "condition_warning": condition_number > 1.0e10,
-        "count": len(residual),
-        "coverage_1sigma": _coverage(residual, variance, 1),
-        "coverage_2sigma": _coverage(residual, variance, 2),
-        "coverage_3sigma": _coverage(residual, variance, 3),
+        "count": count,
+        "coverage_1sigma": None,
+        "coverage_2sigma": None,
+        "coverage_3sigma": None,
+        "diagnostics_status": "unavailable_from_legacy_validation_summary",
     }
-
-
-def torch_from_numpy(value: np.ndarray):
-    import torch
-
-    return torch.from_numpy(np.asarray(value, dtype=np.float64))
 
 
 def _condition_number(matrix: np.ndarray, eta: float) -> float:
@@ -394,7 +408,11 @@ def import_legacy(config_path: Path) -> Path:
             "eta": config.expected_eta.model_dump(),
             "alpha": config.expected_alpha.model_dump(),
             "dimensions": config.expected_dimensions.model_dump(),
-            "counts": config.expected_counts.model_dump(),
+            "counts": {
+                "build": config.expected_build_counts.model_dump(),
+                "validation": config.expected_validation_counts.model_dump(),
+                "test": config.expected_test_counts.model_dump(),
+            },
         },
     )
     destination = config.destination_root / config.experiment
@@ -432,10 +450,17 @@ def import_legacy(config_path: Path) -> Path:
             force_dim=config.expected_dimensions.force,
         )
         legacy_summary_path = results / "LLPR/llpr_test_full_gpu_summary.json"
+        build_summary = json.loads(
+            (results / "Hef_full_run_summary.json").read_text(encoding="utf-8")
+        )
+        validation_summary = json.loads(
+            (results / "alpha_val_full_joint_summary.json").read_text(encoding="utf-8")
+        )
         legacy_details_path = results / "LLPR/llpr_test_full_gpu_details.npz"
         legacy_summary = json.loads(legacy_summary_path.read_text(encoding="utf-8"))
         details = _load_details(legacy_details_path)
-        validate_legacy_calibration(legacy_summary, config)
+        validate_legacy_build(build_summary, config)
+        validate_legacy_calibration(validation_summary, config)
         validate_legacy_evaluation(details, legacy_summary, config)
 
         curvature_identity = stage_identity(
@@ -463,9 +488,7 @@ def import_legacy(config_path: Path) -> Path:
                 "energy_dimension": config.expected_dimensions.energy,
                 "force_dimension": config.expected_dimensions.force,
                 "total_dimension": config.expected_dimensions.total,
-                "structure_count": config.expected_counts.structures,
-                "atom_count": config.expected_counts.atoms,
-                "force_component_count": config.expected_counts.force_components,
+                "structure_count": config.expected_build_counts.structures,
                 "condition_number_energy_h_plus_eta_i": condition_energy,
                 "condition_number_force_h_plus_eta_i": condition_force,
                 "legacy_eta_squared_diagnostic": "raw provenance only",
@@ -498,20 +521,18 @@ def import_legacy(config_path: Path) -> Path:
         calibration_dir = (
             staging / "calibration" / str(calibration_identity["identity"])
         )
-        energy_record = _calibration_record(
+        energy_record = _legacy_calibration_record(
             "energy",
             config.expected_eta.energy,
             config.expected_alpha.energy,
-            details["energy_residual"],
-            details["energy_raw_var"],
+            config.expected_validation_counts.energy,
             condition_energy,
         )
-        force_record = _calibration_record(
+        force_record = _legacy_calibration_record(
             "force",
             config.expected_eta.force,
             config.expected_alpha.force,
-            details["force_residual"],
-            details["force_raw_var_component"],
+            config.expected_validation_counts.force_components,
             condition_force,
         )
         candidates_path = calibration_dir / "candidates.json"

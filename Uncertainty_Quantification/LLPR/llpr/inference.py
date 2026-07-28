@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 from collections.abc import Sequence
-from dataclasses import fields
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
@@ -20,10 +20,7 @@ from .artifacts import (
     sha256_file,
     stage_identity,
 )
-from .calibration import (
-    CalibrationRecord,
-    run_calibrate,
-)
+from .calibration import run_calibrate
 from .checkpoint import load_checkpoint
 from .config import LLPRConfig
 from .curvature import run_build
@@ -72,6 +69,14 @@ FORCE_FIELDS = {
 }
 
 
+@dataclass(frozen=True)
+class AppliedCalibration:
+    target: str
+    eta: float
+    alpha: float
+    alpha_sq: float
+
+
 def _positive_q(
     cholesky: torch.Tensor,
     gradients: torch.Tensor,
@@ -90,7 +95,7 @@ def _positive_q(
 def evaluate_structure(
     sample: LLPRSample,
     jacobians: StructureJacobians,
-    calibration: Mapping[str, CalibrationRecord],
+    calibration: Mapping[str, AppliedCalibration],
     solvers: Mapping[str, torch.Tensor],
 ) -> dict[str, np.ndarray]:
     """Evaluate one complete structure without recalibrating Alpha."""
@@ -214,19 +219,36 @@ def summarize_evaluation(
     }
 
 
-def _load_calibration(path: Path) -> dict[str, CalibrationRecord]:
+def _load_calibration(path: Path) -> dict[str, AppliedCalibration]:
     value = json.loads((path / "summary.json").read_text(encoding="utf-8"))
-    allowed = {field.name for field in fields(CalibrationRecord)}
-    return {
-        target: CalibrationRecord(
-            **{
-                key: item
-                for key, item in value["selected"][target].items()
-                if key in allowed
-            }
+    selected = value.get("selected")
+    if not isinstance(selected, dict):
+        raise ValueError("calibration summary selected must be a mapping")
+    result: dict[str, AppliedCalibration] = {}
+    for target in ("energy", "force"):
+        item = selected.get(target)
+        if not isinstance(item, dict):
+            raise ValueError(f"calibration summary has no {target} record")
+        record = AppliedCalibration(
+            target=str(item.get("target")),
+            eta=float(item["eta"]),
+            alpha=float(item["alpha"]),
+            alpha_sq=float(item["alpha_sq"]),
         )
-        for target in ("energy", "force")
-    }
+        if record.target != target:
+            raise ValueError(f"calibration target mismatch for {target}")
+        values = (record.eta, record.alpha, record.alpha_sq)
+        if not all(np.isfinite(values)) or not all(item > 0 for item in values):
+            raise ValueError(f"calibration {target} values must be finite and positive")
+        if not np.isclose(
+            record.alpha_sq,
+            record.alpha**2,
+            rtol=1.0e-12,
+            atol=0.0,
+        ):
+            raise ValueError(f"calibration {target} alpha_sq mismatch")
+        result[target] = record
+    return result
 
 
 def _flush_shard(

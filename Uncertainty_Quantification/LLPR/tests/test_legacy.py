@@ -25,6 +25,26 @@ def _write_legacy_tree(root: Path) -> Path:
     (fit / "reliability_matpes_linear_fit_summary.json").write_text("{}\n")
     (formal / "reliability_matpes_llpr.png").write_bytes(b"orphan")
 
+    (results / "Hef_full_run_summary.json").write_text(
+        json.dumps({"num_structures_used": 7}),
+        encoding="utf-8",
+    )
+    (results / "alpha_val_full_joint_summary.json").write_text(
+        json.dumps(
+            {
+                "damping_eta": 1.0e-6,
+                "alpha_energy": 2.0,
+                "alpha_force": 0.5,
+                "dim_theta_E": 2,
+                "dim_theta_F": 1,
+                "dim_theta_total": 3,
+                "energy_calibration": {"valid_count": 2},
+                "force_calibration": {"valid_count": 9},
+            }
+        ),
+        encoding="utf-8",
+    )
+
     h_e = np.zeros((3, 3), dtype=np.float64)
     h_f = np.zeros((3, 3), dtype=np.float64)
     h_e[:2, :2] = np.diag([2.0, 3.0])
@@ -117,7 +137,14 @@ def _write_config(tmp_path: Path, source: Path) -> Path:
                     "force": 1,
                     "total": 3,
                 },
-                "expected_counts": {
+                "expected_build_counts": {
+                    "structures": 7,
+                },
+                "expected_validation_counts": {
+                    "energy": 2,
+                    "force_components": 9,
+                },
+                "expected_test_counts": {
                     "structures": 1,
                     "atoms": 1,
                     "force_components": 3,
@@ -162,6 +189,24 @@ def test_import_is_model_free_and_idempotent(
         "incomplete",
         "orphan",
     }
+    curvature = next(first.glob("curvature/*/diagnostics.json"))
+    curvature_diagnostics = json.loads(curvature.read_text())
+    assert curvature_diagnostics["structure_count"] == 7
+    assert "atom_count" not in curvature_diagnostics
+    assert "force_component_count" not in curvature_diagnostics
+
+    calibration = next(first.glob("calibration/*/summary.json"))
+    selected = json.loads(calibration.read_text())["selected"]
+    for target, count in (("energy", 2), ("force", 9)):
+        record = selected[target]
+        assert record["count"] == count
+        assert record["gaussian_nll"] is None
+        assert record["coverage_1sigma"] is None
+        assert record["coverage_2sigma"] is None
+        assert record["coverage_3sigma"] is None
+        assert (
+            record["diagnostics_status"] == "unavailable_from_legacy_validation_summary"
+        )
 
 
 def test_tampered_joint_matrix_fails(tmp_path: Path) -> None:
@@ -178,7 +223,7 @@ def test_tampered_joint_matrix_fails(tmp_path: Path) -> None:
 
 def test_changed_alpha_fails(tmp_path: Path) -> None:
     source = _write_legacy_tree(tmp_path / "old")
-    path = source / "results/LLPR/llpr_test_full_gpu_summary.json"
+    path = source / "results/alpha_val_full_joint_summary.json"
     summary = json.loads(path.read_text())
     summary["alpha_force"] = 0.6
     path.write_text(json.dumps(summary))

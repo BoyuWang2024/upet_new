@@ -19,7 +19,12 @@ expected_dimensions:
   energy: 1026
   force: 3078
   total: 4104
-expected_counts:
+expected_build_counts:
+  structures: 348780
+expected_validation_counts:
+  energy: 19370
+  force_components: 458877
+expected_test_counts:
   structures: 19374
   atoms: 149321
   force_components: 447963
