@@ -1,129 +1,150 @@
 # UPET LLPR 旧成果迁移验收报告
 
-日期：2026-07-26  
-环境：`conda activate upet_new`  
-验收提交主题：`test: verify UPET LLPR migration end to end`
+日期：2026-07-28
+环境：`conda activate upet_new`
 
-## 1. 范围与结论
+## 结论
 
-旧目录：
-
-```text
-/home/lilong/code/UQ/upet/UQ_LLPR
-```
-
-旧正式成果源：
-
-```text
-/home/lilong/code/UQ/upet/UQ_LLPR/matpes_r2/Hef
-```
-
-新代码与成果目录：
-
-```text
-/home/lilong/code/UQ/upet_new/Uncertainty_Quantification/LLPR
-```
-
-正式迁移输出：
+旧 UPET LLPR 正式成果已经按固定 ridge 原样迁移到：
 
 ```text
 /home/lilong/code/UQ/upet_new/Uncertainty_Quantification/LLPR/outputs/matpes_r2_legacy
 ```
 
-结论：
+正式迁移没有加载模型，没有重新执行完整数据集的前向、Jacobian、曲率或校准计算。
+迁移程序只复制并审计旧原始文件，再从已保存的矩阵、Alpha 和测试明细生成规范视图。
 
-- 已按 fixed ridge 原样迁移旧正式 H、η、Alpha、LLPR details/summary；
-- 正式迁移未加载模型、未执行 train/validation/test 全量前向或 Jacobian；
-- 仅对 `matpes_n20.extxyz` 执行了 fixed 和 fit 两条真实全链路功能测试；
-- 正式输出已通过两次 full 校验和一次导入幂等性校验；
-- 正式绘图统计与旧 reference manifest 在
-  `rtol=1e-12, atol=1e-14` 下相符。
-
-## 2. 来源身份与文件哈希
-
-旧代码 Git commit：
+代码同时支持直接指定 `eta` 和在验证集拟合 `eta`；当前正式成果仍为直接指定：
 
 ```text
-3dab1f5e16fb37edeccf137f10a4b7e91ef21d44
+eta_energy = 1.0e-6
+eta_force  = 1.0e-6
 ```
 
-迁移 inventory：
+## 修正后的正式身份
 
 ```text
-inventory_sha256 = 6f5e3b2b9308e807bcb8ce6b4fca43eea4c54f36f76d9aa84843ab073708d587
-file_count       = 52
+legacy root = 463ae307034cf391
+curvature   = 406edc88d16fdcc7
+calibration = 50217238109b0418
+evaluation  = 28d0d911b3060988
+plot        = 761260bfde30937d
 ```
 
-输入哈希：
+来源标记：
+
+```text
+root / curvature / calibration / evaluation:
+  origin = legacy_import
+  legacy_fixed_ridge = true
+
+plot:
+  origin = derived
+  source_origin = legacy_import
+```
+
+正式数值阶段中不存在 `origin: recomputed`。
+
+## 输入身份
 
 ```text
 checkpoint = 879b1045391d88869522605a8b8b3cedeed74668e7062fdd7487548ab7b08004
 train      = 12ff9403254c955537827ba96c140ee1753a7410ada7910f13c42be0aa308cec
 validation = 5b2ce7f0835f0f69d27840116608ee264536d2cc0ac253a33625ece29f985eef
 test       = 1ffcdcad2fc6f0b0907b91cd29bfee340eb02cddf6b525268290c6329f56182d
-n20        = c92161329aab539064a2c2438a395cb01e38bfc91211c558aebbc1ff94702e3d
 ```
 
-## 3. 正式迁移身份与数值
-
-规范身份：
+迁移 inventory：
 
 ```text
-legacy root = cb141ef8c0b24c3c
-curvature   = 25721b77f57d3659
-calibration = bc6a0db34ca88ca1
-evaluation  = dd72e9f459fc1ba3
-plot        = 73dcfcfa4a9bb7b8
+inventory_sha256 = 0cf590fa39055b689d829aa80725426135fdacbf7bc6782fcf3e341532fc4517
+file_count       = 52
 ```
 
-所有正式数值阶段 manifest 均为：
+这 52 个 `legacy_raw` 文件与替换前正式树中的原始副本逐文件 SHA-256 完全一致。
+
+## 三类数据来源与计数
+
+曲率构建摘要：
 
 ```text
-origin = legacy_import
-legacy_fixed_ridge = true
+build structures = 348780
 ```
 
-固定参数：
+验证摘要：
 
 ```text
-eta_energy   = 1.0e-6
-eta_force    = 1.0e-6
-Alpha_energy = 1.1467388818005693
-Alpha_force  = 0.2095766082027508
+validation energy samples    = 19370
+validation force components  = 458877
 ```
 
-维度与正式计数：
+正式测试摘要与明细：
 
 ```text
-energy dimension       = 1026
-force dimension        = 3078
-total dimension        = 4104
 test structures        = 19374
 test atoms             = 149321
 test force components  = 447963
 ```
 
-规范 `H + eta I` 条件数：
+曲率 diagnostics 只记录可恢复的 build structure count，不再把测试 atom/force count
+错误写入曲率阶段。
+
+## 固定参数与诊断
+
+```text
+Alpha_energy = 1.1467388818005693
+Alpha_force  = 0.2095766082027508
+
+energy dimension = 1026
+force dimension  = 3078
+total dimension  = 4104
+```
+
+旧验证摘要没有逐样本验证残差和方差，不能重建验证 NLL 与 coverage。因此规范校准记录使用：
+
+```text
+gaussian_nll    = null
+coverage_1sigma = null
+coverage_2sigma = null
+coverage_3sigma = null
+diagnostics_status = unavailable_from_legacy_validation_summary
+```
+
+不会用测试集明细伪装成验证诊断。
+
+`H + eta I` 条件数：
 
 ```text
 energy = 1.0623512652391861e15
 force  = 1.3809081464650994e12
 ```
 
-两者均超过 `1e10`，因此 manifest 保留 `condition_warning=true`。固定
-`eta=1e-6` 的旧结果虽然 Cholesky、q 和方差均成功且为正，但不应据此声称数值
-稳健。旧 `H + eta^2 I` 条件诊断只作为 raw provenance 保存，未用于规范求解。
+两者均保留 `condition_warning=true`。迁移成功不代表该固定 `eta` 数值稳健。
 
-正式评估摘要：
+## 数值等价审计
+
+候选树发布前执行了以下只读比较：
 
 ```text
-energy RMSE/atom                 = 0.05493578732829762
-force RMSE/component             = 0.1506777498968727
-mean calibrated energy std       = 0.058678765166641764
-mean calibrated force comp. std  = 0.16204910666077416
+52 source/raw hashes exact       = true
+energy curvature array exact     = true
+force curvature array exact      = true
+44 evaluation detail arrays exact = true
 ```
 
-正式绘图相关性：
+数组比较使用 `numpy.array_equal`；含 NaN 的明细使用 `equal_nan=True`。因此正式旧数值没有
+被重新计算或近似转换。
+
+完整验证：
+
+```text
+status              = complete
+level               = full
+manifest_count      = 5
+verified_file_count = 69
+```
+
+## 绘图统计
 
 ```text
 energy log10 Pearson = 0.14123766264998672
@@ -132,146 +153,52 @@ force log10 Pearson  = 0.4116680400150901
 force Spearman       = 0.45650505211915415
 ```
 
-生成 9 个绘图/统计文件；加入 plot manifest 后，full verify 检查 5 个
-manifest 和 69 个验证文件（17 个规范文件及 52 个 raw 审计文件）。
+图由规范 evaluation 明细重新生成，因此标记为 derived，并显式绑定
+`source_origin: legacy_import`。
 
-## 4. 旧文件分类
+## 代码与小规模全链路验收
 
-```text
-authoritative = 48
-incomplete    = 1
-orphan        = 1
-legacy_smoke  = 2
-```
-
-非正式文件：
+常规测试：
 
 ```text
-incomplete:
-  results/LLPR/fit/reliability_matpes_linear_fit_summary.json
-orphan:
-  results/LLPR/reliability_matpes_llpr.png
-legacy_smoke:
-  results/llpr_test_details.npz
-  results/llpr_test_dry_run.log
+71 passed, 3 deselected
 ```
 
-这些文件保留在 `legacy_raw/` 中，但不会进入规范正式 curvature、
-calibration 或 evaluation。
-
-## 5. n20 全链路
-
-n20 共享 curvature：
+真实 n20 全链路：
 
 ```text
-curvature = 19782c0944bdbf86
-structures / atoms / force components = 20 / 143 / 429
+3 passed, 71 deselected
 ```
 
-fixed：
+覆盖：
+
+- fixed `eta` 全链路；
+- fit `eta` 全链路；
+- checkpoint/readout 真实维度；
+- 曲率在第 6 次 Jacobian 前中断、从前 5 个结构恢复；
+- 恢复运行与不间断运行的曲率数组和 diagnostics 完全一致。
+
+静态检查：
 
 ```text
-calibration = f7c784e86761226a
-evaluation  = 2b0dbdd481ffc0cb
-eta_energy  = 1.0e-6
-eta_force   = 1.0e-6
-Alpha_energy = 0.004065729676684197
-Alpha_force  = 0.00015999033492658578
+ruff format = passed
+ruff check  = passed
+mypy        = passed (63 source files)
+sphinx-lint = passed
 ```
 
-fit：
+独立代码复核从设计基线 `d8c6349` 检查到候选发布前 HEAD。代码层面无 Critical，
+也无未解决的 Important 问题；唯一发布阻断是替换旧正式目录并更新本报告，已纳入最终
+事务发布步骤。
 
-```text
-calibration = 8247bfc5b9068ead
-evaluation  = 8250ddea1d3e0aa2
-energy candidates = 7
-force candidates  = 7
-selected eta_energy = 0.003961338496504261
-selected eta_force  = 3.211714185382302e-05
-Alpha_energy = 0.004699296649766541
-Alpha_force  = 0.0001788234944392615
-```
+## 发布策略
 
-energy 与 force 分别在 validation 上以 Gaussian NLL 选 η；test 未参与
-η/Alpha 选择。两套 details 的 q、variance、std 均为有限正值，结构和分量无
-遗漏，并各自生成完整绘图。
+候选树先在独立目录生成并完成 full verify 与逐数组审计。正式发布采用同一文件系统内的
+目录重命名：
 
-真实门控验收结果：
+1. 旧正式目录重命名为临时备份；
+2. 已验证候选目录重命名为正式目录；
+3. 在正式路径再次运行 full verify 和逐数组/来源审计；
+4. 仅在全部通过后删除临时备份。
 
-```text
-2 passed, 53 deselected in 70.09s
-```
-
-## 6. 执行与验证证据
-
-主要命令（均在 `upet_new` 环境运行）：
-复核修复后又在独立的 `n20_progress_acceptance` 实验目录从零执行 fixed/fit，
-用于真实覆盖 calibration checkpoint 写入和成功清理：
-
-```text
-full verify = 5 manifests / 12 declared files; residual progress files = 0
-```
-
-此外，n20 门控测试在第 6 个校准结构处注入中断，确认第 5 个结构后的原子进度文件存在；
-恢复运行后进度文件被清理，且所选 fixed η/Alpha 与不中断运行完全一致。
-
-```bash
-tox -e llpr-tests -- -m "not llpr_n20 and not llpr_legacy" -q
-
-UPET_RUN_LLPR_N20=1 tox -e llpr-tests -- \
-  Uncertainty_Quantification/LLPR/tests/test_n20.py \
-  Uncertainty_Quantification/LLPR/tests/test_checkpoint_readout_data.py \
-  -m llpr_n20 -v
-
-python -m Uncertainty_Quantification.LLPR.llpr import-legacy \
-  --config Uncertainty_Quantification/LLPR/configs/import_legacy.yaml
-
-python -m Uncertainty_Quantification.LLPR.llpr verify \
-  --config Uncertainty_Quantification/LLPR/outputs/matpes_r2_legacy
-
-MPLBACKEND=Agg python -m Uncertainty_Quantification.LLPR.llpr plot \
-  --config Uncertainty_Quantification/LLPR/configs/plot_legacy.yaml
-
-tox -e lint
-```
-
-结果：
-
-```text
-fast LLPR tests = 62 passed, 2 deselected
-n20 tests       = 2 passed, 62 deselected
-lint            = ruff + mypy (59 files) + sphinx-lint passed
-formal verify   = full, 5 manifests, 69 verified files
-```
-
-第一次 full verify、第二次 identity-matched import、第二次 full verify 均退出
-0。第二次导入前后：
-
-```text
-formal details SHA/mtime   unchanged = true/true
-canonical curvature SHA/mtime unchanged = true/true
-```
-
-正式树中不存在 `origin: recomputed`。搜索到的 `build_system` /
-`Processing structure` 字样只位于原样复制的 `legacy_raw/scripts/` 源代码，
-不是本次迁移执行日志。`origin: recomputed` 仅存在于获准运行的
-`outputs/n20_smoke`。
-
-## 7. 兼容性修复
-
-真实 n20 测试发现并修复了两处当前依赖兼容问题：
-
-- 使用 vesin 公共 `NeighborList` API 替换已删除的
-  `metatomic.torch.ase_calculator._compute_ase_neighbors` 私有函数；
-- 使用 readout layout 已发现的 checkpoint 源键
-  `non_conservative_forces` 调用模型，同时保持规范制品字段命名不变。
-
-两处修复均先由真实验收失败定位，再重跑快速测试和 n20 全链路确认。
-
-独立代码复核后增加的完整性与恢复修复：
-
-- import 配置中的 checkpoint/train/validation/test SHA 必须与实际文件重新计算
-  的 SHA 一致，否则在 staging 前失败；
-- full verify 逐条校验 inventory 中 52 个 `legacy_raw` 文件的安全相对路径、
-  大小和 SHA；
-- calibration 保存 identity-bound、结构原子的进度并可等价恢复；
+这样可避免部分覆盖，并保证最终删除旧版本前仍可回滚。
