@@ -74,6 +74,7 @@ def _write_evaluation(root: Path) -> Path:
     atomic_json_dump(
         evaluation / "manifest.json",
         {
+            "origin": "legacy_import",
             "status": "complete",
             "identity": "eval",
             "files": {
@@ -102,6 +103,8 @@ def test_run_plot_publishes_complete_figures_and_statistics(
 
     manifest = json.loads((output / "manifest.json").read_text())
     assert manifest["status"] == "complete"
+    assert manifest["origin"] == "derived"
+    assert manifest["source_origin"] == "legacy_import"
     assert manifest["evaluation_identity"] == "eval"
     for name in (
         "energy_uncertainty_vs_error.png",

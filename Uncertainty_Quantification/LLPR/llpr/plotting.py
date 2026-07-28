@@ -378,6 +378,8 @@ def run_plot(config: PlotConfig) -> Path:
             staging / "manifest.json",
             {
                 **identity,
+                "origin": "derived",
+                "source_origin": evaluation_manifest["origin"],
                 "status": "complete",
                 "evaluation_identity": evaluation_manifest["identity"],
                 "statistics": {
