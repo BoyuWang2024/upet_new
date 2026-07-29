@@ -256,7 +256,6 @@ def run_build(config: LLPRConfig) -> Path:
     manifest = {
         **identity,
         "status": "complete",
-        "origin": "recomputed",
         "layout_hash": layout.layout_hash,
         "dataset_sha256": data_identity.sha256,
         "files": {

@@ -67,7 +67,7 @@ def inspect_training_metadata(
     )
 
 
-def validate_legacy_loss_contract(identity: CheckpointIdentity) -> None:
+def validate_loss_contract(identity: CheckpointIdentity) -> None:
     expected = {
         "loss_reduction": "mean",
         "energy_loss_weight": 1.0,
@@ -100,5 +100,5 @@ def load_checkpoint(
 
     model = load_model(str(config.path)).eval().to(device=device, dtype=dtype)
     identity = inspect_training_metadata(config.path, model, actual_sha)
-    validate_legacy_loss_contract(identity)
+    validate_loss_contract(identity)
     return LoadedCheckpoint(model=model, identity=identity)

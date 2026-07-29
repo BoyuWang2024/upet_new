@@ -138,10 +138,6 @@ class RunPaths:
         object.__setattr__(self, "root", Path(self.root))
 
     @property
-    def resolved_config(self) -> Path:
-        return self.root / "resolved-config.yaml"
-
-    @property
     def curvature(self) -> Path:
         return self.root / "curvature"
 
@@ -152,14 +148,6 @@ class RunPaths:
     @property
     def evaluation(self) -> Path:
         return self.root / "evaluation"
-
-    @property
-    def plots(self) -> Path:
-        return self.root / "plots"
-
-    @property
-    def legacy_raw(self) -> Path:
-        return self.root / "legacy_raw"
 
 
 def _resolve_declared_path(root: Path, relative_value: str) -> Path:
@@ -217,54 +205,51 @@ def load_verified_manifest(
     return manifest
 
 
+def publish_run_manifest(
+    root: Path,
+    *,
+    curvature_manifest: Mapping[str, object],
+    calibration_manifest: Mapping[str, object],
+    evaluation_manifest: Mapping[str, object],
+) -> Path:
+    """Publish the neutral root manifest for one complete LLPR run."""
+    manifests = {
+        "curvature_identity": curvature_manifest,
+        "calibration_identity": calibration_manifest,
+        "evaluation_identity": evaluation_manifest,
+    }
+    identities: dict[str, str] = {}
+    for name, manifest in manifests.items():
+        value = manifest.get("identity")
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"{name} manifest has no valid identity")
+        identities[name] = value
+
+    identity = stage_identity("run", identities)
+    manifest = {
+        **identity,
+        "status": "complete",
+        **identities,
+        "files": {},
+    }
+    path = Path(root) / "manifest.json"
+    if path.exists():
+        existing = load_complete_manifest(path)
+        if existing.get("identity") != identity["identity"]:
+            raise ValueError(
+                "run root already contains a different complete experiment"
+            )
+        return path
+    atomic_json_dump(path, manifest)
+    return path
+
+
 def _verify_npz(path: Path) -> None:
     with np.load(path, allow_pickle=False) as archive:
         for name in archive.files:
             array = archive[name]
             if np.issubdtype(array.dtype, np.number) and not np.all(np.isfinite(array)):
                 raise ValueError(f"non-finite array {name!r} in {path}")
-
-
-def _verify_legacy_raw(root: Path) -> int:
-    inventory_path = root / "inventory.json"
-    if not inventory_path.is_file():
-        return 0
-    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
-    rows = inventory.get("files") if isinstance(inventory, dict) else None
-    if not isinstance(rows, list):
-        raise ValueError("legacy raw inventory files must be a list")
-    raw_root = (root / "legacy_raw").resolve()
-    verified = 0
-    for row in rows:
-        if not isinstance(row, dict):
-            raise ValueError("legacy raw inventory row must be an object")
-        relative_value = row.get("destination_relative")
-        expected_sha = row.get("sha256")
-        expected_bytes = row.get("bytes")
-        if (
-            not isinstance(relative_value, str)
-            or not isinstance(expected_sha, str)
-            or not isinstance(expected_bytes, int)
-        ):
-            raise ValueError("legacy raw inventory row has invalid fields")
-        relative = Path(relative_value)
-        if relative.is_absolute() or ".." in relative.parts:
-            raise ValueError(f"legacy raw path escapes inventory root: {relative}")
-        path = (raw_root / relative).resolve()
-        try:
-            path.relative_to(raw_root)
-        except ValueError as error:
-            raise ValueError(
-                f"legacy raw path escapes inventory root: {relative}"
-            ) from error
-        if not path.is_file():
-            raise ValueError(f"legacy raw file is missing: {path}")
-        if path.stat().st_size != expected_bytes:
-            raise ValueError(f"legacy raw size mismatch: {path}")
-        if sha256_file(path) != expected_sha:
-            raise ValueError(f"legacy raw SHA mismatch: {path}")
-        verified += 1
-    return verified
 
 
 def verify_run(
@@ -281,8 +266,6 @@ def verify_run(
         verified_files += _verify_declared_files(
             path.parent, manifest, verify_npz=level == "full"
         )
-    if level == "full":
-        verified_files += _verify_legacy_raw(root)
     if not math.isfinite(float(verified_files)):
         raise AssertionError("unreachable non-finite file count")
     return {

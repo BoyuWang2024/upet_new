@@ -302,7 +302,6 @@ def run_calibrate(config: LLPRConfig) -> Path:
         {
             **identity,
             "status": "complete",
-            "origin": "recomputed",
             "curvature_identity": curvature_manifest["identity"],
             "files": {
                 candidates_path.name: sha256_file(candidates_path),

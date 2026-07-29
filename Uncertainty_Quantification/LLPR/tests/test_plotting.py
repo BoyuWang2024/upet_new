@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from Uncertainty_Quantification.LLPR.llpr.artifacts import (
     atomic_json_dump,
@@ -74,7 +75,6 @@ def _write_evaluation(root: Path) -> Path:
     atomic_json_dump(
         evaluation / "manifest.json",
         {
-            "origin": "legacy_import",
             "status": "complete",
             "identity": "eval",
             "files": {
@@ -90,11 +90,13 @@ def test_run_plot_publishes_complete_figures_and_statistics(
     tmp_path: Path,
 ) -> None:
     run_root = tmp_path / "run"
+    plot_root = tmp_path / "plots"
     _write_evaluation(run_root)
 
     output = run_plot(
         PlotConfig(
             run_root=run_root,
+            output_root=plot_root,
             bin_count=2,
             sample_size=100,
             seed=7,
@@ -103,9 +105,10 @@ def test_run_plot_publishes_complete_figures_and_statistics(
 
     manifest = json.loads((output / "manifest.json").read_text())
     assert manifest["status"] == "complete"
-    assert manifest["origin"] == "derived"
-    assert manifest["source_origin"] == "legacy_import"
+    assert "origin" not in manifest
+    assert "source_origin" not in manifest
     assert manifest["evaluation_identity"] == "eval"
+    assert output.parent == plot_root
     for name in (
         "energy_uncertainty_vs_error.png",
         "energy_uncertainty_vs_error.pdf",
@@ -131,6 +134,7 @@ def test_plotting_does_not_modify_evaluation_details(tmp_path: Path) -> None:
     run_plot(
         PlotConfig(
             run_root=run_root,
+            output_root=tmp_path / "plots",
             bin_count=2,
             sample_size=2,
             seed=3,
@@ -139,3 +143,10 @@ def test_plotting_does_not_modify_evaluation_details(tmp_path: Path) -> None:
 
     assert sha256_file(details) == before_hash
     assert details.stat().st_mtime_ns == before_mtime
+
+
+def test_plot_output_must_be_outside_formal_run(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+
+    with pytest.raises(ValueError, match="outside run_root"):
+        PlotConfig(run_root=run_root, output_root=run_root / "plots")

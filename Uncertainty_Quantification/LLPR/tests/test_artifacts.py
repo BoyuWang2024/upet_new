@@ -102,8 +102,6 @@ def test_run_paths_constructor_has_no_filesystem_side_effect(tmp_path: Path) -> 
     assert paths.curvature == root / "curvature"
     assert paths.calibration == root / "calibration"
     assert paths.evaluation == root / "evaluation"
-    assert paths.plots == root / "plots"
-    assert paths.legacy_raw == root / "legacy_raw"
     assert not root.exists()
 
 

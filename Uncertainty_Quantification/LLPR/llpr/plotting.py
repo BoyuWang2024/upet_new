@@ -26,16 +26,28 @@ class PlotConfig(StrictModel):
     """Configuration for plotting one completed evaluation."""
 
     run_root: Path
+    output_root: Path
     bin_count: int = Field(default=20, gt=0)
     sample_size: int = Field(default=200_000, gt=0)
     seed: int = 2026
     evaluation_identity: str | None = None
 
     @model_validator(mode="after")
-    def resolve_run_root(self) -> "PlotConfig":
-        root = self.run_root
-        if not root.is_absolute():
-            object.__setattr__(self, "run_root", resolve_repo_path(root))
+    def resolve_paths(self) -> "PlotConfig":
+        run_root = (
+            self.run_root.resolve()
+            if self.run_root.is_absolute()
+            else resolve_repo_path(self.run_root)
+        )
+        output_root = (
+            self.output_root.resolve()
+            if self.output_root.is_absolute()
+            else resolve_repo_path(self.output_root)
+        )
+        if output_root == run_root or run_root in output_root.parents:
+            raise ValueError("output_root must be outside run_root")
+        object.__setattr__(self, "run_root", run_root)
+        object.__setattr__(self, "output_root", output_root)
         return self
 
 
@@ -327,7 +339,7 @@ def run_plot(config: PlotConfig) -> Path:
         },
     )
     plot_id = str(identity["identity"])
-    destination = config.run_root / "plots" / plot_id
+    destination = config.output_root / plot_id
     manifest_path = destination / "manifest.json"
     if manifest_path.exists():
         load_verified_manifest(manifest_path, {"identity": plot_id})
@@ -378,8 +390,6 @@ def run_plot(config: PlotConfig) -> Path:
             staging / "manifest.json",
             {
                 **identity,
-                "origin": "derived",
-                "source_origin": evaluation_manifest["origin"],
                 "status": "complete",
                 "evaluation_identity": evaluation_manifest["identity"],
                 "statistics": {

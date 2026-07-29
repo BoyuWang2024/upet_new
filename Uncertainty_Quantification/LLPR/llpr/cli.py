@@ -12,7 +12,6 @@ from .calibration import run_calibrate as _run_calibrate
 from .config import load_llpr_config
 from .curvature import run_build as _run_build
 from .inference import run_evaluate as _run_evaluate
-from .legacy import import_legacy as _import_legacy
 from .plotting import load_plot_config
 from .plotting import run_plot as _run_plot
 
@@ -32,10 +31,6 @@ def run_evaluate(config_path: Path) -> Path:
     return _run_evaluate(load_llpr_config(config_path))
 
 
-def import_legacy(config_path: Path) -> Path:
-    return _import_legacy(config_path)
-
-
 def verify_run(run_root: Path) -> dict[str, object]:
     return _verify_run(run_root, level="full")
 
@@ -45,10 +40,10 @@ def run_plot(config_path: Path) -> Path:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the seven-command LLPR command-line interface."""
+    """Build the six-command LLPR command-line interface."""
     parser = argparse.ArgumentParser(
         prog="python -m Uncertainty_Quantification.LLPR.llpr",
-        description="Build, calibrate, evaluate, migrate, verify, and plot UPET LLPR.",
+        description="Build, calibrate, evaluate, verify, and plot UPET LLPR.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     descriptions = {
@@ -56,7 +51,6 @@ def build_parser() -> argparse.ArgumentParser:
         "calibrate": "Calibrate fixed or fitted ridge parameters on validation.",
         "evaluate": "Evaluate the configured test split.",
         "run": "Run build, calibrate, and evaluate in sequence.",
-        "import-legacy": "Audit and import legacy formal artifacts without inference.",
         "verify": "Fully verify all manifests below an output directory.",
         "plot": "Plot a completed evaluation without inference or recalibration.",
     }
@@ -87,7 +81,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         "build": run_build,
         "calibrate": run_calibrate,
         "evaluate": run_evaluate,
-        "import-legacy": import_legacy,
         "verify": verify_run,
         "plot": run_plot,
     }

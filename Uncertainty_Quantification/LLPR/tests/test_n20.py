@@ -55,6 +55,16 @@ def test_n20_fixed_and_fit_full_paths(
 ) -> None:
     fixed = load_llpr_config(CONFIGS / "cpu_n20_fixed.yaml")
     fitted = load_llpr_config(CONFIGS / "cpu_n20_fit.yaml")
+    fixed = fixed.model_copy(
+        update={
+            "output": fixed.output.model_copy(update={"root": tmp_path / "outputs"})
+        }
+    )
+    fitted = fitted.model_copy(
+        update={
+            "output": fitted.output.model_copy(update={"root": tmp_path / "outputs"})
+        }
+    )
 
     fixed_curvature = run_build(fixed)
     fixed_calibration = run_calibrate(fixed)
@@ -63,9 +73,14 @@ def test_n20_fixed_and_fit_full_paths(
     fitted_calibration = run_calibrate(fitted)
     fitted_evaluation = run_evaluate(fitted)
 
-    run_root = fixed.output.root / fixed.output.experiment
-    assert run_root == fitted.output.root / fitted.output.experiment
-    assert fixed_curvature == fitted_curvature
+    fixed_root = fixed.output.root / fixed.output.experiment
+    fitted_root = fitted.output.root / fitted.output.experiment
+    assert fixed_root != fitted_root
+    assert fixed_curvature != fitted_curvature
+    assert (
+        _manifest(fixed_curvature)["identity"]
+        == _manifest(fitted_curvature)["identity"]
+    )
     assert (
         _manifest(fixed_calibration)["curvature_identity"]
         == _manifest(fitted_calibration)["curvature_identity"]
@@ -91,7 +106,8 @@ def test_n20_fixed_and_fit_full_paths(
     for evaluation in (fixed_evaluation, fitted_evaluation):
         plot = run_plot(
             PlotConfig(
-                run_root=run_root,
+                run_root=evaluation.parents[2],
+                output_root=tmp_path / "plots",
                 evaluation_identity=str(_manifest(evaluation)["identity"]),
                 bin_count=5,
                 sample_size=10_000,
@@ -100,8 +116,10 @@ def test_n20_fixed_and_fit_full_paths(
         )
         assert (plot / "manifest.json").is_file()
 
-    result = verify_run(run_root, level="full")
-    assert result["status"] == "complete"
+    for run_root in (fixed_root, fitted_root):
+        result = verify_run(run_root, level="full")
+        assert result["status"] == "complete"
+        assert (run_root / "manifest.json").is_file()
 
     resume_output = fixed.output.model_copy(
         update={"root": tmp_path / "outputs", "experiment": "n20_resume_smoke"}

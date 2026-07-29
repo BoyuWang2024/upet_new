@@ -15,7 +15,7 @@ from Uncertainty_Quantification.LLPR.llpr.observables import (
 )
 
 
-def test_huber_curvature_and_legacy_scaling() -> None:
+def test_huber_curvature_and_force_component_scaling() -> None:
     accumulator = CurvatureAccumulator.zeros(energy_dim=2, force_dim=2)
     accumulator.add_structure(
         energy_gradient=torch.tensor([1.0, 2.0]),

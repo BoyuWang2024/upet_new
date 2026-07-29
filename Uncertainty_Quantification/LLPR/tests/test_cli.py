@@ -11,7 +11,6 @@ from Uncertainty_Quantification.LLPR.llpr import cli
         ("build", "run_build"),
         ("calibrate", "run_calibrate"),
         ("evaluate", "run_evaluate"),
-        ("import-legacy", "import_legacy"),
         ("verify", "verify_run"),
         ("plot", "run_plot"),
     ],
@@ -61,7 +60,7 @@ def test_run_stops_immediately_on_failure(monkeypatch: pytest.MonkeyPatch) -> No
     assert calls == ["build"]
 
 
-def test_help_lists_all_seven_commands(capsys: pytest.CaptureFixture[str]) -> None:
+def test_help_lists_all_six_commands(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as error:
         cli.main(["--help"])
 
@@ -72,7 +71,6 @@ def test_help_lists_all_seven_commands(capsys: pytest.CaptureFixture[str]) -> No
         "calibrate",
         "evaluate",
         "run",
-        "import-legacy",
         "verify",
         "plot",
     ):

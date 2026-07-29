@@ -17,6 +17,7 @@ from .artifacts import (
     atomic_json_dump,
     atomic_npz_save,
     load_verified_manifest,
+    publish_run_manifest,
     sha256_file,
     stage_identity,
 )
@@ -294,8 +295,14 @@ def run_evaluate(config: LLPRConfig) -> Path:
     )
     manifest_path = stage_dir / "manifest.json"
     if manifest_path.exists():
-        load_verified_manifest(
+        evaluation_manifest = load_verified_manifest(
             manifest_path, {"identity": identity_value}, verify_npz=True
+        )
+        publish_run_manifest(
+            root,
+            curvature_manifest=curvature_manifest,
+            calibration_manifest=calibration_manifest,
+            evaluation_manifest=evaluation_manifest,
         )
         return stage_dir
     stage_dir.mkdir(parents=True, exist_ok=True)
@@ -410,20 +417,23 @@ def run_evaluate(config: LLPRConfig) -> Path:
             "first_structure_indices": details["structure_index"][:10].tolist(),
         },
     )
-    atomic_json_dump(
-        manifest_path,
-        {
-            **identity,
-            "status": "complete",
-            "origin": "recomputed",
-            "curvature_identity": curvature_manifest["identity"],
-            "calibration_identity": calibration_manifest["identity"],
-            "files": {
-                details_path.name: sha256_file(details_path),
-                summary_path.name: sha256_file(summary_path),
-                preview_path.name: sha256_file(preview_path),
-            },
+    evaluation_manifest = {
+        **identity,
+        "status": "complete",
+        "curvature_identity": curvature_manifest["identity"],
+        "calibration_identity": calibration_manifest["identity"],
+        "files": {
+            details_path.name: sha256_file(details_path),
+            summary_path.name: sha256_file(summary_path),
+            preview_path.name: sha256_file(preview_path),
         },
+    }
+    atomic_json_dump(manifest_path, evaluation_manifest)
+    publish_run_manifest(
+        root,
+        curvature_manifest=curvature_manifest,
+        calibration_manifest=calibration_manifest,
+        evaluation_manifest=evaluation_manifest,
     )
     progress_path.unlink(missing_ok=True)
     if not config.output.keep_shards:

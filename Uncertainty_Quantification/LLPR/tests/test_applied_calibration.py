@@ -7,7 +7,7 @@ from Uncertainty_Quantification.LLPR.llpr.inference import (
 )
 
 
-def test_load_calibration_accepts_unavailable_legacy_diagnostics(
+def test_load_calibration_accepts_unavailable_diagnostics(
     tmp_path: Path,
 ) -> None:
     selected = {}
@@ -21,7 +21,7 @@ def test_load_calibration_accepts_unavailable_legacy_diagnostics(
             "coverage_1sigma": None,
             "coverage_2sigma": None,
             "coverage_3sigma": None,
-            "diagnostics_status": "unavailable_from_legacy_validation_summary",
+            "diagnostics_status": "unavailable",
         }
     (tmp_path / "summary.json").write_text(
         json.dumps({"mode": "fixed", "selected": selected}),
