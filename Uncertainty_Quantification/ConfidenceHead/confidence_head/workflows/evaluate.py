@@ -14,7 +14,12 @@ import torch
 import yaml
 from torch.utils.data import DataLoader
 
-from ..artifacts import atomic_torch_save, atomic_write_json, sha256_file
+from ..artifacts import (
+    atomic_torch_save,
+    atomic_write_json,
+    load_verified_torch,
+    sha256_file,
+)
 from ..binning import (
     BinningSpec,
     expected_error,
@@ -181,7 +186,17 @@ def evaluate_run(
     if not checkpoint.is_file():
         raise ValueError(f"evaluation checkpoint does not exist: {checkpoint}")
     checkpoint = _declared_artifact(run_dir, manifest, checkpoint)
-    snapshot = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    checkpoint_sha = next(
+        str(entry["sha256"])
+        for entry in manifest["artifacts"].values()
+        if isinstance(entry, Mapping)
+        and (run_dir / str(entry.get("path"))).resolve() == checkpoint
+    )
+    snapshot = load_verified_torch(
+        checkpoint,
+        expected_sha256=checkpoint_sha,
+        weights_only=False,
+    )
     if not isinstance(snapshot, Mapping):
         raise ValueError("checkpoint must contain a mapping")
     _checkpoint_identity(snapshot, manifest)

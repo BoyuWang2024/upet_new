@@ -20,7 +20,7 @@ import torch
 import yaml
 from torch.utils.data import DataLoader
 
-from ..artifacts import atomic_write_json, sha256_file
+from ..artifacts import atomic_write_json, load_verified_torch, sha256_file
 from ..binning import BinningSpec, fixed_linear_binning, labels_from_thresholds
 from ..cache import CachedSplitDataset, collate_cached_structures
 from ..config import ConfidenceConfig
@@ -471,7 +471,11 @@ def train_run(
             "sha256"
         ):
             raise ValueError("resume checkpoint sha256 mismatch")
-        snapshot = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        snapshot = load_verified_torch(
+            checkpoint,
+            expected_sha256=str(matching[0]["sha256"]),
+            weights_only=False,
+        )
         if not isinstance(snapshot, Mapping):
             raise ValueError("resume checkpoint must contain a mapping")
         restored = restore_training_snapshot(

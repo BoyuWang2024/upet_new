@@ -10,7 +10,7 @@ from typing import Any
 import torch
 import yaml
 
-from ..artifacts import sha256_file
+from ..artifacts import load_verified_torch, sha256_file
 from ..identity import binning_id, config_id, model_loss_id, run_id
 from ..trainer import CHECKPOINT_SCHEMA_VERSION
 from .evaluate import EVALUATION_SCHEMA_VERSION
@@ -94,8 +94,14 @@ def _verify_identity(root: Path, manifest: Mapping[str, Any]) -> None:
         raise ValueError("run identity hash mismatch")
 
 
-def _verify_checkpoint(path: Path, manifest: Mapping[str, Any]) -> None:
-    snapshot = torch.load(path, map_location="cpu", weights_only=False)
+def _verify_checkpoint(
+    path: Path,
+    manifest: Mapping[str, Any],
+    expected_sha256: str,
+) -> None:
+    snapshot = load_verified_torch(
+        path, expected_sha256=expected_sha256, weights_only=False
+    )
     if not isinstance(snapshot, Mapping):
         raise ValueError(f"checkpoint {path} must contain a mapping")
     if snapshot.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
@@ -274,8 +280,17 @@ def verify_run(run_dir: Path, *, full: bool = True) -> dict[str, Any]:
     paths = _verify_artifacts(root, manifest.get("artifacts"), full=full)
     _verify_identity(root, manifest)
     if full:
-        _verify_checkpoint(paths["checkpoints/best.pt"], manifest)
-        _verify_checkpoint(paths["checkpoints/last.pt"], manifest)
+        artifacts = manifest["artifacts"]
+        _verify_checkpoint(
+            paths["checkpoints/best.pt"],
+            manifest,
+            str(artifacts["checkpoints/best.pt"]["sha256"]),
+        )
+        _verify_checkpoint(
+            paths["checkpoints/last.pt"],
+            manifest,
+            str(artifacts["checkpoints/last.pt"]["sha256"]),
+        )
     images = [
         path for path in root.rglob("*") if path.suffix.lower() in _IMAGE_SUFFIXES
     ]

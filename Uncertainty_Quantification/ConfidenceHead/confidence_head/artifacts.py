@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import tempfile
@@ -20,6 +21,30 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def load_verified_torch(
+    path: Path,
+    *,
+    expected_sha256: str | None = None,
+    weights_only: bool,
+) -> Any:
+    """Load exactly the bytes whose digest was checked."""
+    source = Path(path)
+    try:
+        payload = source.read_bytes()
+    except OSError as error:
+        raise ValueError(f"unable to read torch artifact {source}: {error}") from error
+    actual = hashlib.sha256(payload).hexdigest()
+    if expected_sha256 is not None and actual != expected_sha256:
+        raise ValueError(
+            f"torch artifact sha256 mismatch: {source}: {actual} != {expected_sha256}"
+        )
+    return torch.load(
+        io.BytesIO(payload),
+        map_location="cpu",
+        weights_only=weights_only,
+    )
 
 
 def _temporary_path(path: Path) -> Path:
@@ -67,11 +92,7 @@ def atomic_torch_save(path: Path, payload: Mapping[str, Any]) -> None:
             torch.save(payload, handle)
             handle.flush()
             os.fsync(handle.fileno())
-        verified = torch.load(
-            temporary,
-            weights_only=False,
-            map_location="cpu",
-        )
+        verified = load_verified_torch(temporary, weights_only=False)
         if not isinstance(verified, Mapping):
             raise ValueError("torch artifact must contain a mapping")
         os.replace(temporary, target)
