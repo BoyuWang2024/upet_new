@@ -266,7 +266,7 @@ def test_iter_samples_is_deterministic_and_returns_frozen_samples(
         assert sample.energy_reference_total == pytest.approx(energy)
         np.testing.assert_array_equal(sample.force_reference, forces)
     with pytest.raises(FrozenInstanceError):
-        first[0].index = 9
+        first[0].index = 9  # type: ignore[misc]
 
 
 def test_dataset_identity_binds_file_bytes_and_all_counts(tmp_path: Path) -> None:
@@ -282,7 +282,7 @@ def test_dataset_identity_binds_file_bytes_and_all_counts(tmp_path: Path) -> Non
     assert identity.atom_count == 5
     assert identity.force_component_count == 15
     with pytest.raises(FrozenInstanceError):
-        identity.atom_count = 6
+        identity.atom_count = 6  # type: ignore[misc]
 
 
 def test_checkpoint_hash_mismatch_precedes_loader_import(
@@ -362,7 +362,7 @@ def test_checkpoint_loader_freezes_and_places_model(
     assert model.weight.dtype == torch.float64
     assert all(not parameter.requires_grad for parameter in model.parameters())
     with pytest.raises(FrozenInstanceError):
-        loaded.sha256 = "f" * 64
+        loaded.sha256 = "f" * 64  # type: ignore[misc]
 
 
 def test_extract_readouts_jointly_requests_exact_capability_outputs() -> None:
@@ -403,7 +403,7 @@ def test_extract_readouts_jointly_requests_exact_capability_outputs() -> None:
         == outputs[config.force_features].block().values.data_ptr()
     )
     with pytest.raises(FrozenInstanceError):
-        extracted.energy_prediction = torch.zeros(2)
+        extracted.energy_prediction = torch.zeros(2)  # type: ignore[misc]
 
 
 @pytest.mark.parametrize(
