@@ -320,6 +320,8 @@ def _validate_control_state(state: EarlyStoppingState) -> EarlyStoppingState:
     ema = _optional_finite_real("ema", state.ema)
     best = _optional_finite_real("best", state.best)
     best_epoch = state.best_epoch
+    if (ema is None) != (best is None):
+        raise ValueError("checkpoint ema and best must be set together")
     if best_epoch is not None and (
         isinstance(best_epoch, bool)
         or not isinstance(best_epoch, int)
@@ -332,8 +334,6 @@ def _validate_control_state(state: EarlyStoppingState) -> EarlyStoppingState:
         raise ValueError("checkpoint bad_epochs must be a non-negative integer")
     if state.bad_epochs < 0:
         raise ValueError("checkpoint bad_epochs must be a non-negative integer")
-    if (ema is None) != (best is None):
-        raise ValueError("checkpoint ema and best must be set together")
     if best is None and state.bad_epochs != 0:
         raise ValueError("checkpoint uninitialized state must have zero bad_epochs")
     if not isinstance(state.stopped, bool):
