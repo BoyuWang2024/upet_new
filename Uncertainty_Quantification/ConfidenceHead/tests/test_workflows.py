@@ -32,7 +32,8 @@ _WORKFLOWS = "Uncertainty_Quantification.ConfidenceHead.confidence_head.workflow
 verify_run = import_module(f"{_WORKFLOWS}.verify").verify_run
 evaluate_module = import_module(f"{_WORKFLOWS}.evaluate")
 evaluate_run = evaluate_module.evaluate_run
-train_run = import_module(f"{_WORKFLOWS}.train").train_run
+train_module = import_module(f"{_WORKFLOWS}.train")
+train_run = train_module.train_run
 
 
 def _structure(
@@ -1029,3 +1030,222 @@ def test_run_and_evaluation_provenance_cover_dependencies_times_and_resume_histo
     )
     assert evaluation_manifest["started_at"]
     assert evaluation_manifest["completed_at"]
+
+
+def _resume_transaction_bytes(run_dir: Path) -> dict[str, bytes]:
+    return {
+        relative: (run_dir / relative).read_bytes()
+        for relative in (
+            "manifest.json",
+            "checkpoints/last.pt",
+            "logs/metrics.jsonl",
+        )
+    }
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "manifest_status",
+        "resolved_config",
+        "binning",
+        "best_missing",
+        "best_hash",
+    ],
+)
+def test_resume_prevalidates_all_previous_artifacts_before_any_write(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+    failure: str,
+) -> None:
+    resumable, run_dir = _resume_candidate(
+        config,
+        complete_cache,
+        f"resume-preflight-{failure}",
+    )
+    manifest_path = run_dir / "manifest.json"
+    if failure == "manifest_status":
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["status"] = "incomplete"
+        manifest_path.write_text(
+            json.dumps(manifest, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    elif failure == "resolved_config":
+        path = run_dir / "resolved_config.yaml"
+        resolved = yaml.safe_load(path.read_text(encoding="utf-8"))
+        resolved["run"]["seed"] += 1
+        path.write_text(yaml.safe_dump(resolved, sort_keys=True), encoding="utf-8")
+        _update_declared_hash(run_dir, "resolved_config.yaml")
+    elif failure == "binning":
+        path = run_dir / "binning.json"
+        bins = json.loads(path.read_text(encoding="utf-8"))
+        bins["force"]["representatives"][0] += 0.01
+        path.write_text(
+            json.dumps(bins, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        _update_declared_hash(run_dir, "binning.json")
+    elif failure == "best_missing":
+        (run_dir / "checkpoints" / "best.pt").unlink()
+    else:
+        best = run_dir / "checkpoints" / "best.pt"
+        best.write_bytes(best.read_bytes() + b"tampered")
+    before = _resume_transaction_bytes(run_dir)
+
+    with pytest.raises(
+        (OSError, RuntimeError, ValueError), match="resume|artifact|run"
+    ):
+        train_run(
+            resumable,
+            cache_manifest_path=complete_cache,
+            run_name=f"resume-preflight-{failure}",
+            resume_from=run_dir / "checkpoints" / "last.pt",
+        )
+
+    assert _resume_transaction_bytes(run_dir) == before
+
+
+def test_resume_parses_the_same_metrics_bytes_whose_digest_was_verified(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resumable, run_dir = _resume_candidate(
+        config,
+        complete_cache,
+        "resume-stable-metrics-bytes",
+    )
+    metrics_path = (run_dir / "logs" / "metrics.jsonl").resolve()
+    original_sha256_file = train_module.sha256_file
+    original_read_bytes = Path.read_bytes
+    swapped = False
+
+    def replace_after_path_hash(path: Path) -> str:
+        nonlocal swapped
+        digest = original_sha256_file(path)
+        if Path(path).resolve() == metrics_path and not swapped:
+            swapped = True
+            metrics_path.write_text("{not valid json\n", encoding="utf-8")
+        return digest
+
+    def replace_after_bytes_read(path: Path) -> bytes:
+        nonlocal swapped
+        data = original_read_bytes(path)
+        if path.resolve() == metrics_path and not swapped:
+            swapped = True
+            metrics_path.write_text("{not valid json\n", encoding="utf-8")
+        return data
+
+    monkeypatch.setattr(train_module, "sha256_file", replace_after_path_hash)
+    monkeypatch.setattr(Path, "read_bytes", replace_after_bytes_read)
+    train_run(
+        resumable,
+        cache_manifest_path=complete_cache,
+        run_name="resume-stable-metrics-bytes",
+        resume_from=run_dir / "checkpoints" / "last.pt",
+    )
+    assert swapped
+
+
+@pytest.mark.parametrize("mode", ["runs_root", "resume_run"])
+def test_run_directory_symlinks_cannot_escape_output_root(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    outside = tmp_path / f"outside-{mode}"
+    outside.mkdir()
+    run_name = f"symlink-escape-{mode}"
+    if mode == "runs_root":
+        runs_root = config.run.output_root / "runs"
+        runs_root.parent.mkdir(parents=True, exist_ok=True)
+        runs_root.symlink_to(outside, target_is_directory=True)
+        resume_from = None
+        training_config = config
+    else:
+        training_config, run_dir = _resume_candidate(
+            config,
+            complete_cache,
+            run_name,
+        )
+        moved = outside / run_name
+        run_dir.rename(moved)
+        run_dir.symlink_to(moved, target_is_directory=True)
+        resume_from = run_dir / "checkpoints" / "last.pt"
+
+    with pytest.raises(ValueError, match="symlink|escape|unsafe"):
+        train_run(
+            training_config,
+            cache_manifest_path=complete_cache,
+            run_name=run_name,
+            resume_from=resume_from,
+        )
+
+
+@pytest.mark.parametrize("failure", ["non_mapping", "identity"])
+def test_verify_rejects_malformed_or_mismatched_evaluation_identity(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+    failure: str,
+) -> None:
+    run_dir = train_run(
+        config,
+        cache_manifest_path=complete_cache,
+        run_name=f"evaluation-declaration-{failure}",
+    )
+    evaluation_dir = evaluate_run(run_dir, cache_manifest_path=complete_cache)
+    manifest_path = run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if failure == "non_mapping":
+        manifest["evaluation"] = "complete"
+    else:
+        evaluation_path = evaluation_dir / "manifest.json"
+        evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
+        evaluation["identity"] = "run-" + "f" * 16
+        evaluation_path.write_text(
+            json.dumps(evaluation, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        manifest["artifacts"]["evaluation/manifest.json"]["sha256"] = _sha256(
+            evaluation_path
+        )
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="evaluation.*identity|evaluation.*mapping"):
+        verify_run(run_dir, full=False)
+
+
+def test_evaluation_provenance_uses_the_checkpoint_digest_that_was_loaded(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = train_run(
+        config,
+        cache_manifest_path=complete_cache,
+        run_name="evaluation-loaded-checkpoint-digest",
+    )
+    checkpoint = run_dir / "checkpoints" / "best.pt"
+    loaded_digest = _sha256(checkpoint)
+    original_loader = evaluate_module.load_verified_torch
+
+    def replace_after_verified_load(*args: Any, **kwargs: Any) -> Any:
+        snapshot = original_loader(*args, **kwargs)
+        checkpoint.write_bytes(b"replacement after verified load")
+        return snapshot
+
+    monkeypatch.setattr(
+        evaluate_module,
+        "load_verified_torch",
+        replace_after_verified_load,
+    )
+    evaluation_dir = evaluate_run(run_dir, cache_manifest_path=complete_cache)
+    evaluation = json.loads(
+        (evaluation_dir / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert evaluation["checkpoint"]["sha256"] == loaded_digest
