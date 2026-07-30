@@ -7,8 +7,9 @@ import math
 import random
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from numbers import Real
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import numpy as np
 import torch
@@ -232,6 +233,7 @@ def capture_training_snapshot(
         raise ValueError("global_step must be non-negative")
     if best_step is not None and best_step < 0:
         raise ValueError("best_step must be non-negative")
+    _validate_control_state(control_state)
     if not optimizer.param_groups:
         raise ValueError("optimizer must contain at least one parameter group")
     learning_rate = float(optimizer.param_groups[0]["lr"])
@@ -302,14 +304,50 @@ def _as_non_negative_int(snapshot: Mapping[str, Any], field: str) -> int:
     return value
 
 
+def _optional_finite_real(name: str, value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ValueError(f"checkpoint {name} must be null or a finite real number")
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(f"checkpoint {name} must be null or a finite real number")
+    return result
+
+
+def _validate_control_state(state: EarlyStoppingState) -> EarlyStoppingState:
+    ema = _optional_finite_real("ema", state.ema)
+    best = _optional_finite_real("best", state.best)
+    best_epoch = state.best_epoch
+    if best_epoch is not None and (
+        isinstance(best_epoch, bool)
+        or not isinstance(best_epoch, int)
+        or best_epoch < 0
+    ):
+        raise ValueError("checkpoint best_epoch must be null or non-negative")
+    if (best is None) != (best_epoch is None):
+        raise ValueError("checkpoint best and best_epoch must be set together")
+    if isinstance(state.bad_epochs, bool) or not isinstance(state.bad_epochs, int):
+        raise ValueError("checkpoint bad_epochs must be a non-negative integer")
+    if state.bad_epochs < 0:
+        raise ValueError("checkpoint bad_epochs must be a non-negative integer")
+    if not isinstance(state.stopped, bool):
+        raise ValueError("checkpoint stopped must be a boolean")
+    if state.stop_reason is not None and not isinstance(state.stop_reason, str):
+        raise ValueError("checkpoint stop_reason must be null or a string")
+    return replace(state, ema=ema, best=best)
+
+
 def _control_from_snapshot(snapshot: Mapping[str, Any]) -> EarlyStoppingState:
-    state = EarlyStoppingState(
-        ema=snapshot.get("ema"),
-        best=snapshot.get("best"),
-        best_epoch=snapshot.get("best_epoch"),
-        bad_epochs=_as_non_negative_int(snapshot, "bad_epochs"),
-        stopped=snapshot.get("stopped", False),
-        stop_reason=snapshot.get("stop_reason"),
+    state = _validate_control_state(
+        EarlyStoppingState(
+            ema=snapshot.get("ema"),
+            best=snapshot.get("best"),
+            best_epoch=snapshot.get("best_epoch"),
+            bad_epochs=_as_non_negative_int(snapshot, "bad_epochs"),
+            stopped=snapshot.get("stopped", False),
+            stop_reason=snapshot.get("stop_reason"),
+        )
     )
     if state.stop_reason == _EXTERNAL_STOP_REASON:
         return replace(state, stopped=False, stop_reason=None)
@@ -325,7 +363,7 @@ def restore_training_snapshot(
     expected_identity: TrainingIdentity,
     sampler_generator: torch.Generator,
 ) -> RestoredTrainingState:
-    """Validate and restore a committed snapshot without repeating its epoch."""
+    """Validate and transactionally restore a committed snapshot."""
     _require_snapshot_schema(snapshot)
     _require_snapshot_identity(snapshot, expected_identity)
     epoch = _as_non_negative_int(snapshot, "epoch")
@@ -349,6 +387,7 @@ def restore_training_snapshot(
     for name, value in required_states.items():
         if not isinstance(value, Mapping):
             raise ValueError(f"checkpoint {name} must contain a state mapping")
+
     cpu_rng = snapshot.get("torch_cpu_rng_state")
     sampler_rng = snapshot.get("sampler_rng_state")
     if not isinstance(cpu_rng, torch.Tensor):
@@ -362,33 +401,79 @@ def restore_training_snapshot(
         raise ValueError("checkpoint torch_cuda_rng_state must be a tensor list")
     if cuda_rng and not torch.cuda.is_available():
         raise ValueError("checkpoint has CUDA RNG state but CUDA is unavailable")
+    if cuda_rng and len(cuda_rng) != torch.cuda.device_count():
+        raise ValueError("checkpoint CUDA RNG state count does not match devices")
+
+    python_rng = cast(tuple[Any, ...], snapshot.get("python_rng_state"))
+    numpy_rng = snapshot.get("numpy_rng_state")
+    try:
+        random.Random().setstate(copy.deepcopy(python_rng))
+    except Exception as error:
+        raise ValueError("checkpoint python_rng_state is invalid") from error
+    try:
+        numpy_probe = np.random.RandomState()
+        numpy_probe.set_state(copy.deepcopy(numpy_rng))
+    except Exception as error:
+        raise ValueError("checkpoint numpy_rng_state is invalid") from error
+    try:
+        torch.Generator(device="cpu").set_state(cpu_rng)
+    except Exception as error:
+        raise ValueError("checkpoint torch_cpu_rng_state is invalid") from error
+    try:
+        torch.Generator(device=sampler_generator.device).set_state(sampler_rng)
+    except Exception as error:
+        raise ValueError("checkpoint sampler_rng_state is invalid") from error
+
+    optimizer_state = required_states["optimizer"]
+    assert isinstance(optimizer_state, Mapping)
+    optimizer_groups = optimizer_state.get("param_groups")
+    if not isinstance(optimizer_groups, list) or not optimizer_groups:
+        raise ValueError("checkpoint optimizer param_groups must be non-empty")
+    first_group = optimizer_groups[0]
+    if not isinstance(first_group, Mapping) or "lr" not in first_group:
+        raise ValueError("checkpoint optimizer learning_rate is missing")
+    optimizer_lr = float(first_group["lr"])
+    _require_finite("checkpoint optimizer learning_rate", optimizer_lr)
+    if optimizer_lr != learning_rate:
+        raise ValueError("checkpoint learning_rate disagrees with optimizer state")
 
     original_model = copy.deepcopy(model.state_dict())
     original_optimizer = copy.deepcopy(optimizer.state_dict())
     original_scheduler = copy.deepcopy(scheduler.state_dict())
+    original_python_rng = copy.deepcopy(random.getstate())
+    original_numpy_rng = copy.deepcopy(np.random.get_state())
+    original_cpu_rng = torch.get_rng_state().clone()
+    original_cuda_rng = (
+        [state.clone() for state in torch.cuda.get_rng_state_all()]
+        if torch.cuda.is_available()
+        else []
+    )
+    original_sampler_rng = sampler_generator.get_state().clone()
     try:
         model.load_state_dict(required_states["model"])
         optimizer.load_state_dict(required_states["optimizer"])
         scheduler.load_state_dict(required_states["scheduler"])
+        random.setstate(python_rng)
+        np.random.set_state(numpy_rng)
+        torch.set_rng_state(cpu_rng)
+        if cuda_rng:
+            torch.cuda.set_rng_state_all(cuda_rng)
+        sampler_generator.set_state(sampler_rng)
+        actual_lr = float(optimizer.param_groups[0]["lr"])
+        if actual_lr != learning_rate:
+            raise ValueError("checkpoint learning_rate disagrees with optimizer state")
     except Exception:
         model.load_state_dict(original_model)
         optimizer.load_state_dict(original_optimizer)
         scheduler.load_state_dict(original_scheduler)
+        random.setstate(original_python_rng)
+        np.random.set_state(original_numpy_rng)
+        torch.set_rng_state(original_cpu_rng)
+        if original_cuda_rng:
+            torch.cuda.set_rng_state_all(original_cuda_rng)
+        sampler_generator.set_state(original_sampler_rng)
         raise
 
-    random.setstate(snapshot["python_rng_state"])
-    np.random.set_state(snapshot["numpy_rng_state"])
-    torch.set_rng_state(cpu_rng)
-    if cuda_rng:
-        torch.cuda.set_rng_state_all(cuda_rng)
-    sampler_generator.set_state(sampler_rng)
-
-    actual_lr = float(optimizer.param_groups[0]["lr"])
-    if actual_lr != learning_rate:
-        raise ValueError(
-            "checkpoint learning_rate disagrees with optimizer state: "
-            f"{learning_rate!r} != {actual_lr!r}"
-        )
     return RestoredTrainingState(
         epoch=epoch,
         next_epoch=epoch + 1,

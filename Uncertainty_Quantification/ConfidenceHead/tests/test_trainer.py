@@ -621,3 +621,140 @@ def test_stop_after_epoch_is_smoke_only(tmp_path: Path) -> None:
             stop_after_epoch=0,
             max_epochs=200,
         )
+
+
+def _runtime_state(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau,
+    sampler: torch.Generator,
+) -> dict[str, Any]:
+    return {
+        "model": copy.deepcopy(model.state_dict()),
+        "optimizer": copy.deepcopy(optimizer.state_dict()),
+        "scheduler": copy.deepcopy(scheduler.state_dict()),
+        "python": copy.deepcopy(random.getstate()),
+        "numpy": copy.deepcopy(np.random.get_state()),
+        "torch": torch.get_rng_state().clone(),
+        "sampler": sampler.get_state().clone(),
+    }
+
+
+def _assert_runtime_state_unchanged(
+    before: dict[str, Any],
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau,
+    sampler: torch.Generator,
+) -> None:
+    after = _runtime_state(model, optimizer, scheduler, sampler)
+    _assert_nested_equal(before, after)
+
+
+def _valid_snapshot_for_rejection() -> tuple[
+    dict[str, Any],
+    torch.nn.Module,
+    torch.optim.Optimizer,
+    torch.optim.lr_scheduler.ReduceLROnPlateau,
+    torch.Generator,
+]:
+    model, optimizer, scheduler = _model_optimizer_scheduler()
+    sampler = torch.Generator().manual_seed(17)
+    snapshot = capture_training_snapshot(
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        epoch=2,
+        global_step=7,
+        control_state=EarlyStoppingState(
+            ema=1.0,
+            best=0.9,
+            best_epoch=1,
+            bad_epochs=1,
+        ),
+        best_step=4,
+        identity=_identity(),
+        sampler_generator=sampler,
+    )
+    return snapshot, model, optimizer, scheduler, sampler
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("ema", "bad", "ema"),
+        ("best", float("nan"), "best"),
+        ("best_epoch", -1, "best_epoch"),
+        ("stopped", "false", "stopped"),
+        ("stop_reason", 4, "stop_reason"),
+    ],
+)
+def test_restore_rejects_invalid_control_scalars_without_mutation(
+    field: str,
+    value: Any,
+    message: str,
+) -> None:
+    snapshot, model, optimizer, scheduler, sampler = _valid_snapshot_for_rejection()
+    snapshot[field] = value
+    before = _runtime_state(model, optimizer, scheduler, sampler)
+
+    with pytest.raises(ValueError, match=message):
+        restore_training_snapshot(
+            snapshot=snapshot,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            expected_identity=_identity(),
+            sampler_generator=sampler,
+        )
+
+    _assert_runtime_state_unchanged(before, model, optimizer, scheduler, sampler)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("python_rng_state", ("bad",), "python_rng_state"),
+        ("numpy_rng_state", ("bad",), "numpy_rng_state"),
+        ("torch_cpu_rng_state", torch.tensor([1]), "torch_cpu_rng_state"),
+        ("sampler_rng_state", torch.tensor([1]), "sampler_rng_state"),
+    ],
+)
+def test_restore_rejects_invalid_rng_without_mutation(
+    field: str,
+    value: Any,
+    message: str,
+) -> None:
+    snapshot, model, optimizer, scheduler, sampler = _valid_snapshot_for_rejection()
+    snapshot[field] = value
+    before = _runtime_state(model, optimizer, scheduler, sampler)
+
+    with pytest.raises(ValueError, match=message):
+        restore_training_snapshot(
+            snapshot=snapshot,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            expected_identity=_identity(),
+            sampler_generator=sampler,
+        )
+
+    _assert_runtime_state_unchanged(before, model, optimizer, scheduler, sampler)
+
+
+def test_restore_rejects_learning_rate_conflict_without_mutation() -> None:
+    snapshot, model, optimizer, scheduler, sampler = _valid_snapshot_for_rejection()
+    snapshot["learning_rate"] = 0.25
+    before = _runtime_state(model, optimizer, scheduler, sampler)
+
+    with pytest.raises(ValueError, match="learning_rate"):
+        restore_training_snapshot(
+            snapshot=snapshot,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            expected_identity=_identity(),
+            sampler_generator=sampler,
+        )
+
+    _assert_runtime_state_unchanged(before, model, optimizer, scheduler, sampler)
