@@ -70,7 +70,7 @@ def _provenance(started_at: str, completed_at: str | None = None) -> dict[str, A
         "python_version": sys.version.split()[0],
         "dependencies": {
             name: _package_version(name)
-            for name in ("torch", "numpy", "pydantic", "metatrain")
+            for name in ("torch", "numpy", "pydantic", "metatrain", "upet", "metatomic")
         },
         "started_at": started_at,
         "completed_at": completed_at,

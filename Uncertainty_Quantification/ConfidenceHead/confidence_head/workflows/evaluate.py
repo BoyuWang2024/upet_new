@@ -7,6 +7,7 @@ import json
 import os
 import tempfile
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -156,6 +157,7 @@ def evaluate_run(
     checkpoint_path: Path | None = None,
 ) -> Path:
     """Evaluate one checkpoint, defaulting to the run's best checkpoint."""
+    started_at = datetime.now(UTC).isoformat()
     run_dir = Path(run_dir).resolve()
     manifest_path = run_dir / "manifest.json"
     manifest = _load_mapping(manifest_path)
@@ -373,6 +375,8 @@ def evaluate_run(
             "force_components": predictions["force_labels"].numel(),
         },
         "artifacts": artifacts,
+        "started_at": started_at,
+        "completed_at": datetime.now(UTC).isoformat(),
     }
     evaluation_manifest_path = evaluation_dir / "manifest.json"
     atomic_write_json(evaluation_manifest_path, evaluation_manifest)
