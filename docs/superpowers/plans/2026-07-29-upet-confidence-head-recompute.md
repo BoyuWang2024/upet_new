@@ -685,7 +685,7 @@ Profile = Literal["smoke", "production"]
 
 class ReadoutConfig(StrictModel):
     energy_prediction: str = "energy"
-    force_prediction: str = "non_conservative_force"
+    force_prediction: str = "non_conservative_forces"
     energy_features: str = "mtt::aux::energy_last_layer_features"
     force_features: str = "mtt::aux::non_conservative_forces_last_layer_features"
 
@@ -853,20 +853,22 @@ keys = (
     config.energy_features,
     config.force_features,
 )
-capability_outputs = model.capabilities().outputs
-missing = [key for key in keys if key not in capability_outputs]
+supported_outputs = model.supported_outputs()
+missing = [key for key in keys if key not in supported_outputs]
 if missing:
     raise ValueError(f"checkpoint is missing required outputs: {missing}")
-requested = {key: capability_outputs[key] for key in keys}
+requested = {key: supported_outputs[key] for key in keys}
 ```
 
 抽取并验证：
 
 ```text
-energy_prediction: [S]
-force_prediction:  [N,3]
-energy_features:   [N,D_energy]
-force_features:    [N,D_force]
+raw energy_prediction:      [N,1] atom contributions
+internal energy_prediction: [S] total (sum by batch-local system)
+raw force_prediction:       [N,3,1] with xyz component and one property
+internal force_prediction:  [N,3] (squeeze property axis)
+energy_features:            [N,D_energy]
+force_features:             [N,D_force]
 ```
 
 如果联合请求不被 UPET 接受，执行两个明确请求：
@@ -1272,7 +1274,7 @@ data:
   test: *n20
 readouts:
   energy_prediction: energy
-  force_prediction: non_conservative_force
+  force_prediction: non_conservative_forces
   energy_features: mtt::aux::energy_last_layer_features
   force_features: mtt::aux::non_conservative_forces_last_layer_features
 cache:

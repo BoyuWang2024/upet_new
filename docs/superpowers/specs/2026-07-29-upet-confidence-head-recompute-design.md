@@ -173,6 +173,14 @@ Uncertainty_Quantification/ConfidenceHead/
 `workflows/` 只编排阶段，不重复实现数学公式。`scripts/` 是薄入口，只负责参数解析、
 日志初始化、调用 workflow 和设置退出码。
 
+### 2026-07-30 真实 checkpoint API 核验修订
+
+- PET checkpoint 只公开 `model.supported_outputs()`，没有 `capabilities()`；
+- non-conservative force 的真实 output key 是复数 `non_conservative_forces`；
+- raw energy prediction 是 `[N, 1]` 逐原子贡献，必须按 structure 求和为 total energy `[S]`；
+- raw force prediction 是 `[N, 3, 1]`，xyz component 与单 property 轴规范化后为 `[N, 3]`；
+- 两个 last-layer feature 的实测 shape 均为 `[N, 1024]`，但语义与存储仍须严格独立；维度相同不代表可以互换或共享。
+
 ## 6. UPET 独立 readout 不变量
 
 UPET 的 energy 与 non-conservative force 是分别读出的：
@@ -540,7 +548,7 @@ write temporary -> flush/close -> validate -> atomic replace
 ### 15.1 `build_cache.py`
 
 - 加载并冻结 UPET；
-- 验证 checkpoint SHA 和 capabilities；
+- 验证 checkpoint SHA 和 supported_outputs；
 - 解析两个独立 readout；
 - 按稳定顺序读取三个 split；
 - 生成 raw cache shards；
