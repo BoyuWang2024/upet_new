@@ -429,6 +429,33 @@ def test_extract_readouts_reports_each_missing_capability(
     assert model.calls == []
 
 
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        ("energy_prediction", "force_prediction"),
+        ("energy_prediction", "energy_features"),
+        ("energy_prediction", "force_features"),
+        ("force_prediction", "energy_features"),
+        ("force_prediction", "force_features"),
+        ("energy_features", "force_features"),
+    ],
+)
+def test_extract_readouts_rejects_duplicate_keys_before_model_call(
+    first: str,
+    second: str,
+) -> None:
+    defaults = ReadoutConfig()
+    config = defaults.model_copy(
+        update={second: getattr(defaults, first)},
+    )
+    model = FakeModel(_valid_outputs(config))
+
+    with pytest.raises(ValueError, match="distinct|unique"):
+        _extract(model, config=config)
+
+    assert model.calls == []
+
+
 @pytest.mark.parametrize("error_type", [ValueError, RuntimeError])
 def test_extract_readouts_falls_back_to_two_paired_requests(
     error_type: type[BaseException],
@@ -517,6 +544,22 @@ def test_extract_readouts_reports_original_id_for_structure_sample_order() -> No
         _extract(FakeModel(outputs), config=config)
 
 
+def test_structure_sample_prefix_mismatch_reports_first_expected_id() -> None:
+    config = ReadoutConfig()
+    outputs = _valid_outputs(config)
+    outputs[config.energy_prediction]._block.samples = FakeSamples(
+        ("system",),
+        [[1]],
+    )
+    outputs[config.energy_prediction]._block.values = torch.ones(1)
+
+    with pytest.raises(
+        ValueError,
+        match=rf"{config.energy_prediction}.*structure 41",
+    ):
+        _extract(FakeModel(outputs), config=config)
+
+
 def test_extract_readouts_reports_original_id_for_wrong_structure_atom_count() -> None:
     config = ReadoutConfig()
     outputs = _valid_outputs(config)
@@ -528,6 +571,22 @@ def test_extract_readouts_reports_original_id_for_wrong_structure_atom_count() -
     with pytest.raises(
         ValueError,
         match=rf"{config.force_features}.*structure 99",
+    ):
+        _extract(FakeModel(outputs), config=config)
+
+
+def test_atom_sample_prefix_mismatch_reports_first_expected_id_and_key() -> None:
+    config = ReadoutConfig()
+    outputs = _valid_outputs(config)
+    outputs[config.force_prediction]._block.samples = FakeSamples(
+        ("system", "atom"),
+        [[0, 1], [1, 0]],
+    )
+    outputs[config.force_prediction]._block.values = torch.zeros(2, 3)
+
+    with pytest.raises(
+        ValueError,
+        match=rf"{config.force_prediction}.*structure 41",
     ):
         _extract(FakeModel(outputs), config=config)
 
