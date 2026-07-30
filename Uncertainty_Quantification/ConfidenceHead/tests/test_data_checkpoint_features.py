@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import sys
+import traceback
 import types
 from collections.abc import Mapping, Sequence
 from dataclasses import FrozenInstanceError
@@ -50,17 +51,35 @@ class FakeBlock:
         values: torch.Tensor,
         sample_names: tuple[str, ...],
         samples: list[list[int]],
+        *,
+        components: list[FakeSamples] | None = None,
+        properties: FakeSamples | None = None,
     ) -> None:
         self.values = values
         self.samples = FakeSamples(sample_names, samples)
+        self.components = [] if components is None else components
+        self.properties = (
+            FakeSamples(("property",), [[0]]) if properties is None else properties
+        )
 
 
 class FakeTensorMap:
-    def __init__(self, block: FakeBlock) -> None:
-        self._block = block
+    def __init__(self, blocks: FakeBlock | list[FakeBlock]) -> None:
+        self._blocks = blocks if isinstance(blocks, list) else [blocks]
+        self._block = self._blocks[0]
+
+    def __len__(self) -> int:
+        return len(self._blocks)
 
     def block(self) -> FakeBlock:
         return self._block
+
+
+def _feature_properties(size: int) -> FakeSamples:
+    return FakeSamples(
+        ("feature",),
+        [[feature] for feature in range(size)],
+    )
 
 
 def _atom_samples(atom_counts: tuple[int, ...]) -> list[list[int]]:
@@ -81,16 +100,19 @@ def _valid_outputs(
     return {
         config.energy_prediction: FakeTensorMap(
             FakeBlock(
-                torch.arange(len(atom_counts), dtype=torch.float64).reshape(-1, 1),
-                ("system",),
-                [[system] for system in range(len(atom_counts))],
+                torch.arange(1, atom_count + 1, dtype=torch.float64).reshape(-1, 1),
+                ("system", "atom"),
+                atoms,
             )
         ),
         config.force_prediction: FakeTensorMap(
             FakeBlock(
-                torch.arange(3 * atom_count, dtype=torch.float64).reshape(-1, 3),
+                torch.arange(3 * atom_count, dtype=torch.float64).reshape(-1, 3, 1),
                 ("system", "atom"),
                 atoms,
+                components=[
+                    FakeSamples(("xyz",), [[0], [1], [2]]),
+                ],
             )
         ),
         config.energy_features: FakeTensorMap(
@@ -98,6 +120,7 @@ def _valid_outputs(
                 torch.arange(2 * atom_count, dtype=torch.float64).reshape(-1, 2),
                 ("system", "atom"),
                 atoms,
+                properties=_feature_properties(2),
             )
         ),
         config.force_features: FakeTensorMap(
@@ -105,6 +128,7 @@ def _valid_outputs(
                 torch.arange(4 * atom_count, dtype=torch.float64).reshape(-1, 4),
                 ("system", "atom"),
                 atoms,
+                properties=_feature_properties(4),
             )
         ),
     }
@@ -116,22 +140,18 @@ class FakeModel:
         outputs: dict[str, FakeTensorMap],
         *,
         joint_error: BaseException | None = None,
+        fallback_error: BaseException | None = None,
     ) -> None:
         self.output_values = outputs
-        self.capability_outputs = {
-            key: object()
-            for key in (
-                ReadoutConfig().energy_prediction,
-                ReadoutConfig().force_prediction,
-                ReadoutConfig().energy_features,
-                ReadoutConfig().force_features,
-            )
-        }
+        self.supported_output_descriptors = {key: object() for key in outputs}
+        self.supported_outputs_calls = 0
         self.calls: list[dict[str, object]] = []
         self.joint_error = joint_error
+        self.fallback_error = fallback_error
 
-    def capabilities(self) -> types.SimpleNamespace:
-        return types.SimpleNamespace(outputs=self.capability_outputs)
+    def supported_outputs(self) -> dict[str, object]:
+        self.supported_outputs_calls += 1
+        return self.supported_output_descriptors
 
     def __call__(
         self,
@@ -143,6 +163,8 @@ class FakeModel:
         self.calls.append(outputs)
         if len(outputs) == 4 and self.joint_error is not None:
             raise self.joint_error
+        if len(outputs) == 2 and self.fallback_error is not None:
+            raise self.fallback_error
         return {key: self.output_values[key] for key in outputs}
 
 
@@ -184,6 +206,10 @@ def test_label_candidate_constants_are_exact_and_ordered() -> None:
         "dft_forces",
         "REF_forces",
     )
+
+
+def test_readout_config_uses_real_non_conservative_force_key() -> None:
+    assert ReadoutConfig().force_prediction == "non_conservative_forces"
 
 
 def test_labels_use_candidate_order_across_supported_containers() -> None:
@@ -285,6 +311,30 @@ def test_dataset_identity_binds_file_bytes_and_all_counts(tmp_path: Path) -> Non
         identity.atom_count = 6  # type: ignore[misc]
 
 
+def test_dataset_identity_rejects_bytes_changed_during_parse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "dataset.extxyz"
+    _write_dataset(path)
+    calls: list[Path] = []
+    hashes = iter(("a" * 64, "b" * 64))
+
+    def changing_sha256(candidate: Path) -> str:
+        calls.append(candidate)
+        return next(hashes)
+
+    monkeypatch.setattr(
+        "Uncertainty_Quantification.ConfidenceHead.confidence_head.data.sha256_file",
+        changing_sha256,
+    )
+
+    with pytest.raises(ValueError, match="changed|SHA"):
+        dataset_identity(path)
+
+    assert calls == [path, path]
+
+
 def test_checkpoint_hash_mismatch_precedes_loader_import(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -365,7 +415,7 @@ def test_checkpoint_loader_freezes_and_places_model(
         loaded.sha256 = "f" * 64  # type: ignore[misc]
 
 
-def test_extract_readouts_jointly_requests_exact_capability_outputs() -> None:
+def test_extract_readouts_uses_supported_outputs_and_direct_descriptors() -> None:
     config = ReadoutConfig()
     outputs = _valid_outputs(config)
     model = FakeModel(outputs)
@@ -379,8 +429,9 @@ def test_extract_readouts_jointly_requests_exact_capability_outputs() -> None:
         config.energy_features,
         config.force_features,
     ]
+    assert model.supported_outputs_calls == 1
     assert all(
-        requested is model.capability_outputs[key]
+        requested is model.supported_output_descriptors[key]
         for key, requested in model.calls[0].items()
     )
     assert isinstance(extracted, ExtractedReadouts)
@@ -392,6 +443,14 @@ def test_extract_readouts_jointly_requests_exact_capability_outputs() -> None:
     torch.testing.assert_close(extracted.atom_offsets, torch.tensor([0, 2, 3]))
     assert extracted.energy_prediction.shape == (2,)
     assert extracted.force_prediction.shape == (3, 3)
+    torch.testing.assert_close(
+        extracted.energy_prediction,
+        torch.tensor([3.0, 3.0], dtype=torch.float64),
+    )
+    torch.testing.assert_close(
+        extracted.force_prediction,
+        outputs[config.force_prediction].block().values.squeeze(-1),
+    )
     assert extracted.energy_features.shape == (3, 2)
     assert extracted.force_features.shape == (3, 4)
     assert (
@@ -415,13 +474,13 @@ def test_extract_readouts_jointly_requests_exact_capability_outputs() -> None:
         "force_features",
     ],
 )
-def test_extract_readouts_reports_each_missing_capability(
+def test_extract_readouts_reports_each_missing_supported_output(
     missing_attribute: str,
 ) -> None:
     config = ReadoutConfig()
     model = FakeModel(_valid_outputs(config))
     missing_key = getattr(config, missing_attribute)
-    del model.capability_outputs[missing_key]
+    del model.supported_output_descriptors[missing_key]
 
     with pytest.raises(ValueError, match=rf"missing required outputs.*{missing_key}"):
         _extract(model, config=config)
@@ -482,6 +541,28 @@ def test_extract_readouts_falls_back_to_two_paired_requests(
     ]
 
 
+@pytest.mark.parametrize("joint_type", [ValueError, RuntimeError])
+def test_fallback_failure_preserves_joint_and_fallback_errors(
+    joint_type: type[BaseException],
+) -> None:
+    config = ReadoutConfig()
+    model = FakeModel(
+        _valid_outputs(config),
+        joint_error=joint_type("joint readouts failed"),
+        fallback_error=RuntimeError("paired fallback failed"),
+    )
+
+    with pytest.raises(BaseException) as caught:
+        _extract(model, config=config)
+
+    rendered = "".join(
+        traceback.TracebackException.from_exception(caught.value).format()
+    )
+    assert "joint readouts failed" in rendered
+    assert "paired fallback failed" in rendered
+    assert len(model.calls) == 2
+
+
 def test_extract_readouts_does_not_fallback_for_unexpected_exceptions() -> None:
     config = ReadoutConfig()
     model = FakeModel(
@@ -501,16 +582,82 @@ def test_extract_readouts_rejects_shared_feature_storage() -> None:
     shared = torch.arange(6, dtype=torch.float64).reshape(3, 2)
     outputs[config.energy_features]._block.values = shared
     outputs[config.force_features]._block.values = shared
+    outputs[config.force_features].block().properties = _feature_properties(2)
 
     with pytest.raises(ValueError, match="energy_features.*force_features.*storage"):
         _extract(FakeModel(outputs), config=config)
 
 
+def test_force_prediction_normalizes_real_component_and_property_axes() -> None:
+    config = ReadoutConfig()
+    outputs = _valid_outputs(config)
+    expected = torch.tensor(
+        [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
+        dtype=torch.float64,
+    )
+    outputs[config.force_prediction].block().values = expected.unsqueeze(-1)
+
+    extracted = _extract(FakeModel(outputs), config=config)
+
+    torch.testing.assert_close(extracted.force_prediction, expected)
+
+
+@pytest.mark.parametrize("schema_part", ["components", "properties"])
+def test_force_prediction_rejects_invalid_tensor_map_schema(
+    schema_part: str,
+) -> None:
+    config = ReadoutConfig()
+    outputs = _valid_outputs(config)
+    block = outputs[config.force_prediction].block()
+    if schema_part == "components":
+        block.components = [
+            FakeSamples(("xyz",), [[0], [2], [1]]),
+        ]
+    else:
+        block.properties = FakeSamples(("property",), [[0], [1]])
+        block.values = torch.zeros(3, 3, 2)
+
+    with pytest.raises(
+        ValueError,
+        match=rf"{config.force_prediction}.*{schema_part}|"
+        rf"{config.force_prediction}.*schema",
+    ):
+        _extract(FakeModel(outputs), config=config)
+
+
+def test_extract_readouts_rejects_multiple_blocks_with_output_key() -> None:
+    config = ReadoutConfig()
+    outputs = _valid_outputs(config)
+    key = config.energy_features
+    block = outputs[key].block()
+    outputs[key] = FakeTensorMap([block, block])
+
+    with pytest.raises(ValueError, match=rf"{key}.*one block|{key}.*single block"):
+        _extract(FakeModel(outputs), config=config)
+
+
+def test_extract_readouts_rejects_empty_batch_before_model_call() -> None:
+    config = ReadoutConfig()
+    model = FakeModel(_valid_outputs(config))
+
+    with pytest.raises(ValueError, match="empty|non-empty"):
+        _extract(
+            model,
+            systems=[],
+            structure_ids=torch.empty(0, dtype=torch.int64),
+            atom_counts=torch.empty(0, dtype=torch.int64),
+            config=config,
+        )
+
+    assert model.calls == []
+    assert model.supported_outputs_calls == 0
+
+
 @pytest.mark.parametrize(
     "output_attribute, values, message",
     [
-        ("energy_prediction", torch.zeros(2, 2), r"\[S\]"),
-        ("force_prediction", torch.zeros(3, 2), r"\[N, ?3\]"),
+        ("energy_prediction", torch.zeros(3, 2), r"\[N, ?1\]"),
+        ("force_prediction", torch.zeros(3, 2, 1), r"\[N, ?3, ?1\]"),
         ("energy_features", torch.zeros(3, 0), "positive"),
         ("force_features", torch.zeros(3), r"\[N, ?D"),
     ],
@@ -533,8 +680,8 @@ def test_extract_readouts_reports_original_id_for_structure_sample_order() -> No
     config = ReadoutConfig()
     outputs = _valid_outputs(config)
     outputs[config.energy_prediction]._block.samples = FakeSamples(
-        ("system",),
-        [[0], [0]],
+        ("system", "atom"),
+        [[0, 0], [0, 1], [0, 2]],
     )
 
     with pytest.raises(
@@ -548,10 +695,10 @@ def test_structure_sample_prefix_mismatch_reports_first_expected_id() -> None:
     config = ReadoutConfig()
     outputs = _valid_outputs(config)
     outputs[config.energy_prediction]._block.samples = FakeSamples(
-        ("system",),
-        [[1]],
+        ("system", "atom"),
+        [[1, 0]],
     )
-    outputs[config.energy_prediction]._block.values = torch.ones(1)
+    outputs[config.energy_prediction]._block.values = torch.ones(1, 1)
 
     with pytest.raises(
         ValueError,
@@ -582,12 +729,31 @@ def test_atom_sample_prefix_mismatch_reports_first_expected_id_and_key() -> None
         ("system", "atom"),
         [[0, 1], [1, 0]],
     )
-    outputs[config.force_prediction]._block.values = torch.zeros(2, 3)
+    outputs[config.force_prediction]._block.values = torch.zeros(2, 3, 1)
 
     with pytest.raises(
         ValueError,
         match=rf"{config.force_prediction}.*structure 41",
     ):
+        _extract(FakeModel(outputs), config=config)
+
+
+def test_extract_readouts_rejects_different_views_of_same_storage() -> None:
+    config = ReadoutConfig()
+    outputs = _valid_outputs(config)
+    shared = torch.arange(7, dtype=torch.float64)
+    energy_view = shared[:6].reshape(3, 2)
+    force_view = shared[1:7].reshape(3, 2)
+    assert energy_view.data_ptr() != force_view.data_ptr()
+    assert (
+        energy_view.untyped_storage().data_ptr()
+        == force_view.untyped_storage().data_ptr()
+    )
+    outputs[config.energy_features].block().values = energy_view
+    outputs[config.force_features].block().values = force_view
+    outputs[config.force_features].block().properties = _feature_properties(2)
+
+    with pytest.raises(ValueError, match="energy_features.*force_features.*storage"):
         _extract(FakeModel(outputs), config=config)
 
 
