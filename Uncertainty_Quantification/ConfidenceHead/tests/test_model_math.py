@@ -220,6 +220,23 @@ def test_confidence_loss_flattens_force_components_and_weights_means() -> None:
     assert result.energy_count == energy_labels.numel()
 
 
+def test_confidence_loss_accepts_independent_branch_bin_counts() -> None:
+    force_logits = torch.zeros(2, 3, 4)
+    force_labels = torch.zeros(2, 3, dtype=torch.long)
+    energy_logits = torch.zeros(2, 5)
+    energy_labels = torch.zeros(2, dtype=torch.long)
+
+    result = confidence_loss(
+        force_logits,
+        force_labels,
+        energy_logits,
+        energy_labels,
+    )
+
+    assert result.force_count == force_labels.numel()
+    assert result.energy_count == energy_labels.numel()
+
+
 @pytest.mark.parametrize(
     ("force_logits", "force_labels", "energy_logits", "energy_labels"),
     [
@@ -263,12 +280,6 @@ def test_confidence_loss_flattens_force_components_and_weights_means() -> None:
             torch.zeros(2, 3, 0),
             torch.zeros(2, 3, dtype=torch.long),
             torch.zeros(2, 0),
-            torch.zeros(2, dtype=torch.long),
-        ),
-        (
-            torch.zeros(2, 3, 4),
-            torch.zeros(2, 3, dtype=torch.long),
-            torch.zeros(2, 5),
             torch.zeros(2, dtype=torch.long),
         ),
     ],
