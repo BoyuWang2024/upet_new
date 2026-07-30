@@ -26,13 +26,15 @@ from ..binning import (
     fixed_linear_binning,
     labels_from_thresholds,
 )
+from ..cache import SCHEMA_VERSION as CACHE_SCHEMA_VERSION
 from ..cache import CachedSplitDataset, collate_cached_structures
 from ..config import ConfidenceConfig
 from ..errors import energy_per_atom_error, force_component_error
+from ..identity import cache_id
 from ..metrics import classification_metrics
 from ..model import ConfidenceModel
 from ..trainer import CHECKPOINT_SCHEMA_VERSION
-from .train import RUN_SCHEMA_VERSION
+from .train import RUN_SCHEMA_VERSION, _bin_payload, _identities
 
 
 EVALUATION_SCHEMA_VERSION = "upet_confidence_evaluation_v1"
@@ -168,13 +170,41 @@ def evaluate_run(
         _load_mapping(run_dir / "resolved_config.yaml", yaml_file=True)
     )
     force_spec, energy_spec = _specs(config)
+    bins = _load_mapping(run_dir / "binning.json")
+    if bins != _bin_payload(force_spec, energy_spec):
+        raise ValueError("binning artifact identity disagrees with resolved config")
     cache_path = Path(cache_manifest_path).resolve()
     cache_manifest = _load_mapping(cache_path)
-    if cache_manifest.get("cache_id") != manifest.get("cache_id"):
-        raise ValueError("evaluation cache identity mismatch")
-    cache_identity = str(manifest["cache_id"])
     if cache_manifest.get("status") != "complete":
         raise ValueError("evaluation cache manifest must be complete")
+    cache_payload = cache_manifest.get("identity_payload")
+    if not isinstance(cache_payload, Mapping):
+        raise ValueError("evaluation cache identity_payload is missing")
+    derived_cache_id = cache_id(
+        {
+            "schema_version": CACHE_SCHEMA_VERSION,
+            "identity_payload": dict(cache_payload),
+        }
+    )
+    if (
+        cache_manifest.get("schema_version") != CACHE_SCHEMA_VERSION
+        or cache_manifest.get("identity") != derived_cache_id
+        or cache_manifest.get("cache_id") != derived_cache_id
+        or manifest.get("cache_id") != derived_cache_id
+    ):
+        raise ValueError("evaluation cache identity mismatch")
+    cache_identity = derived_cache_id
+    identity, expected_run_id, _ = _identities(config, cache_manifest, bins)
+    for field, expected in (
+        ("config_id", identity.config_id),
+        ("cache_id", identity.cache_id),
+        ("binning_id", identity.binning_id),
+        ("model_loss_id", identity.model_loss_id),
+        ("run_id", expected_run_id),
+        ("identity", expected_run_id),
+    ):
+        if manifest.get(field) != expected:
+            raise ValueError(f"evaluation run {field} identity mismatch")
     dataset = CachedSplitDataset(cache_path, "test", cache_identity)
 
     if checkpoint_path is None:
