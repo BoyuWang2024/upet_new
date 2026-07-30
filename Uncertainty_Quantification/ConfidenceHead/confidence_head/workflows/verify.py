@@ -115,6 +115,7 @@ def _verify_checkpoint(
 def _verify_predictions(
     prediction_path: Path,
     evaluation_manifest: Mapping[str, Any],
+    bins: Mapping[str, Any],
 ) -> None:
     predictions = torch.load(
         prediction_path, map_location="cpu", weights_only=True, mmap=True
@@ -215,6 +216,19 @@ def _verify_predictions(
         torch.all(force_representatives[1:] > force_representatives[:-1])
     ) or not bool(torch.all(energy_representatives[1:] > energy_representatives[:-1])):
         raise ValueError("prediction representatives must be strictly increasing")
+    try:
+        expected_force = torch.tensor(
+            bins["force"]["representatives"], dtype=force_representatives.dtype
+        )
+        expected_energy = torch.tensor(
+            bins["energy"]["representatives"], dtype=energy_representatives.dtype
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("binning representatives are invalid") from error
+    if not torch.equal(force_representatives, expected_force) or not torch.equal(
+        energy_representatives, expected_energy
+    ):
+        raise ValueError("prediction representatives disagree with binning artifact")
     if any(
         not bool(torch.all(value >= 0))
         for value in (
@@ -347,8 +361,9 @@ def verify_run(run_dir: Path, *, full: bool = True) -> dict[str, Any]:
         if not isinstance(counts, Mapping):
             raise ValueError("evaluation test counts are missing")
         _verify_cache(manifest, counts)
+        bins = _mapping(root / "binning.json")
         _verify_predictions(
-            paths["evaluation/test_predictions.pt"], evaluation_manifest
+            paths["evaluation/test_predictions.pt"], evaluation_manifest, bins
         )
     return {
         "status": "complete",
