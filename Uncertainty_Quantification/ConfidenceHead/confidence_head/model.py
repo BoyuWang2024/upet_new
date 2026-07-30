@@ -27,6 +27,8 @@ class ConfidenceModel(nn.Module):
         cumulant_order: int,
         signed_root: bool,
         dropout: float,
+        force_num_bins: int | None = None,
+        energy_num_bins: int | None = None,
     ) -> None:
         super().__init__()
         self.force_input_dim = force_input_dim
@@ -35,7 +37,7 @@ class ConfidenceModel(nn.Module):
             force_input_dim,
             hidden_dims,
             dropout,
-            num_bins,
+            num_bins if force_num_bins is None else force_num_bins,
         )
         self.energy_adapter = LocalToGlobalCumulantAdapter(
             energy_input_dim,
@@ -46,7 +48,7 @@ class ConfidenceModel(nn.Module):
             energy_input_dim * cumulant_order,
             hidden_dims,
             dropout,
-            num_bins,
+            num_bins if energy_num_bins is None else energy_num_bins,
         )
 
     def forward(

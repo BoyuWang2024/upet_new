@@ -5,9 +5,13 @@ from __future__ import annotations
 import json
 import os
 import random
+import subprocess
+import sys
 import tempfile
 from collections.abc import Mapping
 from contextlib import nullcontext
+from datetime import UTC, datetime
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
@@ -32,10 +36,45 @@ from ..trainer import (
     build_plateau_scheduler,
     capture_training_snapshot,
     commit_epoch_checkpoints,
+    restore_training_snapshot,
 )
 
 
 RUN_SCHEMA_VERSION = "upet_confidence_run_v1"
+
+
+def _package_version(distribution: str) -> str:
+    try:
+        return version(distribution)
+    except PackageNotFoundError:
+        return "unavailable"
+
+
+def _git_commit() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parents[4],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return "unavailable"
+    return result.stdout.strip()
+
+
+def _provenance(started_at: str, completed_at: str | None = None) -> dict[str, Any]:
+    return {
+        "git_commit": _git_commit(),
+        "python_version": sys.version.split()[0],
+        "dependencies": {
+            name: _package_version(name)
+            for name in ("torch", "numpy", "pydantic", "metatrain")
+        },
+        "started_at": started_at,
+        "completed_at": completed_at,
+    }
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -46,6 +85,51 @@ def _load_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"JSON {path} must contain a mapping")
     return value
+
+
+def _validate_cache_identity(
+    config: ConfidenceConfig, cache_manifest: Mapping[str, Any]
+) -> None:
+    payload = cache_manifest.get("identity_payload")
+    if not isinstance(payload, Mapping):
+        raise ValueError("cache identity_payload must be a mapping")
+    checkpoint = payload.get("checkpoint")
+    if (
+        not isinstance(checkpoint, Mapping)
+        or checkpoint.get("sha256") != config.checkpoint.expected_sha256
+    ):
+        raise ValueError("checkpoint identity disagrees with cache")
+    outputs = payload.get("outputs")
+    expected_outputs = {
+        "force_prediction": config.readouts.force_prediction,
+        "energy_prediction": config.readouts.energy_prediction,
+        "force_features": config.readouts.force_features,
+        "energy_features": config.readouts.energy_features,
+    }
+    if not isinstance(outputs, Mapping):
+        raise ValueError("cache output/readout identity is missing")
+    for field, expected in expected_outputs.items():
+        if outputs.get(field) != expected:
+            raise ValueError(f"cache readout {field} identity mismatch")
+    splits = payload.get("splits")
+    if not isinstance(splits, Mapping):
+        raise ValueError("cache split identity is missing")
+    for name in ("train", "validation", "test"):
+        split = splits.get(name)
+        if (
+            not isinstance(split, Mapping)
+            or split.get("sha256") != getattr(config.data, name).expected_sha256
+        ):
+            raise ValueError(f"cache {name} split identity mismatch")
+
+
+def _read_metrics(path: Path) -> list[dict[str, int | float]]:
+    if not path.is_file():
+        raise ValueError("resume metrics artifact is missing")
+    records = [json.loads(line) for line in path.read_text().splitlines() if line]
+    if not all(isinstance(record, dict) for record in records):
+        raise ValueError("resume metrics must contain JSON mappings")
+    return records
 
 
 def _safe_run_dir(root: Path, run_name: str) -> Path:
@@ -239,16 +323,16 @@ def train_run(
     cache_manifest_path: Path,
     run_name: str,
     stop_after_epoch: int | None = None,
+    resume_from: Path | None = None,
 ) -> Path:
     """Train confidence heads and atomically publish a complete run manifest."""
-    if config.binning.force_num_bins != config.binning.energy_num_bins:
-        raise ValueError("force and energy num_bins must match for ConfidenceModel")
     cache_path = Path(cache_manifest_path).resolve()
     cache_manifest = _load_json(cache_path)
     if cache_manifest.get("status") != "complete" or not isinstance(
         cache_manifest.get("cache_id"), str
     ):
         raise ValueError("cache manifest must be complete and identified")
+    _validate_cache_identity(config, cache_manifest)
     cache_identity = str(cache_manifest["cache_id"])
     split_metadata = cache_manifest.get("splits")
     if not isinstance(split_metadata, dict):
@@ -265,9 +349,11 @@ def train_run(
     )
     bins = _bin_payload(force_spec, energy_spec)
     identity, run_identity, resolved = _identities(config, cache_manifest, bins)
-    run_dir = _safe_run_dir(config.run.output_root, run_name)
-    run_dir.mkdir(parents=True)
+    run_dir = Path(config.run.output_root) / "runs" / run_name
+    _safe_run_dir(config.run.output_root, run_name) if resume_from is None else None
+    run_dir.mkdir(parents=True, exist_ok=resume_from is not None)
     manifest_path = run_dir / "manifest.json"
+    started_at = datetime.now(UTC).isoformat()
     base_manifest: dict[str, Any] = {
         "schema_version": RUN_SCHEMA_VERSION,
         "status": "incomplete",
@@ -285,8 +371,30 @@ def train_run(
             "checkpoint": resolved["checkpoint"],
             "splits": cache_manifest["identity_payload"]["splits"],
         },
+        "provenance": _provenance(started_at),
         "artifacts": {},
     }
+    previous_manifest: dict[str, Any] | None = None
+    if resume_from is not None:
+        previous_manifest = _load_json(manifest_path)
+        for field, expected in (
+            ("run_id", run_identity),
+            ("config_id", identity.config_id),
+            ("cache_id", identity.cache_id),
+            ("binning_id", identity.binning_id),
+            ("model_loss_id", identity.model_loss_id),
+        ):
+            if previous_manifest.get(field) != expected:
+                raise ValueError(f"resume run {field} identity mismatch")
+        previous_provenance = previous_manifest.get("provenance")
+        previous_start = (
+            previous_provenance.get("started_at")
+            if isinstance(previous_provenance, Mapping)
+            else None
+        )
+        if isinstance(previous_start, str):
+            started_at = previous_start
+            base_manifest["provenance"] = _provenance(started_at)
     atomic_write_json(manifest_path, base_manifest)
 
     _atomic_write_text(
@@ -313,7 +421,9 @@ def train_run(
         force_input_dim=force_dim,
         energy_input_dim=energy_dim,
         hidden_dims=config.model.hidden_dims,
+        force_num_bins=config.binning.force_num_bins,
         num_bins=config.binning.force_num_bins,
+        energy_num_bins=config.binning.energy_num_bins,
         cumulant_order=config.model.cumulant_order,
         signed_root=config.model.signed_root,
         dropout=config.model.dropout,
@@ -340,8 +450,47 @@ def train_run(
     global_step = 0
     best_step: int | None = None
     metric_records: list[dict[str, int | float]] = []
+    start_epoch = 0
+    if resume_from is not None:
+        assert previous_manifest is not None
+        checkpoint = Path(resume_from).resolve()
+        if not checkpoint.is_relative_to(run_dir.resolve()):
+            raise ValueError("resume checkpoint escapes run directory")
+        declared = previous_manifest.get("artifacts")
+        if not isinstance(declared, Mapping):
+            raise ValueError("resume run has no declared artifacts")
+        matching = [
+            entry
+            for entry in declared.values()
+            if isinstance(entry, Mapping)
+            and (run_dir / str(entry.get("path"))).resolve() == checkpoint
+        ]
+        if not matching:
+            raise ValueError("resume checkpoint is not declared by run manifest")
+        if not checkpoint.is_file() or sha256_file(checkpoint) != matching[0].get(
+            "sha256"
+        ):
+            raise ValueError("resume checkpoint sha256 mismatch")
+        snapshot = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        if not isinstance(snapshot, Mapping):
+            raise ValueError("resume checkpoint must contain a mapping")
+        restored = restore_training_snapshot(
+            snapshot=snapshot,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            expected_identity=identity,
+            sampler_generator=sampler,
+        )
+        start_epoch = restored.next_epoch
+        global_step = restored.global_step
+        control = restored.control_state
+        best_step = restored.best_step
+        metric_records = _read_metrics(run_dir / "logs" / "metrics.jsonl")
+        if len(metric_records) != start_epoch:
+            raise ValueError("resume metrics count disagrees with next epoch")
     externally_stopped = False
-    for epoch in range(config.trainer.max_epochs):
+    for epoch in range(start_epoch, config.trainer.max_epochs):
         train_force, train_energy, train_total, steps = _epoch(
             model=model,
             loader=train_loader,
@@ -384,6 +533,7 @@ def train_run(
             best_step=best_step,
             identity=identity,
             sampler_generator=sampler,
+            max_epochs=config.trainer.max_epochs,
         )
         external_stop = commit_epoch_checkpoints(
             checkpoint_dir=run_dir / "checkpoints",
@@ -432,11 +582,20 @@ def train_run(
         "best_epoch": control.best_epoch,
         "best_metric": control.best,
         "stop_reason": (
-            "external_stop_after_epoch" if externally_stopped else control.stop_reason
+            "external_stop_after_epoch"
+            if externally_stopped
+            else control.stop_reason
+            if control.stop_reason
+            else "max_epochs"
         ),
         "epochs_completed": len(metric_records),
         "force_feature_dim": force_dim,
         "energy_feature_dim": energy_dim,
+        "max_epochs": config.trainer.max_epochs,
     }
+    complete["provenance"] = _provenance(
+        started_at,
+        datetime.now(UTC).isoformat(),
+    )
     atomic_write_json(manifest_path, complete)
     return run_dir

@@ -43,8 +43,6 @@ def confidence_loss(
         raise ValueError("energy tensors must contain at least one structure")
     if force_bin_count == 0 or energy_bin_count == 0:
         raise ValueError("logits must contain at least one bin")
-    if force_bin_count != energy_bin_count:
-        raise ValueError("force and energy logits must use the same bin count")
 
     force = F.cross_entropy(
         force_logits.reshape(-1, force_logits.shape[-1]),

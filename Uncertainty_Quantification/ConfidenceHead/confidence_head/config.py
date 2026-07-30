@@ -134,12 +134,26 @@ class OptimizerConfig(StrictModel):
 
 class SchedulerConfig(StrictModel):
     monitor: Literal["val/total_loss_ema"] = "val/total_loss_ema"
-    factor: float = Field(default=0.5, gt=0, lt=1, allow_inf_nan=False)
-    patience: int = Field(default=5, ge=0)
-    threshold: float = Field(default=1e-4, ge=0, allow_inf_nan=False)
+    factor: float = 0.5
+    patience: int = 5
+    threshold: float = 0.0001
     threshold_mode: Literal["abs"] = "abs"
-    cooldown: int = Field(default=0, ge=0)
-    min_lr: float = Field(default=1e-6, ge=0, allow_inf_nan=False)
+    cooldown: int = 0
+    min_lr: float = 0.000001
+
+    @model_validator(mode="after")
+    def validate_fixed_scheduler(self) -> "SchedulerConfig":
+        approved = {
+            "factor": 0.5,
+            "patience": 5,
+            "threshold": 0.0001,
+            "cooldown": 0,
+            "min_lr": 0.000001,
+        }
+        for field, expected in approved.items():
+            if getattr(self, field) != expected:
+                raise ValueError(f"{field} must be fixed at {expected}")
+        return self
 
 
 class TrainerConfig(StrictModel):
@@ -159,8 +173,8 @@ class RunConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_cpu_amp(self) -> "RunConfig":
-        if self.device.lower().startswith("cpu") and self.amp:
-            raise ValueError("amp must be false when device starts with cpu")
+        if self.amp:
+            raise ValueError("amp is unsupported and must be false")
         return self
 
 

@@ -130,50 +130,66 @@ def _verify_predictions(
     }
     if set(predictions) != required:
         raise ValueError("test prediction fields mismatch")
-    force_labels = predictions["force_labels"]
+    if not all(isinstance(value, torch.Tensor) for value in predictions.values()):
+        raise ValueError("prediction fields must be tensors")
+
     force_logits = predictions["force_logits"]
-    energy_labels = predictions["energy_labels"]
-    energy_logits = predictions["energy_logits"]
-    ids = predictions["structure_ids"]
-    offsets = predictions["atom_offsets"]
+    force_labels = predictions["force_labels"]
     force_observed = predictions["force_observed_errors"]
     force_expected = predictions["force_expected_errors"]
+    energy_logits = predictions["energy_logits"]
+    energy_labels = predictions["energy_labels"]
     energy_observed = predictions["energy_observed_errors"]
     energy_expected = predictions["energy_expected_errors"]
+    ids = predictions["structure_ids"]
+    offsets = predictions["atom_offsets"]
+    force_representatives = predictions["force_representatives"]
+    energy_representatives = predictions["energy_representatives"]
+
+    floating = (
+        force_logits,
+        force_observed,
+        force_expected,
+        energy_logits,
+        energy_observed,
+        energy_expected,
+        force_representatives,
+        energy_representatives,
+    )
+    if not all(value.is_floating_point() for value in floating):
+        raise ValueError("prediction dtype mismatch: values must be floating point")
+    if not all(
+        value.dtype == torch.int64
+        for value in (force_labels, energy_labels, ids, offsets)
+    ):
+        raise ValueError("prediction dtype mismatch: indices must be int64")
     if (
-        not isinstance(force_logits, torch.Tensor)
-        or not isinstance(force_labels, torch.Tensor)
-        or force_logits.ndim != 3
-        or force_logits.shape[:2] != force_labels.shape
+        force_logits.ndim != 3
         or force_labels.ndim != 2
         or force_labels.shape[1] != 3
-        or not isinstance(force_observed, torch.Tensor)
+        or force_logits.shape[:2] != force_labels.shape
         or force_observed.shape != force_labels.shape
-        or not isinstance(force_expected, torch.Tensor)
         or force_expected.shape != force_labels.shape
     ):
         raise ValueError("force prediction shapes are inconsistent")
     if (
-        not isinstance(energy_logits, torch.Tensor)
-        or not isinstance(energy_labels, torch.Tensor)
-        or energy_logits.ndim != 2
+        energy_logits.ndim != 2
+        or energy_labels.ndim != 1
         or energy_logits.shape[0] != len(energy_labels)
         or len(energy_labels) != len(ids)
-        or not isinstance(energy_observed, torch.Tensor)
         or energy_observed.shape != energy_labels.shape
-        or not isinstance(energy_expected, torch.Tensor)
         or energy_expected.shape != energy_labels.shape
     ):
         raise ValueError("energy prediction shapes are inconsistent")
     if (
-        not isinstance(offsets, torch.Tensor)
-        or offsets.dtype != torch.int64
+        ids.ndim != 1
+        or offsets.ndim != 1
         or offsets.shape != (len(ids) + 1,)
         or int(offsets[0]) != 0
         or int(offsets[-1]) != len(force_labels)
         or not bool(torch.all(offsets[1:] > offsets[:-1]))
     ):
-        raise ValueError("test atom offsets are inconsistent")
+        raise ValueError("test atom offset shape or values are inconsistent")
     counts = evaluation_manifest.get("test_counts")
     if not isinstance(counts, Mapping) or (
         counts.get("structures") != len(ids)
@@ -181,24 +197,68 @@ def _verify_predictions(
         or counts.get("force_components") != force_labels.numel()
     ):
         raise ValueError("test prediction counts disagree with manifest")
-    force_representatives = predictions["force_representatives"]
-    energy_representatives = predictions["energy_representatives"]
     if (
-        not isinstance(force_representatives, torch.Tensor)
-        or force_representatives.ndim != 1
-        or force_logits.shape[-1] != len(force_representatives)
-        or not isinstance(energy_representatives, torch.Tensor)
+        force_representatives.ndim != 1
+        or len(force_representatives) != force_logits.shape[-1]
         or energy_representatives.ndim != 1
-        or energy_logits.shape[-1] != len(energy_representatives)
+        or len(energy_representatives) != energy_logits.shape[-1]
     ):
-        raise ValueError("prediction representatives are inconsistent with logits")
+        raise ValueError("prediction representative shape disagrees with logits")
+    if not bool(
+        torch.all(force_representatives[1:] > force_representatives[:-1])
+    ) or not bool(torch.all(energy_representatives[1:] > energy_representatives[:-1])):
+        raise ValueError("prediction representatives must be strictly increasing")
     if any(
-        isinstance(value, torch.Tensor)
-        and value.is_floating_point()
-        and not bool(torch.isfinite(value).all())
+        not bool(torch.all(value >= 0))
+        for value in (
+            force_observed,
+            force_expected,
+            energy_observed,
+            energy_expected,
+            force_representatives,
+            energy_representatives,
+        )
+    ):
+        raise ValueError("prediction errors and representatives must be nonnegative")
+    if not bool(
+        torch.all((force_labels >= 0) & (force_labels < force_logits.shape[-1]))
+    ) or not bool(
+        torch.all((energy_labels >= 0) & (energy_labels < energy_logits.shape[-1]))
+    ):
+        raise ValueError("prediction label range is invalid")
+    if len(torch.unique(ids)) != len(ids):
+        raise ValueError("prediction structure IDs must be unique")
+    if any(
+        value.is_floating_point() and not bool(torch.isfinite(value).all())
         for value in predictions.values()
     ):
         raise ValueError("test predictions contain non-finite values")
+    calculated_force = torch.softmax(force_logits, dim=-1) @ force_representatives
+    calculated_energy = torch.softmax(energy_logits, dim=-1) @ energy_representatives
+    if not torch.allclose(
+        calculated_force, force_expected, rtol=1e-5, atol=1e-6
+    ) or not torch.allclose(calculated_energy, energy_expected, rtol=1e-5, atol=1e-6):
+        raise ValueError("prediction expected error is inconsistent with logits")
+
+
+def _verify_cache(manifest: Mapping[str, Any], counts: Mapping[str, Any]) -> None:
+    cache = _mapping(Path(str(manifest.get("cache_manifest"))).resolve())
+    if cache.get("status") != "complete":
+        raise ValueError("cache manifest must be complete")
+    if cache.get("cache_id") != manifest.get("cache_id"):
+        raise ValueError("cache identity mismatch")
+    payload = cache.get("identity_payload")
+    splits = payload.get("splits") if isinstance(payload, Mapping) else None
+    test = splits.get("test") if isinstance(splits, Mapping) else None
+    if not isinstance(test, Mapping):
+        raise ValueError("cache test identity/counts are missing")
+    expected = {
+        "structures": test.get("structure_count"),
+        "atoms": test.get("atom_count"),
+        "force_components": test.get("force_component_count"),
+    }
+    if any(counts.get(field) != value for field, value in expected.items()):
+        raise ValueError("evaluation test counts disagree with complete cache")
 
 
 def verify_run(run_dir: Path, *, full: bool = True) -> dict[str, Any]:
@@ -250,10 +310,13 @@ def verify_run(run_dir: Path, *, full: bool = True) -> dict[str, Any]:
             evaluation_manifest.get("artifacts"),
             full=full,
         )
-        if full:
-            _verify_predictions(
-                paths["evaluation/test_predictions.pt"], evaluation_manifest
-            )
+        counts = evaluation_manifest.get("test_counts")
+        if not isinstance(counts, Mapping):
+            raise ValueError("evaluation test counts are missing")
+        _verify_cache(manifest, counts)
+        _verify_predictions(
+            paths["evaluation/test_predictions.pt"], evaluation_manifest
+        )
     return {
         "status": "complete",
         "run_id": manifest["run_id"],

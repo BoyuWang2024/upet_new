@@ -110,6 +110,28 @@ def _offsets(counts: list[torch.Tensor]) -> torch.Tensor:
     return result
 
 
+def _declared_artifact(run_dir: Path, manifest: Mapping[str, Any], path: Path) -> Path:
+    candidate = path.resolve()
+    if not candidate.is_relative_to(run_dir):
+        raise ValueError("checkpoint escapes run directory")
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, Mapping):
+        raise ValueError("run artifacts declaration is missing")
+    for entry in artifacts.values():
+        if not isinstance(entry, Mapping):
+            continue
+        declared = (run_dir / str(entry.get("path"))).resolve()
+        if declared != candidate:
+            continue
+        if not candidate.is_file():
+            raise ValueError("declared checkpoint is missing")
+        expected = entry.get("sha256")
+        if not isinstance(expected, str) or sha256_file(candidate) != expected:
+            raise ValueError("declared checkpoint sha256 mismatch")
+        return candidate
+    raise ValueError("checkpoint is not declared by run manifest")
+
+
 def _checkpoint_identity(
     snapshot: Mapping[str, Any], manifest: Mapping[str, Any]
 ) -> None:
@@ -135,6 +157,8 @@ def evaluate_run(
         or manifest.get("status") != "complete"
     ):
         raise ValueError("run manifest must be complete")
+    for relative in ("resolved_config.yaml", "binning.json"):
+        _declared_artifact(run_dir, manifest, run_dir / relative)
     config = ConfidenceConfig.model_validate(
         _load_mapping(run_dir / "resolved_config.yaml", yaml_file=True)
     )
@@ -144,6 +168,8 @@ def evaluate_run(
     if cache_manifest.get("cache_id") != manifest.get("cache_id"):
         raise ValueError("evaluation cache identity mismatch")
     cache_identity = str(manifest["cache_id"])
+    if cache_manifest.get("status") != "complete":
+        raise ValueError("evaluation cache manifest must be complete")
     dataset = CachedSplitDataset(cache_path, "test", cache_identity)
 
     if checkpoint_path is None:
@@ -154,6 +180,7 @@ def evaluate_run(
         checkpoint_relative = os.path.relpath(checkpoint, run_dir / "evaluation")
     if not checkpoint.is_file():
         raise ValueError(f"evaluation checkpoint does not exist: {checkpoint}")
+    checkpoint = _declared_artifact(run_dir, manifest, checkpoint)
     snapshot = torch.load(checkpoint, map_location="cpu", weights_only=False)
     if not isinstance(snapshot, Mapping):
         raise ValueError("checkpoint must contain a mapping")
@@ -161,9 +188,11 @@ def evaluate_run(
 
     model = ConfidenceModel(
         force_input_dim=int(manifest["force_feature_dim"]),
+        num_bins=config.binning.force_num_bins,
         energy_input_dim=int(manifest["energy_feature_dim"]),
         hidden_dims=config.model.hidden_dims,
-        num_bins=config.binning.force_num_bins,
+        force_num_bins=config.binning.force_num_bins,
+        energy_num_bins=config.binning.energy_num_bins,
         cumulant_order=config.model.cumulant_order,
         signed_root=config.model.signed_root,
         dropout=config.model.dropout,
