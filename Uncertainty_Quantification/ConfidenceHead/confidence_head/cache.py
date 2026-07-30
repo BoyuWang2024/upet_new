@@ -378,6 +378,7 @@ def _write_shard(
     written = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
     metadata = _validate_shard(written, split, shard_index)
     return {
+        "status": "complete",
         "path": relative_path.as_posix(),
         "sha256": sha256_file(path),
         **metadata,
@@ -527,6 +528,22 @@ def build_raw_cache(
             split: _build_split(transaction.root, split, structures, shard_max_atoms)
             for split, structures in split_structures.items()
         }
+        outputs = identity_payload.get("outputs")
+        if outputs is None:
+            outputs = identity_payload.get("readouts")
+        if not isinstance(outputs, Mapping):
+            raise ValueError("identity_payload must contain output keys")
+        force_feature_key = outputs.get("force_features")
+        energy_feature_key = outputs.get("energy_features")
+        if (
+            not isinstance(force_feature_key, str)
+            or not isinstance(energy_feature_key, str)
+            or force_feature_key == energy_feature_key
+        ):
+            raise ValueError("force and energy feature output keys must be distinct")
+        for split_manifest in splits.values():
+            split_manifest["force_feature_key"] = force_feature_key
+            split_manifest["energy_feature_key"] = energy_feature_key
         complete = {**incomplete, "status": "complete", "splits": splits}
         atomic_write_json(transaction.manifest_path, complete)
         _validate_complete_cache(
@@ -602,6 +619,10 @@ def _validate_complete_cache(
                 raise ValueError(
                     f"split {split} shard {index}: entry must be a mapping"
                 )
+            if entry.get("status") != "complete":
+                raise ValueError(
+                    f"split {split} shard {index}: status must be complete"
+                )
             path = _confined_shard_path(root, entry.get("path"))
             digest = entry.get("sha256")
             if not isinstance(digest, str) or len(digest) != 64:
@@ -660,6 +681,24 @@ def _validate_complete_cache(
             or split_manifest.get("energy_feature_dim") != dimensions[1]
         ):
             raise ValueError(f"split {split}: feature dimension metadata mismatch")
+        if split_manifest.get("feature_dtype") != "float32":
+            raise ValueError(f"split {split}: feature_dtype must be float32")
+        outputs = payload.get("outputs")
+        if outputs is None:
+            outputs = payload.get("readouts")
+        if not isinstance(outputs, dict):
+            raise ValueError("cache identity output keys must be a mapping")
+        if split_manifest.get("force_feature_key") != outputs.get(
+            "force_features"
+        ) or split_manifest.get("energy_feature_key") != outputs.get("energy_features"):
+            raise ValueError(f"split {split}: feature output key mismatch")
+        payload_features = payload.get("features")
+        if isinstance(payload_features, dict) and (
+            payload_features.get("force_dim") != dimensions[0]
+            or payload_features.get("energy_dim") != dimensions[1]
+            or payload_features.get("dtype") != "float32"
+        ):
+            raise ValueError(f"split {split}: identity feature metadata mismatch")
         shard_map = split_manifest.get("structure_to_shard")
         index_map = split_manifest.get("structure_to_index")
         if (

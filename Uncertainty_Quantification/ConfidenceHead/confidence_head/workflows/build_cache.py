@@ -13,6 +13,7 @@ from typing import Any
 
 import torch
 
+from ..artifacts import sha256_file
 from ..cache import (
     SCHEMA_VERSION,
     RawStructure,
@@ -141,6 +142,7 @@ def _raw_structures(
     config: ConfidenceConfig,
     device: torch.device,
     execution: dict[str, Any],
+    expected_sha256: str,
 ) -> Iterator[RawStructure]:
     for samples in _batches(iter_samples(path), config.cache.batch_size):
         systems = _build_systems(samples, model, device)
@@ -178,6 +180,11 @@ def _raw_structures(
                 force_features=readouts.force_features[start:stop],
                 energy_features=readouts.energy_features[start:stop],
             )
+    sha_after = sha256_file(path)
+    if sha_after != expected_sha256:
+        raise ValueError(
+            f"dataset SHA changed during extraction: {sha_after} != {expected_sha256}"
+        )
 
 
 def _identity_payload(
@@ -244,6 +251,7 @@ def build_cache(config: ConfidenceConfig) -> Path:
             config=config,
             device=device,
             execution=execution,
+            expected_sha256=identities[split].sha256,
         )
         for split in ("train", "validation", "test")
     }

@@ -580,6 +580,12 @@ def test_manifest_records_normative_split_feature_metadata(
     assert split["force_feature_dim"] == 2
     assert split["energy_feature_dim"] == 2
     assert split["feature_dtype"] == "float32"
+    assert split["force_feature_key"] == identity_payload["readouts"]["force_features"]
+    assert (
+        split["energy_feature_key"] == identity_payload["readouts"]["energy_features"]
+    )
+    assert split["force_feature_key"] != split["energy_feature_key"]
+    assert all(shard["status"] == "complete" for shard in split["shards"])
 
 
 def test_prepare_creates_independent_incomplete_staging(tmp_path: Path) -> None:

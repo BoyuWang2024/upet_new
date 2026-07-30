@@ -206,3 +206,28 @@ def test_expected_dataset_sha_is_rejected_before_parsing(
         data_module.dataset_identity(path, expected_sha256="e" * 64)
 
     assert events == ["sha"]
+
+
+def test_extraction_rechecks_dataset_sha_when_stream_is_exhausted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "data.extxyz"
+    monkeypatch.setattr(workflow, "iter_samples", lambda candidate: iter(()))
+    monkeypatch.setattr(workflow, "sha256_file", lambda candidate: "f" * 64)
+    config = SimpleNamespace(
+        cache=SimpleNamespace(batch_size=2),
+        readouts=SimpleNamespace(),
+    )
+
+    stream = workflow._raw_structures(
+        path=path,
+        model=object(),
+        config=config,
+        device=torch.device("cpu"),
+        execution={"autocast": False},
+        expected_sha256="e" * 64,
+    )
+
+    with pytest.raises(ValueError, match="changed during extraction"):
+        list(stream)
