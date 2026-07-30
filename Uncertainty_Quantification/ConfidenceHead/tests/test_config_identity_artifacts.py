@@ -45,13 +45,16 @@ def _valid_config(tmp_path: Path, *, profile: str = "production") -> dict[str, A
 def test_production_rejects_identical_splits(tmp_path: Path) -> None:
     raw = _valid_config(tmp_path)
     config = ConfidenceConfig.model_validate(raw)
-    assert len(
-        {
-            config.data.train.expected_sha256,
-            config.data.validation.expected_sha256,
-            config.data.test.expected_sha256,
-        }
-    ) == 3
+    assert (
+        len(
+            {
+                config.data.train.expected_sha256,
+                config.data.validation.expected_sha256,
+                config.data.test.expected_sha256,
+            }
+        )
+        == 3
+    )
 
     raw["data"]["validation"]["expected_sha256"] = raw["data"]["train"][
         "expected_sha256"
@@ -108,9 +111,7 @@ def test_paths_resolve_from_repo_root_not_cwd(
 
     assert config.checkpoint.path == (repo_root / "models/model.ckpt").resolve()
     assert config.data.train.path == (repo_root / "data/train.xyz").resolve()
-    assert config.data.validation.path == (
-        repo_root / "data/validation.xyz"
-    ).resolve()
+    assert config.data.validation.path == (repo_root / "data/validation.xyz").resolve()
     assert config.data.test.path == (repo_root / "data/test.xyz").resolve()
     assert config.run.output_root == (repo_root / "outputs/confidence").resolve()
 

@@ -147,13 +147,9 @@ class ConfidenceConfig(StrictModel):
         identities_are_distinct = len(set(identities)) == len(identities)
         if self.profile == "production":
             if self.allow_identical_splits:
-                raise ValueError(
-                    "production forbids allow_identical_splits=true"
-                )
+                raise ValueError("production forbids allow_identical_splits=true")
             if not identities_are_distinct:
-                raise ValueError(
-                    "production split identities must be distinct"
-                )
+                raise ValueError("production split identities must be distinct")
         elif not identities_are_distinct and not self.allow_identical_splits:
             raise ValueError(
                 "identical smoke splits require allow_identical_splits=true"
