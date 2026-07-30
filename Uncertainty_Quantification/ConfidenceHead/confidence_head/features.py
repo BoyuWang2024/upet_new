@@ -134,7 +134,9 @@ def _require_no_components(block: Any, key: str) -> None:
 def _require_one_property(block: Any, key: str) -> None:
     count = _property_count(block, key)
     if count != 1:
-        raise ValueError(f"{key}: expected exactly one property, found {count}")
+        raise ValueError(
+            f"{key}: properties axis must contain exactly one property, found {count}"
+        )
 
 
 def _require_xyz_component(block: Any, key: str) -> None:
