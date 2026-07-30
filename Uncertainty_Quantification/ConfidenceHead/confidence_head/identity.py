@@ -5,7 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
+
+
+def _json_default(value: Any) -> str:
+    if isinstance(value, Path):
+        return str(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 def canonical_json(payload: Mapping[str, Any]) -> bytes:
@@ -16,6 +23,7 @@ def canonical_json(payload: Mapping[str, Any]) -> bytes:
         separators=(",", ":"),
         ensure_ascii=False,
         allow_nan=False,
+        default=_json_default,
     ).encode("utf-8")
 
 

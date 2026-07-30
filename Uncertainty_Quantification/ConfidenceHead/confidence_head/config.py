@@ -7,10 +7,52 @@ from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from yaml.constructor import ConstructorError
+from yaml.nodes import MappingNode
+from yaml.resolver import BaseResolver
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 Profile = Literal["smoke", "production"]
+
+
+class UniqueKeySafeLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects duplicate keys in every mapping."""
+
+
+def _construct_unique_mapping(
+    loader: UniqueKeySafeLoader,
+    node: MappingNode,
+    deep: bool = False,
+) -> dict[Any, Any]:
+    loader.flatten_mapping(node)
+    mapping: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            hash(key)
+        except TypeError as error:
+            raise ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                "found unhashable key",
+                key_node.start_mark,
+            ) from error
+        if key in mapping:
+            raise ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                f"found duplicate key {key!r}",
+                key_node.start_mark,
+            )
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+UniqueKeySafeLoader.add_constructor(
+    BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
 
 
 class StrictModel(BaseModel):
@@ -58,9 +100,9 @@ class CacheConfig(StrictModel):
 
 class BinningConfig(StrictModel):
     algorithm: Literal["fixed_linear_v1"] = "fixed_linear_v1"
-    force_num_bins: int = Field(default=50, gt=1)
+    force_num_bins: int = Field(default=50, ge=3)
     force_max_error: float = Field(default=0.5, gt=0, allow_inf_nan=False)
-    energy_num_bins: int = Field(default=50, gt=1)
+    energy_num_bins: int = Field(default=50, ge=3)
     energy_max_error: float = Field(default=0.3, gt=0, allow_inf_nan=False)
 
 
@@ -192,7 +234,13 @@ def load_config(
     """Load one YAML configuration with paths anchored at the repository root."""
     root = (REPO_ROOT if repo_root is None else Path(repo_root)).resolve()
     config_path = _resolve_path(path, root)
-    loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    try:
+        loaded = yaml.load(
+            config_path.read_text(encoding="utf-8"),
+            Loader=UniqueKeySafeLoader,
+        )
+    except yaml.YAMLError as error:
+        raise ValueError(f"invalid confidence YAML {config_path}: {error}") from error
     if not isinstance(loaded, dict):
         raise ValueError("confidence configuration must contain a YAML mapping")
     raw: dict[str, Any] = loaded
