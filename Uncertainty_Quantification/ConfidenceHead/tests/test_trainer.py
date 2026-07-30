@@ -687,6 +687,8 @@ def _valid_snapshot_for_rejection() -> tuple[
         ("best_epoch", -1, "best_epoch"),
         ("stopped", "false", "stopped"),
         ("stop_reason", 4, "stop_reason"),
+        ("ema", None, "ema and best"),
+        ("best", None, "ema and best"),
     ],
 )
 def test_restore_rejects_invalid_control_scalars_without_mutation(

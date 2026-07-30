@@ -137,6 +137,7 @@ def update_control_state(
         raise ValueError("patience must be positive")
     if min_epochs <= 0:
         raise ValueError("min_epochs must be positive")
+    state = _validate_control_state(state)
     if state.stopped:
         raise ValueError("cannot advance an already stopped control state")
 
@@ -331,6 +332,10 @@ def _validate_control_state(state: EarlyStoppingState) -> EarlyStoppingState:
         raise ValueError("checkpoint bad_epochs must be a non-negative integer")
     if state.bad_epochs < 0:
         raise ValueError("checkpoint bad_epochs must be a non-negative integer")
+    if (ema is None) != (best is None):
+        raise ValueError("checkpoint ema and best must be set together")
+    if best is None and state.bad_epochs != 0:
+        raise ValueError("checkpoint uninitialized state must have zero bad_epochs")
     if not isinstance(state.stopped, bool):
         raise ValueError("checkpoint stopped must be a boolean")
     if state.stop_reason is not None and not isinstance(state.stop_reason, str):
