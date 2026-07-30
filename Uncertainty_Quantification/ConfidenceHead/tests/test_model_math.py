@@ -11,6 +11,7 @@ from Uncertainty_Quantification.ConfidenceHead.confidence_head.adapters import (
 )
 from Uncertainty_Quantification.ConfidenceHead.confidence_head.heads import (
     ComponentConfidenceHead,
+    ConfidenceHead,
 )
 from Uncertainty_Quantification.ConfidenceHead.confidence_head.losses import (
     confidence_loss,
@@ -133,6 +134,59 @@ def test_component_head_has_three_independent_parameter_sets() -> None:
     assert head(torch.zeros(6, 2)).shape == (6, 3, 5)
 
 
+@pytest.mark.parametrize("head_type", [ConfidenceHead, ComponentConfidenceHead])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"input_dim": 0, "hidden_dims": (4,), "dropout": 0.0, "num_bins": 5},
+        {"input_dim": 2, "hidden_dims": (0,), "dropout": 0.0, "num_bins": 5},
+        {"input_dim": 2, "hidden_dims": (4,), "dropout": 0.0, "num_bins": 0},
+        {"input_dim": 2, "hidden_dims": (4,), "dropout": -0.1, "num_bins": 5},
+        {"input_dim": 2, "hidden_dims": (4,), "dropout": 1.0, "num_bins": 5},
+    ],
+)
+def test_heads_reject_invalid_construction_arguments(
+    head_type: type[torch.nn.Module],
+    arguments: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError):
+        head_type(**arguments)
+
+
+def test_component_head_rejects_non_matrix_features() -> None:
+    head = ComponentConfidenceHead(2, (4,), 0.0, 5)
+
+    with pytest.raises(ValueError, match="features"):
+        head(torch.zeros(3, 1, 2))
+
+
+@pytest.mark.parametrize(
+    ("force_features", "energy_features", "offsets"),
+    [
+        (torch.zeros(3, 1, 2), torch.ones(3, 2), torch.tensor([0, 3])),
+        (torch.zeros(3, 2), torch.ones(3, 1, 2), torch.tensor([0, 3])),
+        (torch.zeros(2, 2), torch.ones(3, 2), torch.tensor([0, 3])),
+    ],
+)
+def test_model_rejects_invalid_readout_feature_shapes(
+    force_features: torch.Tensor,
+    energy_features: torch.Tensor,
+    offsets: torch.Tensor,
+) -> None:
+    model = ConfidenceModel(
+        force_input_dim=2,
+        energy_input_dim=2,
+        hidden_dims=(4,),
+        num_bins=5,
+        cumulant_order=1,
+        signed_root=True,
+        dropout=0.0,
+    )
+
+    with pytest.raises(ValueError, match="features"):
+        model(force_features, energy_features, offsets)
+
+
 def test_confidence_loss_flattens_force_components_and_weights_means() -> None:
     force_logits = torch.tensor(
         [
@@ -164,3 +218,71 @@ def test_confidence_loss_flattens_force_components_and_weights_means() -> None:
     )
     assert result.force_count == force_labels.numel()
     assert result.energy_count == energy_labels.numel()
+
+
+@pytest.mark.parametrize(
+    ("force_logits", "force_labels", "energy_logits", "energy_labels"),
+    [
+        (
+            torch.zeros(2, 2, 4),
+            torch.zeros(2, 3, dtype=torch.long),
+            torch.zeros(2, 4),
+            torch.zeros(2, dtype=torch.long),
+        ),
+        (
+            torch.zeros(2, 3, 4),
+            torch.zeros(3, 2, dtype=torch.long),
+            torch.zeros(2, 4),
+            torch.zeros(2, dtype=torch.long),
+        ),
+        (
+            torch.zeros(2, 3, 4),
+            torch.zeros(2, 3, dtype=torch.long),
+            torch.zeros(2, 1, 4),
+            torch.zeros(2, dtype=torch.long),
+        ),
+        (
+            torch.zeros(2, 3, 4),
+            torch.zeros(2, 3, dtype=torch.long),
+            torch.zeros(2, 4),
+            torch.zeros(2, 1, dtype=torch.long),
+        ),
+        (
+            torch.zeros(0, 3, 4),
+            torch.zeros(0, 3, dtype=torch.long),
+            torch.zeros(2, 4),
+            torch.zeros(2, dtype=torch.long),
+        ),
+        (
+            torch.zeros(2, 3, 4),
+            torch.zeros(2, 3, dtype=torch.long),
+            torch.zeros(0, 4),
+            torch.zeros(0, dtype=torch.long),
+        ),
+        (
+            torch.zeros(2, 3, 0),
+            torch.zeros(2, 3, dtype=torch.long),
+            torch.zeros(2, 0),
+            torch.zeros(2, dtype=torch.long),
+        ),
+        (
+            torch.zeros(2, 3, 4),
+            torch.zeros(2, 3, dtype=torch.long),
+            torch.zeros(2, 5),
+            torch.zeros(2, dtype=torch.long),
+        ),
+    ],
+)
+def test_confidence_loss_rejects_invalid_tensor_contracts(
+    force_logits: torch.Tensor,
+    force_labels: torch.Tensor,
+    energy_logits: torch.Tensor,
+    energy_labels: torch.Tensor,
+) -> None:
+    with pytest.raises(ValueError):
+        confidence_loss(
+            force_logits,
+            force_labels,
+            energy_logits,
+            energy_labels,
+        )
