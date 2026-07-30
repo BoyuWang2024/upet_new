@@ -130,7 +130,7 @@ def _contains_forbidden_field(value: Any) -> bool:
 
 def test_raw_structure_is_frozen(raw_structures: list[RawStructure]) -> None:
     with pytest.raises(FrozenInstanceError):
-        raw_structures[0].structure_id = 999
+        raw_structures[0].structure_id = 999  # type: ignore[misc]
 
 
 def test_build_writes_complete_manifest_and_exact_shard_schema(
