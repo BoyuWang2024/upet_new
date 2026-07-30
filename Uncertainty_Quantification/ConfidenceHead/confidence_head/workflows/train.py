@@ -126,13 +126,29 @@ def _validate_cache_identity(
 def _read_metrics(path: Path) -> list[dict[str, int | float]]:
     if not path.is_file():
         raise ValueError("resume metrics artifact is missing")
-    records = [json.loads(line) for line in path.read_text().splitlines() if line]
-    if not all(isinstance(record, dict) for record in records):
-        raise ValueError("resume metrics must contain JSON mappings")
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as error:
+        raise ValueError(f"unable to read resume metrics {path}: {error}") from error
+    records: list[dict[str, int | float]] = []
+    for line_number, line in enumerate(lines, start=1):
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                f"invalid resume metrics JSON at line {line_number}: {error}"
+            ) from error
+        if not isinstance(record, dict):
+            raise ValueError(
+                f"resume metrics line {line_number} must contain a JSON mapping"
+            )
+        records.append(record)
     return records
 
 
-def _safe_run_dir(root: Path, run_name: str) -> Path:
+def _validate_run_name(run_name: str) -> None:
     if (
         not isinstance(run_name, str)
         or not run_name
@@ -140,6 +156,10 @@ def _safe_run_dir(root: Path, run_name: str) -> Path:
         or Path(run_name).name != run_name
     ):
         raise ValueError(f"unsafe run name: {run_name!r}")
+
+
+def _safe_run_dir(root: Path, run_name: str) -> Path:
+    _validate_run_name(run_name)
     run_dir = Path(root) / "runs" / run_name
     if run_dir.exists():
         raise ValueError(f"run directory already exists: {run_dir}")
@@ -317,6 +337,51 @@ def _artifact_entry(run_dir: Path, relative: str) -> dict[str, str]:
     return {"path": relative, "sha256": sha256_file(path)}
 
 
+def _resume_artifact(
+    run_dir: Path,
+    manifest: Mapping[str, Any],
+    relative: str,
+) -> tuple[Path, str]:
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, Mapping):
+        raise ValueError("resume run has no declared artifacts")
+    entry = artifacts.get(relative)
+    if not isinstance(entry, Mapping) or entry.get("path") != relative:
+        raise ValueError(f"resume artifact is not declared: {relative}")
+    path = (run_dir / relative).resolve()
+    if not path.is_relative_to(run_dir.resolve()) or not path.is_file():
+        raise ValueError(f"resume artifact is missing or unsafe: {relative}")
+    expected = entry.get("sha256")
+    if not isinstance(expected, str) or sha256_file(path) != expected:
+        raise ValueError(f"resume artifact sha256 mismatch: {relative}")
+    return path, expected
+
+
+def _validate_resume_metrics(
+    records: list[dict[str, int | float]],
+    *,
+    restored_epoch: int,
+    global_step: int,
+    learning_rate: float,
+    ema: float | None,
+) -> None:
+    if len(records) != restored_epoch + 1:
+        raise ValueError("resume metrics count disagrees with checkpoint epoch")
+    for expected_epoch, record in enumerate(records):
+        if record.get("epoch") != expected_epoch:
+            raise ValueError("resume metrics epoch sequence is not contiguous")
+    last = records[-1]
+    boundaries = (
+        ("epoch", restored_epoch, "epoch"),
+        ("global_step", global_step, "global_step"),
+        ("learning_rate", learning_rate, "learning_rate"),
+        ("val/total_loss_ema", ema, "EMA"),
+    )
+    for metric_field, expected, label in boundaries:
+        if last.get(metric_field) != expected:
+            raise ValueError(f"resume metrics {label} disagrees with checkpoint")
+
+
 def train_run(
     config: ConfidenceConfig,
     *,
@@ -349,8 +414,10 @@ def train_run(
     )
     bins = _bin_payload(force_spec, energy_spec)
     identity, run_identity, resolved = _identities(config, cache_manifest, bins)
+    _validate_run_name(run_name)
     run_dir = Path(config.run.output_root) / "runs" / run_name
-    _safe_run_dir(config.run.output_root, run_name) if resume_from is None else None
+    if resume_from is None:
+        _safe_run_dir(config.run.output_root, run_name)
     run_dir.mkdir(parents=True, exist_ok=resume_from is not None)
     manifest_path = run_dir / "manifest.json"
     started_at = datetime.now(UTC).isoformat()
@@ -395,13 +462,13 @@ def train_run(
         if isinstance(previous_start, str):
             started_at = previous_start
             base_manifest["provenance"] = _provenance(started_at)
-    atomic_write_json(manifest_path, base_manifest)
-
-    _atomic_write_text(
-        run_dir / "resolved_config.yaml",
-        yaml.safe_dump(resolved, sort_keys=True),
-    )
-    atomic_write_json(run_dir / "binning.json", bins)
+    if resume_from is None:
+        atomic_write_json(manifest_path, base_manifest)
+        _atomic_write_text(
+            run_dir / "resolved_config.yaml",
+            yaml.safe_dump(resolved, sort_keys=True),
+        )
+        atomic_write_json(run_dir / "binning.json", bins)
 
     train_data = CachedSplitDataset(cache_path, "train", cache_identity)
     validation_data = CachedSplitDataset(cache_path, "validation", cache_identity)
@@ -490,9 +557,17 @@ def train_run(
         global_step = restored.global_step
         control = restored.control_state
         best_step = restored.best_step
-        metric_records = _read_metrics(run_dir / "logs" / "metrics.jsonl")
-        if len(metric_records) != start_epoch:
-            raise ValueError("resume metrics count disagrees with next epoch")
+        metrics_path, _ = _resume_artifact(
+            run_dir, previous_manifest, "logs/metrics.jsonl"
+        )
+        metric_records = _read_metrics(metrics_path)
+        _validate_resume_metrics(
+            metric_records,
+            restored_epoch=restored.epoch,
+            global_step=restored.global_step,
+            learning_rate=restored.learning_rate,
+            ema=restored.control_state.ema,
+        )
     externally_stopped = False
     for epoch in range(start_epoch, config.trainer.max_epochs):
         train_force, train_energy, train_total, steps = _epoch(

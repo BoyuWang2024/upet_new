@@ -515,11 +515,11 @@ def commit_epoch_checkpoints(
 
     external_stop = stop_after_epoch is not None and epoch >= stop_after_epoch
     last_snapshot = dict(snapshot)
-    if epoch + 1 >= max_epochs and not last_snapshot.get("stop_reason"):
-        last_snapshot["stopped"] = True
-        last_snapshot["stop_reason"] = "max_epochs"
-    if external_stop and not last_snapshot.get("stop_reason"):
+    if external_stop:
         last_snapshot["stopped"] = True
         last_snapshot["stop_reason"] = _EXTERNAL_STOP_REASON
+    elif epoch + 1 >= max_epochs and not last_snapshot.get("stop_reason"):
+        last_snapshot["stopped"] = True
+        last_snapshot["stop_reason"] = "max_epochs"
     atomic_torch_save(directory / "last.pt", last_snapshot)
     return external_stop
