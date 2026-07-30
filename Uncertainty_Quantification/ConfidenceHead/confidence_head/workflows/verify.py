@@ -11,6 +11,7 @@ import torch
 import yaml
 
 from ..artifacts import load_verified_torch, sha256_file
+from ..cache import SCHEMA_VERSION as CACHE_SCHEMA_VERSION
 from ..identity import binning_id, config_id, model_loss_id, run_id
 from ..trainer import CHECKPOINT_SCHEMA_VERSION
 from .evaluate import EVALUATION_SCHEMA_VERSION
@@ -251,10 +252,25 @@ def _verify_cache(manifest: Mapping[str, Any], counts: Mapping[str, Any]) -> Non
     cache = _mapping(Path(str(manifest.get("cache_manifest"))).resolve())
     if cache.get("status") != "complete":
         raise ValueError("cache manifest must be complete")
-    if cache.get("cache_id") != manifest.get("cache_id"):
-        raise ValueError("cache identity mismatch")
     payload = cache.get("identity_payload")
-    splits = payload.get("splits") if isinstance(payload, Mapping) else None
+    if not isinstance(payload, Mapping):
+        raise ValueError("cache identity_payload must be a mapping")
+    from ..identity import cache_id
+
+    derived = cache_id(
+        {
+            "schema_version": CACHE_SCHEMA_VERSION,
+            "identity_payload": dict(payload),
+        }
+    )
+    if (
+        cache.get("schema_version") != CACHE_SCHEMA_VERSION
+        or cache.get("identity") != derived
+        or cache.get("cache_id") != derived
+        or manifest.get("cache_id") != derived
+    ):
+        raise ValueError("cache identity mismatch")
+    splits = payload.get("splits")
     test = splits.get("test") if isinstance(splits, Mapping) else None
     if not isinstance(test, Mapping):
         raise ValueError("cache test identity/counts are missing")
