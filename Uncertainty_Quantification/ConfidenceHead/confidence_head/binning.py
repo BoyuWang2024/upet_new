@@ -18,7 +18,7 @@ class BinningSpec:
 def fixed_linear_binning(num_bins: int, max_error: float) -> BinningSpec:
     if num_bins < 3:
         raise ValueError("num_bins must be at least 3")
-    if max_error <= 0:
+    if not max_error > 0:
         raise ValueError("max_error must be positive")
 
     width = max_error / num_bins
