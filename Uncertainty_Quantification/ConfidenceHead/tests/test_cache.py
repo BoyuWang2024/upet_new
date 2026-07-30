@@ -17,6 +17,7 @@ from Uncertainty_Quantification.ConfidenceHead.confidence_head.cache import (
     RawStructure,
     build_raw_cache,
     collate_cached_structures,
+    prepare_raw_cache,
 )
 
 
@@ -564,3 +565,110 @@ def test_cache_identity_is_deterministic_and_output_path_independent(
     encoded_manifest = json.dumps(first)
     assert str(tmp_path) not in encoded_manifest
     assert FORBIDDEN_DERIVED_FIELDS.isdisjoint(identity_payload)
+
+
+def test_manifest_records_normative_split_feature_metadata(
+    tmp_path: Path,
+    raw_structures: list[RawStructure],
+    identity_payload: dict[str, Any],
+) -> None:
+    _, manifest = _build(tmp_path, raw_structures, identity_payload)
+    split = manifest["splits"]["train"]
+    assert split["structure_count"] == 3
+    assert split["atom_count"] == 6
+    assert split["force_component_count"] == 18
+    assert split["force_feature_dim"] == 2
+    assert split["energy_feature_dim"] == 2
+    assert split["feature_dtype"] == "float32"
+
+
+def test_prepare_creates_independent_incomplete_staging(tmp_path: Path) -> None:
+    first = prepare_raw_cache(tmp_path)
+    second = prepare_raw_cache(tmp_path)
+    assert first.root != second.root
+    for staging in (first, second):
+        manifest = json.loads(staging.manifest_path.read_text(encoding="utf-8"))
+        assert manifest["status"] == "incomplete"
+        assert manifest["splits"] == {}
+
+
+def test_valid_complete_cache_is_reused_without_changing_bytes(
+    tmp_path: Path,
+    raw_structures: list[RawStructure],
+    identity_payload: dict[str, Any],
+) -> None:
+    manifest_path, manifest = _build(tmp_path, raw_structures, identity_payload)
+    paths = [manifest_path]
+    paths.extend(
+        manifest_path.parent / item["path"]
+        for item in manifest["splits"]["train"]["shards"]
+    )
+    before = {path: path.read_bytes() for path in paths}
+
+    rebuilt = build_raw_cache(
+        tmp_path,
+        {"train": (_ for _ in ())},
+        identity_payload,
+        shard_max_atoms=4,
+    )
+
+    assert rebuilt == manifest_path
+    assert {path: path.read_bytes() for path in paths} == before
+
+
+def test_structural_corruption_is_rejected_even_with_updated_sha(
+    tmp_path: Path,
+    raw_structures: list[RawStructure],
+    identity_payload: dict[str, Any],
+) -> None:
+    manifest_path, manifest = _build(tmp_path, raw_structures, identity_payload)
+    entry = manifest["splits"]["train"]["shards"][0]
+    shard_path = manifest_path.parent / entry["path"]
+    shard = torch.load(shard_path, map_location="cpu", weights_only=True, mmap=True)
+    shard["atom_offsets"] = shard["atom_offsets"].clone()
+    shard["atom_offsets"][-1] += 1
+    torch.save(shard, shard_path)
+    entry["sha256"] = hashlib.sha256(shard_path.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    before_manifest = manifest_path.read_bytes()
+    before_shard = shard_path.read_bytes()
+
+    with pytest.raises(ValueError, match="atom_offsets"):
+        CachedSplitDataset(
+            manifest_path,
+            split="train",
+            expected_identity=manifest["identity"],
+        )[0]
+    with pytest.raises(ValueError, match="atom_offsets"):
+        build_raw_cache(
+            tmp_path,
+            {"train": raw_structures},
+            identity_payload,
+            shard_max_atoms=4,
+        )
+
+    assert manifest_path.read_bytes() == before_manifest
+    assert shard_path.read_bytes() == before_shard
+
+
+def test_publication_strictly_reloads_every_shard(
+    tmp_path: Path,
+    raw_structures: list[RawStructure],
+    identity_payload: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = torch.load
+    calls: list[dict[str, Any]] = []
+
+    def recording_load(path: Path, **kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(cache_module.torch, "load", recording_load)
+    _, manifest = _build(tmp_path, raw_structures, identity_payload)
+    shard_count = len(manifest["splits"]["train"]["shards"])
+    assert len(calls) == 2 * shard_count
+    assert all(
+        call == {"map_location": "cpu", "weights_only": True, "mmap": True}
+        for call in calls
+    )

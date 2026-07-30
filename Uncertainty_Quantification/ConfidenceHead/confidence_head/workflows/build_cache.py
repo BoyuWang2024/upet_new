@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 import importlib.metadata
+import itertools
+import platform
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
-import metatomic.torch as mta
 import torch
 
-from ..cache import SCHEMA_VERSION, RawStructure, build_raw_cache
+from ..cache import (
+    SCHEMA_VERSION,
+    RawStructure,
+    build_raw_cache,
+    prepare_raw_cache,
+)
 from ..checkpoint import load_upet_checkpoint
 from ..config import ConfidenceConfig
 from ..data import ConfidenceSample, DatasetIdentity, dataset_identity, iter_samples
@@ -63,17 +70,77 @@ def _batches(
         yield batch
 
 
+def _execution_policy(config: ConfidenceConfig) -> dict[str, Any]:
+    device = torch.device(config.run.device)
+    if config.run.amp and device.type != "cuda":
+        raise ValueError("amp=true requires a CUDA device")
+    return {
+        "device": str(device),
+        "model_dtype": "float32",
+        "system_dtype": "float32",
+        "autocast": bool(config.run.amp),
+        "autocast_dtype": "float16" if config.run.amp else None,
+    }
+
+
+def _autocast_context(execution: dict[str, Any]) -> Any:
+    if not execution["autocast"]:
+        return nullcontext()
+    return torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True)
+
+
+def _build_systems(
+    samples: list[ConfidenceSample], model: Any, device: torch.device
+) -> list[Any]:
+    from metatomic.torch.systems_to_torch import systems_to_torch
+    from vesin.metatomic import NeighborList
+
+    systems = [
+        systems_to_torch(
+            sample.atoms,
+            dtype=torch.float32,
+            device=device,
+            positions_requires_grad=False,
+            cell_requires_grad=False,
+        )
+        for sample in samples
+    ]
+    for system in systems:
+        for options in model.requested_neighbor_lists():
+            NeighborList(
+                options=options,
+                length_unit="angstrom",
+                check_consistency=False,
+            ).add_neighbor_list(system, copy=True)
+    return systems
+
+
+def _verify_outputs(model: Any, config: ConfidenceConfig) -> dict[str, str]:
+    outputs = model.supported_outputs()
+    if not isinstance(outputs, Mapping):
+        raise ValueError("model supported_outputs() must return a mapping")
+    keys = {
+        "energy_prediction": config.readouts.energy_prediction,
+        "force_prediction": config.readouts.force_prediction,
+        "energy_features": config.readouts.energy_features,
+        "force_features": config.readouts.force_features,
+    }
+    missing = [key for key in keys.values() if key not in outputs]
+    if missing:
+        raise ValueError(f"checkpoint is missing required outputs: {missing}")
+    return keys
+
+
 def _raw_structures(
     *,
     path: Path,
     model: Any,
     config: ConfidenceConfig,
     device: torch.device,
-    dtype: torch.dtype,
+    execution: dict[str, Any],
 ) -> Iterator[RawStructure]:
     for samples in _batches(iter_samples(path), config.cache.batch_size):
-        systems = mta.systems_to_torch([sample.atoms for sample in samples])
-        systems = [system.to(device=device, dtype=dtype) for system in systems]
+        systems = _build_systems(samples, model, device)
         structure_ids = torch.tensor(
             [sample.index for sample in samples],
             dtype=torch.int64,
@@ -84,7 +151,7 @@ def _raw_structures(
             dtype=torch.int64,
             device=device,
         )
-        with torch.inference_mode():
+        with torch.inference_mode(), _autocast_context(execution):
             readouts = extract_readouts(
                 model,
                 systems,
@@ -114,6 +181,9 @@ def _identity_payload(
     config: ConfidenceConfig,
     checkpoint_sha256: str,
     identities: dict[str, DatasetIdentity],
+    outputs: dict[str, str],
+    execution: dict[str, Any],
+    feature_dims: tuple[int, int],
 ) -> dict[str, Any]:
     repo_root = Path(__file__).resolve().parents[4]
     return {
@@ -122,55 +192,85 @@ def _identity_payload(
         "splits": {
             split: {
                 "sha256": identity.sha256,
-                "structures": identity.structure_count,
-                "atoms": identity.atom_count,
-                "force_components": identity.force_component_count,
+                "structure_count": identity.structure_count,
+                "atom_count": identity.atom_count,
+                "force_component_count": identity.force_component_count,
             }
             for split, identity in identities.items()
         },
-        "readouts": config.readouts.model_dump(),
+        "outputs": outputs,
+        "features": {
+            "force_dim": feature_dims[0],
+            "energy_dim": feature_dims[1],
+            "dtype": "float32",
+        },
         "cache": {
             "batch_size": config.cache.batch_size,
             "shard_max_atoms": config.cache.shard_max_atoms,
         },
-        "execution": {
-            "device": config.run.device,
-            "amp": config.run.amp,
-        },
+        "execution": execution,
         "versions": {
+            "python": platform.python_version(),
             "torch": torch.__version__,
             "metatomic": _version("metatomic-torch"),
             "metatrain": _version("metatrain"),
+            "upet": _version("upet"),
             "upet_git": _git_revision(repo_root),
         },
     }
 
 
 def build_cache(config: ConfidenceConfig) -> Path:
-    """Verify all inputs, extract raw readouts, and build the configured cache."""
-    identities = _verified_identities(config)
-    device = torch.device(config.run.device)
-    dtype = torch.float32 if config.run.amp else torch.float64
+    """Verify inputs, extract raw readouts, and atomically publish the cache."""
+    output_root = config.run.output_root / "cache"
+    staging = prepare_raw_cache(output_root)
+    execution = _execution_policy(config)
+    device = torch.device(execution["device"])
     checkpoint = load_upet_checkpoint(
         config.checkpoint.path,
         expected_sha256=config.checkpoint.expected_sha256,
         device=device,
-        dtype=dtype,
+        dtype=torch.float32,
     )
-    identity_payload = _identity_payload(config, checkpoint.sha256, identities)
-    split_structures = {
+    outputs = _verify_outputs(checkpoint.model, config)
+    identities = _verified_identities(config)
+    streams = {
         split: _raw_structures(
             path=getattr(config.data, split).path,
             model=checkpoint.model,
             config=config,
             device=device,
-            dtype=dtype,
+            execution=execution,
         )
         for split in ("train", "validation", "test")
     }
+    try:
+        first = {split: next(stream) for split, stream in streams.items()}
+    except StopIteration as error:
+        raise ValueError(
+            "all cache splits must contain at least one structure"
+        ) from error
+    feature_dims = (
+        int(first["train"].force_features.shape[1]),
+        int(first["train"].energy_features.shape[1]),
+    )
+    for split, structure in first.items():
+        dims = (
+            int(structure.force_features.shape[1]),
+            int(structure.energy_features.shape[1]),
+        )
+        if dims != feature_dims:
+            raise ValueError(f"{split}: feature dimensions disagree with train")
+    identity_payload = _identity_payload(
+        config, checkpoint.sha256, identities, outputs, execution, feature_dims
+    )
     return build_raw_cache(
-        output_root=config.run.output_root / "cache",
-        split_structures=split_structures,
+        output_root=output_root,
+        split_structures={
+            split: itertools.chain([first[split]], stream)
+            for split, stream in streams.items()
+        },
         identity_payload=identity_payload,
         shard_max_atoms=config.cache.shard_max_atoms,
+        staging=staging,
     )
