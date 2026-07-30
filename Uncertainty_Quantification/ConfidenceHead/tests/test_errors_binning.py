@@ -46,6 +46,11 @@ def test_fixed_linear_binning_uses_upper_bins_and_saturates() -> None:
     )
 
 
+def test_fixed_linear_binning_rejects_nan_max_error() -> None:
+    with pytest.raises(ValueError, match="positive"):
+        fixed_linear_binning(num_bins=5, max_error=float("nan"))
+
+
 def test_expected_error_is_probability_weighted() -> None:
     logits = torch.log(torch.tensor([[0.25, 0.75]]))
     representatives = torch.tensor([0.1, 0.3])
