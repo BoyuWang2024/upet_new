@@ -46,7 +46,9 @@ def _verified_identities(config: ConfidenceConfig) -> dict[str, DatasetIdentity]
     identities: dict[str, DatasetIdentity] = {}
     for split in ("train", "validation", "test"):
         configured = getattr(config.data, split)
-        identity = dataset_identity(configured.path)
+        identity = dataset_identity(
+            configured.path, expected_sha256=configured.expected_sha256
+        )
         if identity.sha256 != configured.expected_sha256:
             raise ValueError(
                 f"dataset {split} SHA mismatch: "
@@ -105,8 +107,9 @@ def _build_systems(
         )
         for sample in samples
     ]
+    neighbor_options = tuple(model.requested_neighbor_lists())
     for system in systems:
-        for options in model.requested_neighbor_lists():
+        for options in neighbor_options:
             NeighborList(
                 options=options,
                 length_unit="angstrom",

@@ -108,9 +108,11 @@ def iter_samples(path: Path) -> Iterator[ConfidenceSample]:
         )
 
 
-def dataset_identity(path: Path) -> DatasetIdentity:
+def dataset_identity(path: Path, expected_sha256: str | None = None) -> DatasetIdentity:
     """Bind stable dataset bytes to structure, atom, and component counts."""
     sha_before = sha256_file(path)
+    if expected_sha256 is not None and sha_before != expected_sha256:
+        raise ValueError(f"dataset SHA mismatch: {sha_before} != {expected_sha256}")
     structure_count = 0
     atom_count = 0
     for sample in iter_samples(path):

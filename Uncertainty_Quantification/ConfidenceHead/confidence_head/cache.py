@@ -318,6 +318,8 @@ def _validate_shard(
     offsets = payload["atom_offsets"]
     if ids.ndim != 1 or counts.ndim != 1 or len(ids) == 0 or len(counts) != len(ids):
         raise ValueError(f"{context}: structure_ids/num_atoms shape mismatch")
+    if len(set(ids.tolist())) != len(ids):
+        raise ValueError(f"{context}: duplicate structure IDs")
     if bool((counts <= 0).any().item()):
         raise ValueError(f"{context}: num_atoms must be positive")
     if offsets.ndim != 1 or len(offsets) != len(ids) + 1:
