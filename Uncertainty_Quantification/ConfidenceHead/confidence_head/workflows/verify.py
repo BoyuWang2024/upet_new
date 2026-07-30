@@ -314,7 +314,9 @@ def verify_run(run_dir: Path, *, full: bool = True) -> dict[str, Any]:
         raise ValueError(f"run contains forbidden figure artifacts: {images}")
 
     evaluation = manifest.get("evaluation")
-    if isinstance(evaluation, Mapping) and evaluation.get("status") == "complete":
+    if isinstance(evaluation, Mapping):
+        if evaluation.get("status") != "complete":
+            raise ValueError("evaluation declaration must be complete")
         evaluation_path = _confined(root, evaluation.get("manifest"))
         evaluation_manifest = _mapping(evaluation_path)
         if (
