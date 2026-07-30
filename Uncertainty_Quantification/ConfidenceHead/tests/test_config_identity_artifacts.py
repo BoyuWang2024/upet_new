@@ -12,11 +12,16 @@ from Uncertainty_Quantification.ConfidenceHead.confidence_head.artifacts import 
     atomic_write_json,
     require_complete_manifest,
 )
+from Uncertainty_Quantification.ConfidenceHead.confidence_head.binning import (
+    fixed_linear_binning,
+)
 from Uncertainty_Quantification.ConfidenceHead.confidence_head.config import (
+    BinningConfig,
     ConfidenceConfig,
     load_config,
 )
 from Uncertainty_Quantification.ConfidenceHead.confidence_head.identity import (
+    config_id,
     stable_id,
 )
 
@@ -114,6 +119,50 @@ def test_paths_resolve_from_repo_root_not_cwd(
     assert config.data.validation.path == (repo_root / "data/validation.xyz").resolve()
     assert config.data.test.path == (repo_root / "data/test.xyz").resolve()
     assert config.run.output_root == (repo_root / "outputs/confidence").resolve()
+
+
+@pytest.mark.parametrize("field", ["force_num_bins", "energy_num_bins"])
+def test_binning_config_matches_fixed_linear_contract(field: str) -> None:
+    with pytest.raises(ValidationError, match=field):
+        BinningConfig.model_validate({field: 2})
+
+    config = BinningConfig(force_num_bins=3, energy_num_bins=3)
+    force_spec = fixed_linear_binning(
+        config.force_num_bins,
+        config.force_max_error,
+    )
+    energy_spec = fixed_linear_binning(
+        config.energy_num_bins,
+        config.energy_max_error,
+    )
+
+    assert force_spec.num_bins == 3
+    assert energy_spec.num_bins == 3
+
+
+def test_load_config_rejects_duplicate_yaml_keys(tmp_path: Path) -> None:
+    raw = _valid_config(tmp_path, profile="smoke")
+    config_path = tmp_path / "duplicate.yaml"
+    config_path.write_text(
+        f"{yaml.safe_dump(raw)}profile: smoke\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="duplicate"):
+        load_config(config_path, repo_root=tmp_path)
+
+
+def test_config_id_accepts_resolved_config_paths(tmp_path: Path) -> None:
+    raw = _valid_config(tmp_path)
+    config_path = tmp_path / "confidence.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    config = load_config(config_path, repo_root=tmp_path)
+    first = config_id(config.model_dump())
+    second = config_id(config.model_dump())
+
+    assert first == second
+    assert first.startswith("config-")
 
 
 def test_stable_id_ignores_mapping_order() -> None:
