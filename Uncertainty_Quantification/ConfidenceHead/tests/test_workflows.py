@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import io
 import json
 from importlib import import_module
 from pathlib import Path
@@ -670,3 +671,357 @@ def test_verify_rejects_invalid_prediction_semantics(
         _publish_modified_predictions(run_dir, candidate)
         with pytest.raises(ValueError, match=message):
             verify_run(run_dir, full=False)
+
+
+def _resume_candidate(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+    run_name: str,
+) -> tuple[ConfidenceConfig, Path]:
+    resumable = _config_copy(config, trainer={"max_epochs": 3})
+    run_dir = train_run(
+        resumable,
+        cache_manifest_path=complete_cache,
+        run_name=run_name,
+        stop_after_epoch=0,
+    )
+    return resumable, run_dir
+
+
+def _update_declared_hash(run_dir: Path, artifact: str) -> None:
+    manifest_path = run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifacts"][artifact]["sha256"] = _sha256(run_dir / artifact)
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_checkpoint_consumers_load_verified_stable_bytes_not_paths(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resumable, run_dir = _resume_candidate(
+        config,
+        complete_cache,
+        "stable-checkpoint-bytes",
+    )
+    original_load = torch.load
+    unsafe_sources: list[Any] = []
+
+    def record_load(source: Any, *args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("weights_only") is False:
+            unsafe_sources.append(source)
+        return original_load(source, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "load", record_load)
+    train_run(
+        resumable,
+        cache_manifest_path=complete_cache,
+        run_name="stable-checkpoint-bytes",
+        resume_from=run_dir / "checkpoints" / "last.pt",
+    )
+    evaluate_run(run_dir, cache_manifest_path=complete_cache)
+    verify_run(run_dir, full=True)
+
+    assert len(unsafe_sources) >= 4
+    assert all(isinstance(source, io.BytesIO) for source in unsafe_sources)
+
+
+def test_resume_rejects_traversal_run_name_before_following_resume_path(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+) -> None:
+    resumable, run_dir = _resume_candidate(
+        config,
+        complete_cache,
+        "safe-resume-name",
+    )
+
+    with pytest.raises(ValueError, match="unsafe run name"):
+        train_run(
+            resumable,
+            cache_manifest_path=complete_cache,
+            run_name="../escaped",
+            resume_from=run_dir / "checkpoints" / "last.pt",
+        )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["checkpoint_hash", "checkpoint_payload", "metrics_hash"],
+)
+def test_failed_resume_leaves_previous_manifest_bytes_unchanged(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+    failure: str,
+) -> None:
+    resumable, run_dir = _resume_candidate(
+        config,
+        complete_cache,
+        f"immutable-manifest-{failure}",
+    )
+    checkpoint = run_dir / "checkpoints" / "last.pt"
+    metrics_path = run_dir / "logs" / "metrics.jsonl"
+    if failure == "checkpoint_hash":
+        checkpoint.write_bytes(checkpoint.read_bytes() + b"tampered")
+    elif failure == "checkpoint_payload":
+        torch.save({"schema_version": "invalid"}, checkpoint)
+        _update_declared_hash(run_dir, "checkpoints/last.pt")
+    else:
+        metrics_path.write_text(
+            metrics_path.read_text(encoding="utf-8") + " ",
+            encoding="utf-8",
+        )
+    manifest_path = run_dir / "manifest.json"
+    before = manifest_path.read_bytes()
+
+    with pytest.raises((ValueError, RuntimeError), match="checkpoint|metrics|sha256"):
+        train_run(
+            resumable,
+            cache_manifest_path=complete_cache,
+            run_name=f"immutable-manifest-{failure}",
+            resume_from=checkpoint,
+        )
+    assert manifest_path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["declared_sha", "epoch_gap", "snapshot_mismatch"],
+)
+def test_resume_validates_metrics_integrity_and_snapshot_boundary(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+    failure: str,
+) -> None:
+    resumable, run_dir = _resume_candidate(
+        config,
+        complete_cache,
+        f"invalid-resume-metrics-{failure}",
+    )
+    metrics_path = run_dir / "logs" / "metrics.jsonl"
+    records = [
+        json.loads(line) for line in metrics_path.read_text().splitlines() if line
+    ]
+    if failure == "declared_sha":
+        records[0]["train/total_loss"] += 1.0
+    elif failure == "epoch_gap":
+        records[0]["epoch"] = 2
+    else:
+        records[-1]["global_step"] += 1
+        records[-1]["learning_rate"] *= 0.5
+        records[-1]["val/total_loss_ema"] += 1.0
+    metrics_path.write_text(
+        "".join(json.dumps(record, sort_keys=True) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    if failure != "declared_sha":
+        _update_declared_hash(run_dir, "logs/metrics.jsonl")
+
+    with pytest.raises(
+        ValueError, match="metrics.*sha256|epoch|global_step|learning_rate|EMA"
+    ):
+        train_run(
+            resumable,
+            cache_manifest_path=complete_cache,
+            run_name=f"invalid-resume-metrics-{failure}",
+            resume_from=run_dir / "checkpoints" / "last.pt",
+        )
+
+
+def test_stop_after_epoch_on_final_epoch_remains_external_stop_in_last(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+) -> None:
+    one_epoch = _config_copy(config, trainer={"max_epochs": 1})
+    run_dir = train_run(
+        one_epoch,
+        cache_manifest_path=complete_cache,
+        run_name="external-stop-on-final",
+        stop_after_epoch=0,
+    )
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    last = torch.load(
+        run_dir / "checkpoints" / "last.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+
+    assert manifest["stop_reason"] == "external_stop_after_epoch"
+    assert last["stop_reason"] == "external_stop_after_epoch"
+
+
+def test_verify_recomputes_cache_identity_from_schema_and_payload(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+) -> None:
+    run_dir = train_run(
+        config,
+        cache_manifest_path=complete_cache,
+        run_name="recomputed-cache-identity",
+    )
+    evaluate_run(run_dir, cache_manifest_path=complete_cache)
+    cache = json.loads(complete_cache.read_text(encoding="utf-8"))
+    cache["identity_payload"]["checkpoint"]["sha256"] = "f" * 64
+    complete_cache.write_text(
+        json.dumps(cache, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="cache.*identity|identity.*cache"):
+        verify_run(run_dir, full=False)
+
+
+def test_verify_rejects_incomplete_evaluation_declaration(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+) -> None:
+    run_dir = train_run(
+        config,
+        cache_manifest_path=complete_cache,
+        run_name="incomplete-evaluation",
+    )
+    evaluate_run(run_dir, cache_manifest_path=complete_cache)
+    manifest_path = run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["evaluation"]["status"] = "incomplete"
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="evaluation.*complete|complete.*evaluation"):
+        verify_run(run_dir, full=False)
+
+
+def test_verify_binds_representatives_exactly_to_binning_artifact(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+) -> None:
+    run_dir = train_run(
+        config,
+        cache_manifest_path=complete_cache,
+        run_name="representatives-bound-to-binning",
+    )
+    evaluation_dir = evaluate_run(run_dir, cache_manifest_path=complete_cache)
+    predictions = torch.load(
+        evaluation_dir / "test_predictions.pt",
+        map_location="cpu",
+        weights_only=True,
+    )
+    predictions["force_representatives"] = predictions["force_representatives"] + 0.01
+    predictions["force_expected_errors"] = (
+        torch.softmax(predictions["force_logits"], dim=-1)
+        @ predictions["force_representatives"]
+    )
+    _publish_modified_predictions(run_dir, predictions)
+
+    with pytest.raises(
+        ValueError, match="representatives.*binning|binning.*representatives"
+    ):
+        verify_run(run_dir, full=False)
+
+
+@pytest.mark.parametrize(
+    "identity",
+    ["config_id", "binning_id", "model_loss_id", "run_id"],
+)
+def test_evaluate_rejects_coordinated_artifact_identity_tampering_before_load(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    identity: str,
+) -> None:
+    run_dir = train_run(
+        config,
+        cache_manifest_path=complete_cache,
+        run_name=f"evaluate-rederive-{identity}",
+    )
+    if identity in {"config_id", "model_loss_id"}:
+        config_path = run_dir / "resolved_config.yaml"
+        resolved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        if identity == "config_id":
+            resolved["run"]["seed"] += 1
+        else:
+            resolved["loss"]["force_coefficient"] += 0.25
+        config_path.write_text(
+            yaml.safe_dump(resolved, sort_keys=True),
+            encoding="utf-8",
+        )
+        _update_declared_hash(run_dir, "resolved_config.yaml")
+    elif identity == "binning_id":
+        binning_path = run_dir / "binning.json"
+        binning = json.loads(binning_path.read_text(encoding="utf-8"))
+        binning["force"]["representatives"][0] += 0.01
+        binning_path.write_text(
+            json.dumps(binning, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        _update_declared_hash(run_dir, "binning.json")
+    else:
+        manifest_path = run_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["run_id"] = "run-" + "f" * 16
+        manifest["identity"] = manifest["run_id"]
+        manifest_path.write_text(
+            json.dumps(manifest, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    calls: list[Any] = []
+
+    def forbidden_load(source: Any, **_: Any) -> Any:
+        calls.append(source)
+        raise AssertionError("identity must be rejected before checkpoint load")
+
+    monkeypatch.setattr(evaluate_module.torch, "load", forbidden_load)
+    with pytest.raises(
+        ValueError, match="identity|config_id|binning_id|model_loss_id|run"
+    ):
+        evaluate_run(run_dir, cache_manifest_path=complete_cache)
+    assert calls == []
+
+
+def test_run_and_evaluation_provenance_cover_dependencies_times_and_resume_history(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+) -> None:
+    resumable, run_dir = _resume_candidate(
+        config,
+        complete_cache,
+        "provenance-history",
+    )
+    initial_manifest = json.loads(
+        (run_dir / "manifest.json").read_text(encoding="utf-8")
+    )
+    initial_provenance = initial_manifest["provenance"]
+    assert {"upet", "metatomic"} <= set(initial_provenance["dependencies"])
+    initial_started_at = initial_provenance["started_at"]
+    assert initial_started_at
+    assert initial_provenance["completed_at"]
+
+    train_run(
+        resumable,
+        cache_manifest_path=complete_cache,
+        run_name="provenance-history",
+        resume_from=run_dir / "checkpoints" / "last.pt",
+    )
+    resumed_provenance = json.loads(
+        (run_dir / "manifest.json").read_text(encoding="utf-8")
+    )["provenance"]
+    assert resumed_provenance["started_at"] == initial_started_at
+    assert isinstance(resumed_provenance["history"], list)
+    assert resumed_provenance["history"]
+    assert all(
+        entry["started_at"] and entry["completed_at"]
+        for entry in resumed_provenance["history"]
+    )
+
+    evaluation_dir = evaluate_run(run_dir, cache_manifest_path=complete_cache)
+    evaluation_manifest = json.loads(
+        (evaluation_dir / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert evaluation_manifest["started_at"]
+    assert evaluation_manifest["completed_at"]
