@@ -167,6 +167,7 @@ def test_build_writes_complete_manifest_and_exact_shard_schema(
         shard_path = manifest_path.parent / entry["path"]
         assert not Path(entry["path"]).is_absolute()
         assert entry == {
+            "status": "complete",
             "path": entry["path"],
             "sha256": _sha256(shard_path),
             "structures": len(expected_structure_ids[index]),
