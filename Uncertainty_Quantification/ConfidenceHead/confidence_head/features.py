@@ -41,6 +41,8 @@ def _validate_batch(
             "systems length must equal structure_ids length: "
             f"{len(systems)} != {len(structure_ids)}"
         )
+    if not systems:
+        raise ValueError("systems batch must be non-empty")
     if structure_ids.dtype != torch.int64:
         raise ValueError("structure_ids must have dtype int64")
     if atom_counts.dtype != torch.int64:
@@ -48,8 +50,8 @@ def _validate_batch(
     if bool(torch.any(atom_counts <= 0).item()):
         raise ValueError("atom_counts must contain only positive values")
 
-    normalized_ids = structure_ids.to(dtype=torch.int64)
-    normalized_counts = atom_counts.to(dtype=torch.int64)
+    normalized_ids = structure_ids.clone()
+    normalized_counts = atom_counts.clone()
     atom_offsets = torch.zeros(
         len(normalized_counts) + 1,
         dtype=torch.int64,
@@ -71,11 +73,17 @@ def _require_output_mapping(
     return outputs
 
 
-def _block(output: Any, key: str) -> Any:
+def _single_block(output: Any, key: str) -> Any:
+    try:
+        block_count = len(output)
+    except (AttributeError, TypeError) as error:
+        raise ValueError(f"{key}: output must expose its block count") from error
+    if block_count != 1:
+        raise ValueError(f"{key}: expected exactly one block, found {block_count}")
     try:
         block = output.block()
-    except (AttributeError, TypeError) as error:
-        raise ValueError(f"{key}: output must provide block()") from error
+    except (AttributeError, IndexError, TypeError, ValueError) as error:
+        raise ValueError(f"{key}: failed to access the single block") from error
     if not isinstance(getattr(block, "values", None), torch.Tensor):
         raise ValueError(f"{key}: block values must be a Tensor")
     samples = getattr(block, "samples", None)
@@ -86,14 +94,75 @@ def _block(output: Any, key: str) -> Any:
     return block
 
 
+def _labels(
+    labels: Any,
+    key: str,
+    axis: str,
+) -> tuple[tuple[str, ...], torch.Tensor]:
+    names = tuple(getattr(labels, "names", ()))
+    values = getattr(labels, "values", None)
+    if not isinstance(values, torch.Tensor):
+        raise ValueError(f"{key}: malformed {axis} labels")
+    if values.ndim != 2 or values.shape[1] != len(names):
+        raise ValueError(f"{key}: malformed {axis} labels")
+    return names, values
+
+
+def _components(block: Any, key: str) -> tuple[Any, ...]:
+    components = getattr(block, "components", None)
+    if components is None:
+        raise ValueError(f"{key}: components metadata is missing")
+    try:
+        return tuple(components)
+    except TypeError as error:
+        raise ValueError(f"{key}: malformed components metadata") from error
+
+
+def _property_count(block: Any, key: str) -> int:
+    properties = getattr(block, "properties", None)
+    if properties is None:
+        raise ValueError(f"{key}: properties metadata is missing")
+    _, values = _labels(properties, key, "properties")
+    return values.shape[0]
+
+
+def _require_no_components(block: Any, key: str) -> None:
+    if _components(block, key):
+        raise ValueError(f"{key}: expected no components")
+
+
+def _require_one_property(block: Any, key: str) -> None:
+    count = _property_count(block, key)
+    if count != 1:
+        raise ValueError(f"{key}: expected exactly one property, found {count}")
+
+
+def _require_xyz_component(block: Any, key: str) -> None:
+    components = _components(block, key)
+    if len(components) != 1:
+        raise ValueError(f"{key}: force components schema requires one xyz component")
+    names, values = _labels(components[0], key, "components")
+    expected = torch.tensor(
+        [[0], [1], [2]],
+        dtype=values.dtype,
+        device=values.device,
+    )
+    if (
+        names != ("xyz",)
+        or values.shape != (3, 1)
+        or not torch.equal(
+            values,
+            expected,
+        )
+    ):
+        raise ValueError(f"{key}: force components must be xyz labels 0, 1, 2")
+
+
 def _sample_columns(block: Any, key: str, required: tuple[str, ...]) -> list[int]:
-    names = tuple(block.samples.names)
+    names, values = _labels(block.samples, key, "samples")
     missing = [name for name in required if name not in names]
     if missing:
         raise ValueError(f"{key}: samples are missing columns {missing}")
-    values = block.samples.values
-    if values.ndim != 2 or values.shape[1] != len(names):
-        raise ValueError(f"{key}: malformed sample values")
     return [names.index(name) for name in required]
 
 
@@ -141,18 +210,21 @@ def _validate_values_sample_rows(
     actual_systems: torch.Tensor,
 ) -> None:
     values = block.values
-    if values.ndim == 0:
-        return
     sample_count = len(actual_systems)
-    if values.shape[0] != sample_count:
-        _raise_identity_mismatch(
-            key,
-            "block values/sample row count",
-            min(values.shape[0], sample_count),
-            structure_ids,
-            expected_systems,
-            actual_systems,
-        )
+    if values.ndim == 0:
+        mismatch = 0
+    elif values.shape[0] != sample_count:
+        mismatch = min(values.shape[0], sample_count)
+    else:
+        return
+    _raise_identity_mismatch(
+        key,
+        "block values/sample row count",
+        mismatch,
+        structure_ids,
+        expected_systems,
+        actual_systems,
+    )
 
 
 def _first_sequence_mismatch(
@@ -180,41 +252,6 @@ def _first_sequence_mismatch(
     if actual_count != expected_count:
         return common_count
     return None
-
-
-def _validate_structure_samples(
-    block: Any,
-    key: str,
-    structure_ids: torch.Tensor,
-) -> None:
-    (system_column,) = _sample_columns(block, key, ("system",))
-    samples = block.samples.values
-    actual_systems = samples[:, system_column]
-    expected_systems = torch.arange(
-        len(structure_ids),
-        dtype=samples.dtype,
-        device=samples.device,
-    )
-    _validate_values_sample_rows(
-        block,
-        key,
-        structure_ids,
-        expected_systems,
-        actual_systems,
-    )
-    mismatch = _first_sequence_mismatch(
-        (actual_systems,),
-        (expected_systems,),
-    )
-    if mismatch is not None:
-        _raise_identity_mismatch(
-            key,
-            "sample identity/order/count",
-            mismatch,
-            structure_ids,
-            expected_systems,
-            actual_systems,
-        )
 
 
 def _expected_atom_samples(
@@ -245,7 +282,7 @@ def _validate_atom_samples(
     key: str,
     structure_ids: torch.Tensor,
     atom_counts: torch.Tensor,
-) -> None:
+) -> torch.Tensor:
     system_column, atom_column = _sample_columns(
         block,
         key,
@@ -279,6 +316,91 @@ def _validate_atom_samples(
             expected_systems,
             actual_systems,
         )
+    return actual_systems
+
+
+def _normalize_energy(
+    block: Any,
+    key: str,
+    structure_ids: torch.Tensor,
+    atom_counts: torch.Tensor,
+) -> torch.Tensor:
+    systems = _validate_atom_samples(
+        block,
+        key,
+        structure_ids,
+        atom_counts,
+    )
+    _require_no_components(block, key)
+    _require_one_property(block, key)
+    atom_count = int(atom_counts.sum().item())
+    values = block.values
+    if values.shape != (atom_count, 1):
+        raise ValueError(f"{key}: expected shape [N, 1], got {tuple(values.shape)}")
+    totals = torch.zeros(
+        len(structure_ids),
+        dtype=values.dtype,
+        device=values.device,
+    )
+    return totals.index_add(
+        0, systems.to(device=values.device, dtype=torch.int64), values[:, 0]
+    )
+
+
+def _normalize_force(
+    block: Any,
+    key: str,
+    structure_ids: torch.Tensor,
+    atom_counts: torch.Tensor,
+) -> torch.Tensor:
+    _validate_atom_samples(
+        block,
+        key,
+        structure_ids,
+        atom_counts,
+    )
+    _require_xyz_component(block, key)
+    _require_one_property(block, key)
+    atom_count = int(atom_counts.sum().item())
+    values = block.values
+    if values.shape != (atom_count, 3, 1):
+        raise ValueError(f"{key}: expected shape [N, 3, 1], got {tuple(values.shape)}")
+    return values.squeeze(-1)
+
+
+def _normalize_features(
+    block: Any,
+    key: str,
+    structure_ids: torch.Tensor,
+    atom_counts: torch.Tensor,
+) -> torch.Tensor:
+    _validate_atom_samples(
+        block,
+        key,
+        structure_ids,
+        atom_counts,
+    )
+    _require_no_components(block, key)
+    atom_count = int(atom_counts.sum().item())
+    values = block.values
+    if values.ndim != 2 or values.shape[0] != atom_count or values.shape[1] <= 0:
+        raise ValueError(
+            f"{key}: expected shape [N, D] with positive D, got {tuple(values.shape)}"
+        )
+    property_count = _property_count(block, key)
+    if property_count != values.shape[1]:
+        raise ValueError(
+            f"{key}: properties count {property_count} "
+            f"does not match feature dimension {values.shape[1]}"
+        )
+    return values
+
+
+def _shares_storage(first: torch.Tensor, second: torch.Tensor) -> bool:
+    return (
+        first.device == second.device
+        and first.untyped_storage().data_ptr() == second.untyped_storage().data_ptr()
+    )
 
 
 def _extract_blocks(
@@ -287,81 +409,49 @@ def _extract_blocks(
     structure_ids: torch.Tensor,
     atom_counts: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    energy_block = _block(outputs[config.energy_prediction], config.energy_prediction)
-    force_block = _block(outputs[config.force_prediction], config.force_prediction)
-    energy_features_block = _block(
+    energy_block = _single_block(
+        outputs[config.energy_prediction],
+        config.energy_prediction,
+    )
+    force_block = _single_block(
+        outputs[config.force_prediction],
+        config.force_prediction,
+    )
+    energy_features_block = _single_block(
         outputs[config.energy_features],
         config.energy_features,
     )
-    force_features_block = _block(
+    force_features_block = _single_block(
         outputs[config.force_features],
         config.force_features,
     )
-    _validate_structure_samples(
+
+    energy_prediction = _normalize_energy(
         energy_block,
         config.energy_prediction,
         structure_ids,
+        atom_counts,
     )
-    _validate_atom_samples(
+    force_prediction = _normalize_force(
         force_block,
         config.force_prediction,
         structure_ids,
         atom_counts,
     )
-    _validate_atom_samples(
+    energy_features = _normalize_features(
         energy_features_block,
         config.energy_features,
         structure_ids,
         atom_counts,
     )
-    _validate_atom_samples(
+    force_features = _normalize_features(
         force_features_block,
         config.force_features,
         structure_ids,
         atom_counts,
     )
 
-    energy_prediction = energy_block.values
-    structure_count = len(structure_ids)
-    if energy_prediction.shape == (structure_count, 1):
-        energy_prediction = energy_prediction[:, 0]
-    elif energy_prediction.shape != (structure_count,):
-        raise ValueError(
-            f"{config.energy_prediction}: expected shape [S] or [S, 1], "
-            f"got {tuple(energy_prediction.shape)}"
-        )
-
-    atom_count = int(atom_counts.sum().item())
-    force_prediction = force_block.values
-    if force_prediction.shape != (atom_count, 3):
-        raise ValueError(
-            f"{config.force_prediction}: expected shape [N, 3], "
-            f"got {tuple(force_prediction.shape)}"
-        )
-
-    energy_features = energy_features_block.values
-    if (
-        energy_features.ndim != 2
-        or energy_features.shape[0] != atom_count
-        or energy_features.shape[1] <= 0
-    ):
-        raise ValueError(
-            f"{config.energy_features}: expected shape [N, D] with positive D, "
-            f"got {tuple(energy_features.shape)}"
-        )
-
-    force_features = force_features_block.values
-    if (
-        force_features.ndim != 2
-        or force_features.shape[0] != atom_count
-        or force_features.shape[1] <= 0
-    ):
-        raise ValueError(
-            f"{config.force_features}: expected shape [N, D] with positive D, "
-            f"got {tuple(force_features.shape)}"
-        )
-
-    if energy_features.data_ptr() == force_features.data_ptr():
+    if _shares_storage(energy_features, force_features):
         raise ValueError(
             "energy_features and force_features must not share storage "
             f"({config.energy_features!r}, {config.force_features!r})"
@@ -372,6 +462,38 @@ def _extract_blocks(
         energy_features,
         force_features,
     )
+
+
+def _request_outputs(
+    model: Any,
+    systems: Sequence[Any],
+    keys: tuple[str, str, str, str],
+    supported_outputs: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    requested = {key: supported_outputs[key] for key in keys}
+    try:
+        raw_outputs = model(systems, requested)
+    except (ValueError, RuntimeError) as joint_error:
+        energy_keys = (keys[0], keys[2])
+        force_keys = (keys[1], keys[3])
+        energy_request = {key: supported_outputs[key] for key in energy_keys}
+        force_request = {key: supported_outputs[key] for key in force_keys}
+        try:
+            energy_outputs = _require_output_mapping(
+                model(systems, energy_request),
+                energy_keys,
+            )
+            force_outputs = _require_output_mapping(
+                model(systems, force_request),
+                force_keys,
+            )
+        except Exception as fallback_error:
+            raise ExceptionGroup(
+                "joint and paired UPET readout requests failed",
+                [joint_error, fallback_error],
+            ) from None
+        return {**energy_outputs, **force_outputs}
+    return _require_output_mapping(raw_outputs, keys)
 
 
 def extract_readouts(
@@ -398,30 +520,18 @@ def extract_readouts(
         structure_ids,
         atom_counts,
     )
-    capability_outputs = model.capabilities().outputs
-    missing = [key for key in keys if key not in capability_outputs]
+    supported_outputs = model.supported_outputs()
+    if not isinstance(supported_outputs, Mapping):
+        raise ValueError("model supported_outputs() must return a mapping")
+    missing = [key for key in keys if key not in supported_outputs]
     if missing:
         raise ValueError(f"checkpoint is missing required outputs: {missing}")
-    requested = {key: capability_outputs[key] for key in keys}
-
-    try:
-        raw_outputs = model(systems, requested)
-    except (ValueError, RuntimeError):
-        energy_keys = (config.energy_prediction, config.energy_features)
-        force_keys = (config.force_prediction, config.force_features)
-        energy_request = {key: capability_outputs[key] for key in energy_keys}
-        force_request = {key: capability_outputs[key] for key in force_keys}
-        energy_outputs = _require_output_mapping(
-            model(systems, energy_request),
-            energy_keys,
-        )
-        force_outputs = _require_output_mapping(
-            model(systems, force_request),
-            force_keys,
-        )
-        outputs: Mapping[str, Any] = {**energy_outputs, **force_outputs}
-    else:
-        outputs = _require_output_mapping(raw_outputs, keys)
+    outputs = _request_outputs(
+        model,
+        systems,
+        keys,
+        supported_outputs,
+    )
 
     (
         energy_prediction,

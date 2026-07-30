@@ -79,7 +79,7 @@ class DataConfig(StrictModel):
 class ReadoutConfig(StrictModel):
     energy_prediction: str = Field(default="energy", min_length=1)
     force_prediction: str = Field(
-        default="non_conservative_force",
+        default="non_conservative_forces",
         min_length=1,
     )
     energy_features: str = Field(

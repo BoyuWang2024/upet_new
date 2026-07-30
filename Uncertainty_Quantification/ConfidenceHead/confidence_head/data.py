@@ -109,15 +109,21 @@ def iter_samples(path: Path) -> Iterator[ConfidenceSample]:
 
 
 def dataset_identity(path: Path) -> DatasetIdentity:
-    """Bind dataset bytes to its structure, atom, and force-component counts."""
+    """Bind stable dataset bytes to structure, atom, and component counts."""
+    sha_before = sha256_file(path)
     structure_count = 0
     atom_count = 0
     for sample in iter_samples(path):
         structure_count += 1
         atom_count += len(sample.atoms)
+    sha_after = sha256_file(path)
+    if sha_after != sha_before:
+        raise ValueError(
+            f"dataset SHA changed while parsing: {sha_before} != {sha_after}"
+        )
     return DatasetIdentity(
         path=Path(path).resolve(),
-        sha256=sha256_file(path),
+        sha256=sha_before,
         structure_count=structure_count,
         atom_count=atom_count,
         force_component_count=3 * atom_count,
