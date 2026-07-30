@@ -624,7 +624,7 @@ def test_structural_corruption_is_rejected_even_with_updated_sha(
     manifest_path, manifest = _build(tmp_path, raw_structures, identity_payload)
     entry = manifest["splits"]["train"]["shards"][0]
     shard_path = manifest_path.parent / entry["path"]
-    shard = torch.load(shard_path, map_location="cpu", weights_only=True, mmap=True)
+    shard = torch.load(shard_path, map_location="cpu", weights_only=True)
     shard["atom_offsets"] = shard["atom_offsets"].clone()
     shard["atom_offsets"][-1] += 1
     torch.save(shard, shard_path)
