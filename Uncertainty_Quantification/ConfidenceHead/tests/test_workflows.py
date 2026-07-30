@@ -660,7 +660,9 @@ def test_verify_rejects_invalid_prediction_semantics(
             force_logits=value["force_logits"].to(torch.int64)
         ),
         "label range": lambda value: value["energy_labels"].fill_(99),
-        "unique structure IDs": lambda value: value["structure_ids"].fill_(301),
+        "unique.*structure IDs|structure IDs.*unique": lambda value: value[
+            "structure_ids"
+        ].fill_(301),
         "offset": lambda value: value["atom_offsets"].__setitem__(1, 0),
         "representatives": lambda value: value["force_representatives"].flip(0),
         "expected error": lambda value: value["energy_expected_errors"].add_(1.0),
