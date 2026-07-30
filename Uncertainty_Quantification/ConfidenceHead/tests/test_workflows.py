@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 from importlib import import_module
 from pathlib import Path
+from typing import Any
 
 import pytest
 import torch
 import yaml
+from pydantic import ValidationError
 from torch.nn import functional as F
 
 from Uncertainty_Quantification.ConfidenceHead.confidence_head.cache import (
@@ -15,6 +19,8 @@ from Uncertainty_Quantification.ConfidenceHead.confidence_head.cache import (
 )
 from Uncertainty_Quantification.ConfidenceHead.confidence_head.config import (
     ConfidenceConfig,
+    RunConfig,
+    SchedulerConfig,
 )
 from Uncertainty_Quantification.ConfidenceHead.confidence_head.metrics import (
     classification_metrics,
@@ -23,7 +29,8 @@ from Uncertainty_Quantification.ConfidenceHead.confidence_head.metrics import (
 
 _WORKFLOWS = "Uncertainty_Quantification.ConfidenceHead.confidence_head.workflows"
 verify_run = import_module(f"{_WORKFLOWS}.verify").verify_run
-evaluate_run = import_module(f"{_WORKFLOWS}.evaluate").evaluate_run
+evaluate_module = import_module(f"{_WORKFLOWS}.evaluate")
+evaluate_run = evaluate_module.evaluate_run
 train_run = import_module(f"{_WORKFLOWS}.train").train_run
 
 
@@ -89,8 +96,8 @@ def complete_cache(tmp_path: Path) -> Path:
         "outputs": {
             "force_prediction": "non_conservative_forces",
             "energy_prediction": "energy",
-            "force_features": "mtt::aux::force_features",
-            "energy_features": "mtt::aux::energy_features",
+            "force_features": "mtt::aux::non_conservative_forces_last_layer_features",
+            "energy_features": "mtt::aux::energy_last_layer_features",
         },
         "features": {"force_dim": 2, "energy_dim": 3, "dtype": "float32"},
         "splits": split_identity,
@@ -308,3 +315,358 @@ def test_full_verify_rejects_a_hash_modified_declared_artifact(
 
     with pytest.raises(ValueError, match="sha256|hash"):
         verify_run(run_dir, full=True)
+
+
+def _config_copy(
+    config: ConfidenceConfig, **sections: dict[str, Any]
+) -> ConfidenceConfig:
+    raw = config.model_dump()
+    for section, updates in sections.items():
+        raw[section].update(updates)
+    return ConfidenceConfig.model_validate(raw)
+
+
+def _assert_nested_equal(left: Any, right: Any) -> None:
+    if isinstance(left, torch.Tensor):
+        assert isinstance(right, torch.Tensor)
+        assert torch.equal(left, right)
+    elif isinstance(left, dict):
+        assert isinstance(right, dict)
+        assert left.keys() == right.keys()
+        for key in left:
+            _assert_nested_equal(left[key], right[key])
+    elif isinstance(left, (list, tuple)):
+        assert isinstance(right, type(left))
+        assert len(left) == len(right)
+        for left_item, right_item in zip(left, right, strict=True):
+            _assert_nested_equal(left_item, right_item)
+    else:
+        assert left == right
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _publish_modified_predictions(
+    run_dir: Path,
+    predictions: dict[str, Any],
+) -> None:
+    evaluation_dir = run_dir / "evaluation"
+    prediction_path = evaluation_dir / "test_predictions.pt"
+    torch.save(predictions, prediction_path)
+    evaluation_path = evaluation_dir / "manifest.json"
+    evaluation_manifest = json.loads(evaluation_path.read_text(encoding="utf-8"))
+    evaluation_manifest["artifacts"]["test_predictions.pt"]["sha256"] = _sha256(
+        prediction_path
+    )
+    evaluation_path.write_text(
+        json.dumps(evaluation_manifest, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    manifest_path = run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifacts"]["evaluation/test_predictions.pt"]["sha256"] = _sha256(
+        prediction_path
+    )
+    manifest["artifacts"]["evaluation/manifest.json"]["sha256"] = _sha256(
+        evaluation_path
+    )
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_stop_then_same_run_name_resumes_exactly_from_last(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+) -> None:
+    config = _config_copy(config, trainer={"max_epochs": 3})
+    continuous = train_run(
+        config,
+        cache_manifest_path=complete_cache,
+        run_name="continuous",
+    )
+    resumed = train_run(
+        config,
+        cache_manifest_path=complete_cache,
+        run_name="resumed",
+        stop_after_epoch=0,
+    )
+
+    resumed = train_run(
+        config,
+        cache_manifest_path=complete_cache,
+        run_name="resumed",
+        resume_from=resumed / "checkpoints" / "last.pt",
+    )
+
+    continuous_snapshot = torch.load(
+        continuous / "checkpoints" / "last.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+    resumed_snapshot = torch.load(
+        resumed / "checkpoints" / "last.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+    for field in (
+        "model",
+        "optimizer",
+        "scheduler",
+        "epoch",
+        "global_step",
+        "learning_rate",
+        "ema",
+        "best",
+        "best_epoch",
+        "best_step",
+        "bad_epochs",
+        "sampler_rng_state",
+    ):
+        _assert_nested_equal(continuous_snapshot[field], resumed_snapshot[field])
+    assert (continuous / "logs" / "metrics.jsonl").read_text() == (
+        resumed / "logs" / "metrics.jsonl"
+    ).read_text()
+    assert json.loads((resumed / "manifest.json").read_text())["epochs_completed"] == 3
+
+
+def test_evaluate_rejects_tampered_declared_checkpoint_before_torch_load(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = train_run(
+        config,
+        cache_manifest_path=complete_cache,
+        run_name="tampered-before-load",
+    )
+    checkpoint = run_dir / "checkpoints" / "best.pt"
+    checkpoint.write_bytes(checkpoint.read_bytes() + b"tampered")
+    calls: list[Path] = []
+
+    def forbidden_load(path: Path, **_: Any) -> Any:
+        calls.append(Path(path))
+        raise AssertionError("torch.load must not run before declared SHA verification")
+
+    monkeypatch.setattr(evaluate_module.torch, "load", forbidden_load)
+    with pytest.raises(ValueError, match="sha256|hash"):
+        evaluate_run(run_dir, cache_manifest_path=complete_cache)
+    assert calls == []
+
+
+@pytest.mark.parametrize("location", ["undeclared", "outside"])
+def test_evaluate_rejects_checkpoint_that_is_not_declared_and_confined(
+    tmp_path: Path,
+    config: ConfidenceConfig,
+    complete_cache: Path,
+    location: str,
+) -> None:
+    run_dir = train_run(
+        config,
+        cache_manifest_path=complete_cache,
+        run_name=f"checkpoint-{location}",
+    )
+    source = run_dir / "checkpoints" / "best.pt"
+    checkpoint = (
+        run_dir / "checkpoints" / "undeclared.pt"
+        if location == "undeclared"
+        else tmp_path / "outside.pt"
+    )
+    checkpoint.write_bytes(source.read_bytes())
+
+    with pytest.raises(ValueError, match="declared|run directory|checkpoint"):
+        evaluate_run(
+            run_dir,
+            cache_manifest_path=complete_cache,
+            checkpoint_path=checkpoint,
+        )
+
+
+@pytest.mark.parametrize(
+    ("section", "updates", "message"),
+    [
+        ("checkpoint", {"expected_sha256": "f" * 64}, "checkpoint"),
+        (
+            "data",
+            {
+                "test": {
+                    "path": Path("test.xyz"),
+                    "expected_sha256": "e" * 64,
+                }
+            },
+            "test|split|data",
+        ),
+        (
+            "readouts",
+            {"force_features": "mtt::aux::different_force_features"},
+            "readout|force_features|output",
+        ),
+    ],
+)
+def test_train_rejects_config_cache_identity_mismatch(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+    section: str,
+    updates: dict[str, Any],
+    message: str,
+) -> None:
+    mismatched = _config_copy(config, **{section: updates})
+
+    with pytest.raises(ValueError, match=message):
+        train_run(
+            mismatched,
+            cache_manifest_path=complete_cache,
+            run_name=f"mismatch-{section}",
+        )
+
+
+def test_metadata_verify_checks_predictions_and_requires_complete_cache(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+) -> None:
+    run_dir = train_run(
+        config,
+        cache_manifest_path=complete_cache,
+        run_name="metadata-verification",
+    )
+    evaluation_dir = evaluate_run(run_dir, cache_manifest_path=complete_cache)
+    predictions = torch.load(
+        evaluation_dir / "test_predictions.pt",
+        map_location="cpu",
+        weights_only=True,
+    )
+    predictions["force_labels"] = predictions["force_labels"][:-1]
+    _publish_modified_predictions(run_dir, predictions)
+
+    with pytest.raises(ValueError, match="shape|count"):
+        verify_run(run_dir, full=False)
+
+    evaluate_run(run_dir, cache_manifest_path=complete_cache)
+    cache_manifest = json.loads(complete_cache.read_text(encoding="utf-8"))
+    cache_manifest["status"] = "incomplete"
+    complete_cache.write_text(
+        json.dumps(cache_manifest, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="cache.*complete|complete.*cache"):
+        verify_run(run_dir, full=False)
+
+
+def test_distinct_force_and_energy_bin_counts_train_and_evaluate(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+) -> None:
+    config = _config_copy(
+        config,
+        trainer={"max_epochs": 1},
+        binning={"force_num_bins": 3, "energy_num_bins": 5},
+    )
+    run_dir = train_run(
+        config,
+        cache_manifest_path=complete_cache,
+        run_name="independent-bins",
+    )
+    evaluation_dir = evaluate_run(run_dir, cache_manifest_path=complete_cache)
+    predictions = torch.load(
+        evaluation_dir / "test_predictions.pt",
+        map_location="cpu",
+        weights_only=True,
+    )
+
+    assert predictions["force_logits"].shape == (3, 3, 3)
+    assert predictions["energy_logits"].shape == (2, 5)
+    assert predictions["force_representatives"].shape == (3,)
+    assert predictions["energy_representatives"].shape == (5,)
+
+
+def test_amp_is_explicitly_unsupported_on_every_device() -> None:
+    for device in ("cpu", "cuda"):
+        with pytest.raises(ValidationError, match="amp"):
+            RunConfig(device=device, amp=True)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("monitor", "other"),
+        ("factor", 0.25),
+        ("patience", 4),
+        ("threshold", 0.0),
+        ("threshold_mode", "rel"),
+        ("cooldown", 1),
+        ("min_lr", 0.0),
+    ],
+)
+def test_scheduler_configuration_is_fixed_to_approved_constants(
+    field: str,
+    value: Any,
+) -> None:
+    assert SchedulerConfig().model_dump() == {
+        "monitor": "val/total_loss_ema",
+        "factor": 0.5,
+        "patience": 5,
+        "threshold": 0.0001,
+        "threshold_mode": "abs",
+        "cooldown": 0,
+        "min_lr": 0.000001,
+    }
+    with pytest.raises(ValidationError, match=field):
+        SchedulerConfig.model_validate({field: value})
+
+
+def test_max_epochs_stop_reason_is_recorded_in_manifest_and_last_checkpoint(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+) -> None:
+    config = _config_copy(config, trainer={"max_epochs": 1})
+    run_dir = train_run(
+        config,
+        cache_manifest_path=complete_cache,
+        run_name="max-epochs-reason",
+    )
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    snapshot = torch.load(
+        run_dir / "checkpoints" / "last.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+
+    assert manifest["stop_reason"] == "max_epochs"
+    assert snapshot["stop_reason"] == "max_epochs"
+
+
+def test_verify_rejects_invalid_prediction_semantics(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+) -> None:
+    run_dir = train_run(
+        config,
+        cache_manifest_path=complete_cache,
+        run_name="prediction-semantics",
+    )
+    evaluation_dir = evaluate_run(run_dir, cache_manifest_path=complete_cache)
+    prediction_path = evaluation_dir / "test_predictions.pt"
+    original = torch.load(
+        prediction_path,
+        map_location="cpu",
+        weights_only=True,
+    )
+    mutations = {
+        "dtype": lambda value: value.update(
+            force_logits=value["force_logits"].to(torch.int64)
+        ),
+        "label range": lambda value: value["energy_labels"].fill_(99),
+        "unique structure IDs": lambda value: value["structure_ids"].fill_(301),
+        "offset": lambda value: value["atom_offsets"].__setitem__(1, 0),
+        "representatives": lambda value: value["force_representatives"].flip(0),
+        "expected error": lambda value: value["energy_expected_errors"].add_(1.0),
+    }
+    for message, mutate in mutations.items():
+        candidate = copy.deepcopy(original)
+        mutate(candidate)
+        _publish_modified_predictions(run_dir, candidate)
+        with pytest.raises(ValueError, match=message):
+            verify_run(run_dir, full=False)
