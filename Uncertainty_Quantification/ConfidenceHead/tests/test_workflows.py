@@ -664,7 +664,9 @@ def test_verify_rejects_invalid_prediction_semantics(
             "structure_ids"
         ].fill_(301),
         "offset": lambda value: value["atom_offsets"].__setitem__(1, 0),
-        "representatives": lambda value: value["force_representatives"].flip(0),
+        "representatives": lambda value: value.update(
+            force_representatives=value["force_representatives"].flip(0)
+        ),
         "expected error": lambda value: value["energy_expected_errors"].add_(1.0),
     }
     for message, mutate in mutations.items():
