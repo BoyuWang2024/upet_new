@@ -1,0 +1,323 @@
+"""Evaluate the best confidence-head checkpoint without creating figures."""
+
+from __future__ import annotations
+
+import csv
+import json
+import os
+import tempfile
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+
+import torch
+import yaml
+from torch.utils.data import DataLoader
+
+from ..artifacts import atomic_torch_save, atomic_write_json, sha256_file
+from ..binning import (
+    BinningSpec,
+    expected_error,
+    fixed_linear_binning,
+    labels_from_thresholds,
+)
+from ..cache import CachedSplitDataset, collate_cached_structures
+from ..config import ConfidenceConfig
+from ..errors import energy_per_atom_error, force_component_error
+from ..metrics import classification_metrics
+from ..model import ConfidenceModel
+from ..trainer import CHECKPOINT_SCHEMA_VERSION
+from .train import RUN_SCHEMA_VERSION
+
+
+EVALUATION_SCHEMA_VERSION = "upet_confidence_evaluation_v1"
+
+
+def _load_mapping(path: Path, *, yaml_file: bool = False) -> dict[str, Any]:
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+        value = yaml.safe_load(text) if yaml_file else json.loads(text)
+    except (OSError, json.JSONDecodeError, yaml.YAMLError) as error:
+        raise ValueError(f"invalid artifact {path}: {error}") from error
+    if not isinstance(value, dict):
+        raise ValueError(f"artifact {path} must contain a mapping")
+    return value
+
+
+def _specs(config: ConfidenceConfig) -> tuple[BinningSpec, BinningSpec]:
+    return (
+        fixed_linear_binning(
+            config.binning.force_num_bins, config.binning.force_max_error
+        ),
+        fixed_linear_binning(
+            config.binning.energy_num_bins, config.binning.energy_max_error
+        ),
+    )
+
+
+def _write_csv(
+    path: Path,
+    labels: torch.Tensor,
+    observed: torch.Tensor,
+    expected: torch.Tensor,
+    bins: int,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=(
+                    "bin",
+                    "sample_count",
+                    "mean_observed_error",
+                    "mean_expected_error",
+                ),
+            )
+            writer.writeheader()
+            for index in range(bins):
+                mask = labels == index
+                count = int(mask.sum().item())
+                writer.writerow(
+                    {
+                        "bin": index,
+                        "sample_count": count,
+                        "mean_observed_error": float(observed[mask].mean())
+                        if count
+                        else "",
+                        "mean_expected_error": float(expected[mask].mean())
+                        if count
+                        else "",
+                    }
+                )
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _offsets(counts: list[torch.Tensor]) -> torch.Tensor:
+    if not counts:
+        raise ValueError("test split produced no batches")
+    merged = torch.cat(counts).to(torch.int64)
+    result = torch.zeros(len(merged) + 1, dtype=torch.int64)
+    result[1:] = torch.cumsum(merged, dim=0)
+    return result
+
+
+def _checkpoint_identity(
+    snapshot: Mapping[str, Any], manifest: Mapping[str, Any]
+) -> None:
+    if snapshot.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
+        raise ValueError("checkpoint schema mismatch")
+    for field in ("config_id", "cache_id", "binning_id", "model_loss_id"):
+        if snapshot.get(field) != manifest.get(field):
+            raise ValueError(f"checkpoint {field} mismatch")
+
+
+def evaluate_run(
+    run_dir: Path,
+    *,
+    cache_manifest_path: Path,
+    checkpoint_path: Path | None = None,
+) -> Path:
+    """Evaluate one checkpoint, defaulting to the run's best checkpoint."""
+    run_dir = Path(run_dir).resolve()
+    manifest_path = run_dir / "manifest.json"
+    manifest = _load_mapping(manifest_path)
+    if (
+        manifest.get("schema_version") != RUN_SCHEMA_VERSION
+        or manifest.get("status") != "complete"
+    ):
+        raise ValueError("run manifest must be complete")
+    config = ConfidenceConfig.model_validate(
+        _load_mapping(run_dir / "resolved_config.yaml", yaml_file=True)
+    )
+    force_spec, energy_spec = _specs(config)
+    cache_path = Path(cache_manifest_path).resolve()
+    cache_manifest = _load_mapping(cache_path)
+    if cache_manifest.get("cache_id") != manifest.get("cache_id"):
+        raise ValueError("evaluation cache identity mismatch")
+    cache_identity = str(manifest["cache_id"])
+    dataset = CachedSplitDataset(cache_path, "test", cache_identity)
+
+    if checkpoint_path is None:
+        checkpoint = run_dir / "checkpoints" / "best.pt"
+        checkpoint_relative = "../checkpoints/best.pt"
+    else:
+        checkpoint = Path(checkpoint_path).resolve()
+        checkpoint_relative = os.path.relpath(checkpoint, run_dir / "evaluation")
+    if not checkpoint.is_file():
+        raise ValueError(f"evaluation checkpoint does not exist: {checkpoint}")
+    snapshot = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    if not isinstance(snapshot, Mapping):
+        raise ValueError("checkpoint must contain a mapping")
+    _checkpoint_identity(snapshot, manifest)
+
+    model = ConfidenceModel(
+        force_input_dim=int(manifest["force_feature_dim"]),
+        energy_input_dim=int(manifest["energy_feature_dim"]),
+        hidden_dims=config.model.hidden_dims,
+        num_bins=config.binning.force_num_bins,
+        cumulant_order=config.model.cumulant_order,
+        signed_root=config.model.signed_root,
+        dropout=config.model.dropout,
+    )
+    model.load_state_dict(snapshot["model"])
+    device = torch.device(config.run.device)
+    model.to(device).eval()
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(config.run.seed)
+    loader = DataLoader(
+        dataset,
+        batch_size=config.cache.batch_size,
+        shuffle=False,
+        num_workers=config.cache.num_workers,
+        collate_fn=collate_cached_structures,
+        generator=generator,
+    )
+
+    collected: dict[str, list[torch.Tensor]] = {
+        name: []
+        for name in (
+            "force_logits",
+            "force_labels",
+            "force_observed_errors",
+            "force_expected_errors",
+            "energy_logits",
+            "energy_labels",
+            "energy_observed_errors",
+            "energy_expected_errors",
+            "structure_ids",
+        )
+    }
+    atom_counts: list[torch.Tensor] = []
+    with torch.inference_mode():
+        for raw_batch in loader:
+            batch = {
+                key: value.to(device) if isinstance(value, torch.Tensor) else value
+                for key, value in raw_batch.items()
+            }
+            output = model(
+                batch["force_features"],
+                batch["energy_features"],
+                batch["atom_offsets"],
+            )
+            force_observed = force_component_error(
+                batch["force_prediction"], batch["force_reference"]
+            )
+            energy_observed = energy_per_atom_error(
+                batch["energy_prediction"],
+                batch["energy_reference"],
+                batch["num_atoms"],
+            )
+            values = {
+                "force_logits": output.force_logits,
+                "force_labels": labels_from_thresholds(
+                    force_observed, force_spec.thresholds
+                ),
+                "force_observed_errors": force_observed,
+                "force_expected_errors": expected_error(
+                    output.force_logits, force_spec.representatives
+                ),
+                "energy_logits": output.energy_logits,
+                "energy_labels": labels_from_thresholds(
+                    energy_observed, energy_spec.thresholds
+                ),
+                "energy_observed_errors": energy_observed,
+                "energy_expected_errors": expected_error(
+                    output.energy_logits, energy_spec.representatives
+                ),
+                "structure_ids": batch["structure_ids"],
+            }
+            for name, tensor in values.items():
+                collected[name].append(tensor.detach().cpu())
+            atom_counts.append(batch["num_atoms"].detach().cpu())
+
+    predictions = {name: torch.cat(parts, dim=0) for name, parts in collected.items()}
+    predictions["atom_offsets"] = _offsets(atom_counts)
+    predictions["force_representatives"] = force_spec.representatives
+    predictions["energy_representatives"] = energy_spec.representatives
+    evaluation_dir = run_dir / "evaluation"
+    prediction_path = evaluation_dir / "test_predictions.pt"
+    atomic_torch_save(prediction_path, predictions)
+
+    force_logits = predictions["force_logits"].reshape(
+        -1, predictions["force_logits"].shape[-1]
+    )
+    force_labels = predictions["force_labels"].reshape(-1)
+    force_observed = predictions["force_observed_errors"].reshape(-1)
+    force_expected = predictions["force_expected_errors"].reshape(-1)
+    energy_logits = predictions["energy_logits"]
+    energy_labels = predictions["energy_labels"]
+    energy_observed = predictions["energy_observed_errors"]
+    energy_expected = predictions["energy_expected_errors"]
+    metrics = {
+        "force": classification_metrics(
+            force_logits, force_labels, force_observed, force_spec.representatives
+        ),
+        "energy": classification_metrics(
+            energy_logits, energy_labels, energy_observed, energy_spec.representatives
+        ),
+    }
+    metrics_path = evaluation_dir / "metrics.json"
+    atomic_write_json(metrics_path, metrics)
+    force_csv = evaluation_dir / "force_bin_summary.csv"
+    energy_csv = evaluation_dir / "energy_bin_summary.csv"
+    _write_csv(
+        force_csv, force_labels, force_observed, force_expected, force_spec.num_bins
+    )
+    _write_csv(
+        energy_csv,
+        energy_labels,
+        energy_observed,
+        energy_expected,
+        energy_spec.num_bins,
+    )
+    artifacts = {
+        path.name: {"path": path.name, "sha256": sha256_file(path)}
+        for path in (prediction_path, metrics_path, force_csv, energy_csv)
+    }
+    evaluation_manifest = {
+        "schema_version": EVALUATION_SCHEMA_VERSION,
+        "status": "complete",
+        "identity": manifest["run_id"],
+        "run_id": manifest["run_id"],
+        "cache_id": cache_identity,
+        "checkpoint": {
+            "path": checkpoint_relative,
+            "sha256": sha256_file(checkpoint),
+        },
+        "test_counts": {
+            "structures": len(predictions["structure_ids"]),
+            "atoms": int(predictions["atom_offsets"][-1]),
+            "force_components": predictions["force_labels"].numel(),
+        },
+        "artifacts": artifacts,
+    }
+    evaluation_manifest_path = evaluation_dir / "manifest.json"
+    atomic_write_json(evaluation_manifest_path, evaluation_manifest)
+
+    updated = dict(manifest)
+    declared = dict(updated["artifacts"])
+    for name, entry in artifacts.items():
+        declared[f"evaluation/{name}"] = {
+            "path": f"evaluation/{name}",
+            "sha256": entry["sha256"],
+        }
+    declared["evaluation/manifest.json"] = {
+        "path": "evaluation/manifest.json",
+        "sha256": sha256_file(evaluation_manifest_path),
+    }
+    updated["artifacts"] = declared
+    updated["evaluation"] = {
+        "status": "complete",
+        "manifest": "evaluation/manifest.json",
+    }
+    atomic_write_json(manifest_path, updated)
+    return evaluation_dir
