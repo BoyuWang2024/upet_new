@@ -29,6 +29,8 @@ class ConfidenceModel(nn.Module):
         dropout: float,
     ) -> None:
         super().__init__()
+        self.force_input_dim = force_input_dim
+        self.energy_input_dim = energy_input_dim
         self.force_head = ComponentConfidenceHead(
             force_input_dim,
             hidden_dims,
@@ -53,6 +55,19 @@ class ConfidenceModel(nn.Module):
         energy_features: torch.Tensor,
         offsets: torch.Tensor,
     ) -> ConfidenceOutput:
+        if force_features.ndim != 2 or force_features.shape[1] != self.force_input_dim:
+            raise ValueError(
+                f"force features must have shape [N, {self.force_input_dim}]"
+            )
+        if (
+            energy_features.ndim != 2
+            or energy_features.shape[1] != self.energy_input_dim
+        ):
+            raise ValueError(
+                f"energy features must have shape [N, {self.energy_input_dim}]"
+            )
+        if force_features.shape[0] != energy_features.shape[0]:
+            raise ValueError("force and energy features must have matching atom counts")
         if force_features.data_ptr() == energy_features.data_ptr():
             raise ValueError(
                 "force and energy readout features must be distinct tensors"
