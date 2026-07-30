@@ -353,7 +353,7 @@ def _resume_artifact(
         raise ValueError(f"resume artifact is missing or unsafe: {relative}")
     expected = entry.get("sha256")
     if not isinstance(expected, str) or sha256_file(path) != expected:
-        raise ValueError(f"resume artifact sha256 mismatch: {relative}")
+        raise ValueError(f"resume metrics sha256 mismatch: {relative}")
     return path, expected
 
 
