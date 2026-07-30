@@ -421,6 +421,7 @@ def train_run(
     run_dir.mkdir(parents=True, exist_ok=resume_from is not None)
     manifest_path = run_dir / "manifest.json"
     started_at = datetime.now(UTC).isoformat()
+    resume_started_at = started_at
     base_manifest: dict[str, Any] = {
         "schema_version": RUN_SCHEMA_VERSION,
         "status": "incomplete",
@@ -442,6 +443,7 @@ def train_run(
         "artifacts": {},
     }
     previous_manifest: dict[str, Any] | None = None
+    previous_history: list[dict[str, Any]] = []
     if resume_from is not None:
         previous_manifest = _load_json(manifest_path)
         for field, expected in (
@@ -454,14 +456,16 @@ def train_run(
             if previous_manifest.get(field) != expected:
                 raise ValueError(f"resume run {field} identity mismatch")
         previous_provenance = previous_manifest.get("provenance")
-        previous_start = (
-            previous_provenance.get("started_at")
-            if isinstance(previous_provenance, Mapping)
-            else None
-        )
+        if not isinstance(previous_provenance, Mapping):
+            raise ValueError("resume provenance must be a mapping")
+        previous_start = previous_provenance.get("started_at")
         if isinstance(previous_start, str):
             started_at = previous_start
             base_manifest["provenance"] = _provenance(started_at)
+        raw_history = previous_provenance.get("history", [])
+        if not isinstance(raw_history, list):
+            raise ValueError("resume provenance history must be a list")
+        previous_history = list(raw_history)
     if resume_from is None:
         atomic_write_json(manifest_path, base_manifest)
         _atomic_write_text(
@@ -671,9 +675,18 @@ def train_run(
         "energy_feature_dim": energy_dim,
         "max_epochs": config.trainer.max_epochs,
     }
+    completed_at = datetime.now(UTC).isoformat()
     complete["provenance"] = _provenance(
         started_at,
-        datetime.now(UTC).isoformat(),
+        completed_at,
     )
+    if resume_from is not None:
+        complete["provenance"]["history"] = [
+            *previous_history,
+            {
+                "started_at": resume_started_at,
+                "completed_at": completed_at,
+            },
+        ]
     atomic_write_json(manifest_path, complete)
     return run_dir
