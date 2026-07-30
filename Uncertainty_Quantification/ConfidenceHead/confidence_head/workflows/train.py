@@ -533,7 +533,6 @@ def train_run(
             best_step=best_step,
             identity=identity,
             sampler_generator=sampler,
-            max_epochs=config.trainer.max_epochs,
         )
         external_stop = commit_epoch_checkpoints(
             checkpoint_dir=run_dir / "checkpoints",

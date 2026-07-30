@@ -221,7 +221,6 @@ def capture_training_snapshot(
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau,
     epoch: int,
-    max_epochs: int | None = None,
     global_step: int,
     control_state: EarlyStoppingState,
     best_step: int | None,
@@ -235,8 +234,6 @@ def capture_training_snapshot(
         raise ValueError("global_step must be non-negative")
     if best_step is not None and best_step < 0:
         raise ValueError("best_step must be non-negative")
-    if max_epochs is not None and max_epochs <= 0:
-        raise ValueError("max_epochs must be positive")
     _validate_control_state(control_state)
     if not optimizer.param_groups:
         raise ValueError("optimizer must contain at least one parameter group")
@@ -271,7 +268,6 @@ def capture_training_snapshot(
         "cache_id": identity.cache_id,
         "binning_id": identity.binning_id,
         "model_loss_id": identity.model_loss_id,
-        **({"max_epochs": max_epochs} if max_epochs is not None else {}),
     }
 
 
@@ -519,7 +515,6 @@ def commit_epoch_checkpoints(
 
     external_stop = stop_after_epoch is not None and epoch >= stop_after_epoch
     last_snapshot = dict(snapshot)
-    last_snapshot["max_epochs"] = max_epochs
     if epoch + 1 >= max_epochs and not last_snapshot.get("stop_reason"):
         last_snapshot["stopped"] = True
         last_snapshot["stop_reason"] = "max_epochs"
