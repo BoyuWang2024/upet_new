@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import uuid
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
@@ -74,6 +75,26 @@ def prepare_raw_cache(output_root: Path) -> RawCacheStaging:
         },
     )
     return RawCacheStaging(output_root, root, manifest_path)
+
+
+def _validate_split_name(split: Any) -> str:
+    if (
+        not isinstance(split, str)
+        or not split
+        or split in {".", ".."}
+        or Path(split).name != split
+    ):
+        raise ValueError(f"unsafe cache split name: {split!r}")
+    return split
+
+
+def _discard_staging(staging: RawCacheStaging, output_root: Path) -> None:
+    root = staging.root.resolve()
+    expected_parent = output_root.resolve()
+    if root.parent != expected_parent or not root.name.startswith(".staging-"):
+        raise ValueError(f"refusing to remove unsafe staging path: {root}")
+    if root.exists():
+        shutil.rmtree(root)
 
 
 def _context(split: str, shard_index: int, structure_id: int, field: str) -> str:
@@ -373,7 +394,7 @@ def _write_shard(
     payload = _shard_payload(split, structures)
     metadata = _validate_shard(payload, split, shard_index)
     relative_path = Path(split) / f"shard-{shard_index:06d}.pt"
-    path = cache_root / relative_path
+    path = _confined_shard_path(cache_root, relative_path.as_posix())
     atomic_torch_save(path, payload)
     written = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
     metadata = _validate_shard(written, split, shard_index)
@@ -496,6 +517,8 @@ def build_raw_cache(
         raise ValueError("shard_max_atoms must be positive")
     if not split_structures:
         raise ValueError("split_structures must not be empty")
+    for split in split_structures:
+        _validate_split_name(split)
     output_root = Path(output_root)
     identity = cache_id(
         {"schema_version": SCHEMA_VERSION, "identity_payload": identity_payload}
@@ -508,6 +531,8 @@ def build_raw_cache(
         )
         if existing.get("identity_payload") != dict(identity_payload):
             raise ValueError("complete cache identity_payload mismatch")
+        if staging is not None:
+            _discard_staging(staging, output_root)
         return manifest_path
     if cache_root.exists():
         raise ValueError(f"cache target exists but is not complete: {cache_root}")
@@ -603,6 +628,11 @@ def _validate_complete_cache(
     splits = manifest.get("splits")
     if not isinstance(splits, dict) or not splits:
         raise ValueError("cache manifest splits must be non-empty")
+    payload_splits = payload.get("splits")
+    if not isinstance(payload_splits, dict):
+        raise ValueError("cache identity splits must be a mapping")
+    if set(payload_splits) != set(splits):
+        raise ValueError("cache split set does not match identity payload")
     root = manifest_path.parent
     for split, split_manifest in splits.items():
         if not isinstance(split_manifest, dict):
@@ -676,6 +706,17 @@ def _validate_complete_cache(
                 or split_manifest.get(aliases[field]) != total
             ):
                 raise ValueError(f"split {split}: {field} total mismatch")
+        source_split = payload_splits[split]
+        if not isinstance(source_split, dict):
+            raise ValueError(f"split {split}: identity metadata must be a mapping")
+        source_fields = {
+            "structure_count": totals["structures"],
+            "atom_count": totals["atoms"],
+            "force_component_count": totals["force_components"],
+        }
+        for field, actual in source_fields.items():
+            if source_split.get(field) != actual:
+                raise ValueError(f"split {split}: identity {field} mismatch")
         if dimensions is None or (
             split_manifest.get("force_feature_dim") != dimensions[0]
             or split_manifest.get("energy_feature_dim") != dimensions[1]

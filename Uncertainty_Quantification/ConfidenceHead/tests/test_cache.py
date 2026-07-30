@@ -82,7 +82,14 @@ def identity_payload() -> dict[str, Any]:
             "energy_prediction": "energy",
             "energy_features": "mtt::aux::energy_last_layer_features",
         },
-        "splits": {"train": {"sha256": "b" * 64}},
+        "splits": {
+            "train": {
+                "sha256": "b" * 64,
+                "structure_count": 3,
+                "atom_count": 6,
+                "force_component_count": 18,
+            }
+        },
     }
 
 
@@ -91,10 +98,23 @@ def _build(
     structures: list[RawStructure],
     identity_payload: dict[str, Any],
 ) -> tuple[Path, dict[str, Any]]:
+    atom_count = sum(len(structure.atomic_numbers) for structure in structures)
+    normalized_identity = {
+        **identity_payload,
+        "splits": {
+            **identity_payload["splits"],
+            "train": {
+                **identity_payload["splits"]["train"],
+                "structure_count": len(structures),
+                "atom_count": atom_count,
+                "force_component_count": 3 * atom_count,
+            },
+        },
+    }
     manifest_path = build_raw_cache(
         output_root=output_root,
         split_structures={"train": iter(structures)},
-        identity_payload=identity_payload,
+        identity_payload=normalized_identity,
         shard_max_atoms=4,
     )
     return manifest_path, json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -680,3 +700,79 @@ def test_publication_strictly_reloads_every_shard(
         if call == {"map_location": "cpu", "weights_only": True, "mmap": True}
     ]
     assert len(strict_calls) == 2 * shard_count
+
+
+@pytest.mark.parametrize("split", ["/absolute", "../escape", "nested/name", "", "."])
+def test_unsafe_split_name_is_rejected_before_any_write(
+    tmp_path: Path,
+    raw_structures: list[RawStructure],
+    identity_payload: dict[str, Any],
+    split: str,
+) -> None:
+    with pytest.raises(ValueError, match="unsafe cache split"):
+        build_raw_cache(
+            tmp_path / "cache",
+            {split: raw_structures},
+            identity_payload,
+            shard_max_atoms=4,
+        )
+
+    assert not (tmp_path / "escape").exists()
+    assert not (tmp_path / "absolute").exists()
+
+
+def test_reusing_complete_cache_removes_only_the_new_staging(
+    tmp_path: Path,
+    raw_structures: list[RawStructure],
+    identity_payload: dict[str, Any],
+) -> None:
+    manifest_path, manifest = _build(tmp_path, raw_structures, identity_payload)
+    staging = prepare_raw_cache(tmp_path)
+    rebuilt = build_raw_cache(
+        tmp_path,
+        {"train": raw_structures},
+        manifest["identity_payload"],
+        shard_max_atoms=4,
+        staging=staging,
+    )
+
+    assert rebuilt == manifest_path
+    assert not staging.root.exists()
+    assert manifest_path.is_file()
+
+
+@pytest.mark.parametrize("mutation", ["count", "split_set"])
+def test_manifest_is_bound_to_identity_split_counts(
+    tmp_path: Path,
+    raw_structures: list[RawStructure],
+    identity_payload: dict[str, Any],
+    mutation: str,
+) -> None:
+    manifest_path, manifest = _build(tmp_path, raw_structures, identity_payload)
+    if mutation == "count":
+        manifest["identity_payload"]["splits"]["train"]["atom_count"] += 1
+        message = "identity atom_count"
+    else:
+        manifest["identity_payload"]["splits"]["extra"] = {
+            "sha256": "d" * 64,
+            "structure_count": 1,
+            "atom_count": 1,
+            "force_component_count": 3,
+        }
+        message = "split set"
+    identity = cache_module.cache_id(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "identity_payload": manifest["identity_payload"],
+        }
+    )
+    manifest["identity"] = identity
+    manifest["cache_id"] = identity
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        CachedSplitDataset(
+            manifest_path,
+            split="train",
+            expected_identity=identity,
+        )
