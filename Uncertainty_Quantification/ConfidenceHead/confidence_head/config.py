@@ -81,7 +81,7 @@ class ModelConfig(StrictModel):
 class LossConfig(StrictModel):
     force_coefficient: float = Field(default=1.0, gt=0, allow_inf_nan=False)
     energy_coefficient: float = Field(default=1.5, gt=0, allow_inf_nan=False)
-    label_smoothing: Literal[0.0] = 0.0
+    label_smoothing: Literal[0] = 0
     class_weights: None = None
 
 
