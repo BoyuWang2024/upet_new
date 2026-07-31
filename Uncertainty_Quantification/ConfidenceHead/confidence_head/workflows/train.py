@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
@@ -123,13 +124,11 @@ def _validate_cache_identity(
             raise ValueError(f"cache {name} split identity mismatch")
 
 
-def _read_metrics(path: Path) -> list[dict[str, int | float]]:
-    if not path.is_file():
-        raise ValueError("resume metrics artifact is missing")
+def _read_metrics(data: bytes) -> list[dict[str, int | float]]:
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as error:
-        raise ValueError(f"unable to read resume metrics {path}: {error}") from error
+        lines = data.decode("utf-8").splitlines()
+    except UnicodeDecodeError as error:
+        raise ValueError(f"invalid resume metrics UTF-8: {error}") from error
     records: list[dict[str, int | float]] = []
     for line_number, line in enumerate(lines, start=1):
         if not line:
@@ -158,11 +157,25 @@ def _validate_run_name(run_name: str) -> None:
         raise ValueError(f"unsafe run name: {run_name!r}")
 
 
-def _safe_run_dir(root: Path, run_name: str) -> Path:
+def _safe_run_dir(root: Path, run_name: str, *, resume: bool) -> Path:
     _validate_run_name(run_name)
-    run_dir = Path(root) / "runs" / run_name
-    if run_dir.exists():
+    output_root = Path(root).resolve()
+    runs_root = Path(root) / "runs"
+    if runs_root.is_symlink():
+        raise ValueError("runs directory must not be a symlink")
+    resolved_runs_root = runs_root.resolve()
+    if not resolved_runs_root.is_relative_to(output_root):
+        raise ValueError("runs directory escapes output root")
+    run_dir = runs_root / run_name
+    if run_dir.is_symlink():
+        raise ValueError("run directory must not be a symlink")
+    resolved_run_dir = run_dir.resolve()
+    if not resolved_run_dir.is_relative_to(resolved_runs_root):
+        raise ValueError("run directory escapes runs root")
+    if not resume and run_dir.exists():
         raise ValueError(f"run directory already exists: {run_dir}")
+    if resume and not run_dir.is_dir():
+        raise ValueError(f"resume run directory is missing: {run_dir}")
     return run_dir
 
 
@@ -337,11 +350,11 @@ def _artifact_entry(run_dir: Path, relative: str) -> dict[str, str]:
     return {"path": relative, "sha256": sha256_file(path)}
 
 
-def _resume_artifact(
+def _resume_artifact_bytes(
     run_dir: Path,
     manifest: Mapping[str, Any],
     relative: str,
-) -> tuple[Path, str]:
+) -> tuple[Path, str, bytes]:
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, Mapping):
         raise ValueError("resume run has no declared artifacts")
@@ -352,9 +365,16 @@ def _resume_artifact(
     if not path.is_relative_to(run_dir.resolve()) or not path.is_file():
         raise ValueError(f"resume artifact is missing or unsafe: {relative}")
     expected = entry.get("sha256")
-    if not isinstance(expected, str) or sha256_file(path) != expected:
-        raise ValueError(f"resume metrics sha256 mismatch: {relative}")
-    return path, expected
+    try:
+        data = path.read_bytes()
+    except OSError as error:
+        raise ValueError(
+            f"unable to read resume artifact {relative}: {error}"
+        ) from error
+    actual = hashlib.sha256(data).hexdigest()
+    if not isinstance(expected, str) or actual != expected:
+        raise ValueError(f"resume artifact sha256 mismatch: {relative}")
+    return path, expected, data
 
 
 def _validate_resume_metrics(
@@ -414,11 +434,11 @@ def train_run(
     )
     bins = _bin_payload(force_spec, energy_spec)
     identity, run_identity, resolved = _identities(config, cache_manifest, bins)
-    _validate_run_name(run_name)
-    run_dir = Path(config.run.output_root) / "runs" / run_name
+    run_dir = _safe_run_dir(
+        config.run.output_root, run_name, resume=resume_from is not None
+    )
     if resume_from is None:
-        _safe_run_dir(config.run.output_root, run_name)
-    run_dir.mkdir(parents=True, exist_ok=resume_from is not None)
+        run_dir.mkdir(parents=True)
     manifest_path = run_dir / "manifest.json"
     started_at = datetime.now(UTC).isoformat()
     resume_started_at = started_at
@@ -444,8 +464,15 @@ def train_run(
     }
     previous_manifest: dict[str, Any] | None = None
     previous_history: list[dict[str, Any]] = []
+    resume_artifacts: dict[str, tuple[Path, str, bytes]] = {}
     if resume_from is not None:
         previous_manifest = _load_json(manifest_path)
+        if (
+            previous_manifest.get("schema_version") != RUN_SCHEMA_VERSION
+            or previous_manifest.get("status") != "complete"
+            or previous_manifest.get("identity") != run_identity
+        ):
+            raise ValueError("resume run schema/status/identity mismatch")
         for field, expected in (
             ("run_id", run_identity),
             ("config_id", identity.config_id),
@@ -455,6 +482,34 @@ def train_run(
         ):
             if previous_manifest.get(field) != expected:
                 raise ValueError(f"resume run {field} identity mismatch")
+        for relative in (
+            "resolved_config.yaml",
+            "binning.json",
+            "checkpoints/best.pt",
+            "checkpoints/last.pt",
+            "logs/metrics.jsonl",
+        ):
+            resume_artifacts[relative] = _resume_artifact_bytes(
+                run_dir, previous_manifest, relative
+            )
+        try:
+            previous_resolved = yaml.safe_load(
+                resume_artifacts["resolved_config.yaml"][2].decode("utf-8")
+            )
+        except (UnicodeDecodeError, yaml.YAMLError) as error:
+            raise ValueError(
+                f"invalid resume resolved_config artifact: {error}"
+            ) from error
+        if previous_resolved != resolved:
+            raise ValueError("resume resolved_config artifact disagrees with config")
+        try:
+            previous_bins = json.loads(
+                resume_artifacts["binning.json"][2].decode("utf-8")
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError(f"invalid resume binning artifact: {error}") from error
+        if previous_bins != bins:
+            raise ValueError("resume binning artifact disagrees with config")
         previous_provenance = previous_manifest.get("provenance")
         if not isinstance(previous_provenance, Mapping):
             raise ValueError("resume provenance must be a mapping")
@@ -527,24 +582,16 @@ def train_run(
         checkpoint = Path(resume_from).resolve()
         if not checkpoint.is_relative_to(run_dir.resolve()):
             raise ValueError("resume checkpoint escapes run directory")
-        declared = previous_manifest.get("artifacts")
-        if not isinstance(declared, Mapping):
-            raise ValueError("resume run has no declared artifacts")
         matching = [
-            entry
-            for entry in declared.values()
-            if isinstance(entry, Mapping)
-            and (run_dir / str(entry.get("path"))).resolve() == checkpoint
+            artifact
+            for relative, artifact in resume_artifacts.items()
+            if relative.startswith("checkpoints/") and artifact[0] == checkpoint
         ]
         if not matching:
             raise ValueError("resume checkpoint is not declared by run manifest")
-        if not checkpoint.is_file() or sha256_file(checkpoint) != matching[0].get(
-            "sha256"
-        ):
-            raise ValueError("resume checkpoint sha256 mismatch")
         snapshot = load_verified_torch(
             checkpoint,
-            expected_sha256=str(matching[0]["sha256"]),
+            expected_sha256=matching[0][1],
             weights_only=False,
         )
         if not isinstance(snapshot, Mapping):
@@ -561,10 +608,7 @@ def train_run(
         global_step = restored.global_step
         control = restored.control_state
         best_step = restored.best_step
-        metrics_path, _ = _resume_artifact(
-            run_dir, previous_manifest, "logs/metrics.jsonl"
-        )
-        metric_records = _read_metrics(metrics_path)
+        metric_records = _read_metrics(resume_artifacts["logs/metrics.jsonl"][2])
         _validate_resume_metrics(
             metric_records,
             restored_epoch=restored.epoch,

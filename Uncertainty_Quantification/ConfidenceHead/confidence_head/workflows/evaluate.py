@@ -367,7 +367,7 @@ def evaluate_run(
         "cache_id": cache_identity,
         "checkpoint": {
             "path": checkpoint_relative,
-            "sha256": sha256_file(checkpoint),
+            "sha256": checkpoint_sha,
         },
         "test_counts": {
             "structures": len(predictions["structure_ids"]),

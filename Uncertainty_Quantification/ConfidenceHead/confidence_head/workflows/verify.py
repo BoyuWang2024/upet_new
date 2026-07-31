@@ -328,7 +328,9 @@ def verify_run(run_dir: Path, *, full: bool = True) -> dict[str, Any]:
         raise ValueError(f"run contains forbidden figure artifacts: {images}")
 
     evaluation = manifest.get("evaluation")
-    if isinstance(evaluation, Mapping):
+    if "evaluation" in manifest:
+        if not isinstance(evaluation, Mapping):
+            raise ValueError("evaluation declaration must be a mapping")
         if evaluation.get("status") != "complete":
             raise ValueError("evaluation declaration must be complete")
         evaluation_path = _confined(root, evaluation.get("manifest"))
@@ -337,6 +339,7 @@ def verify_run(run_dir: Path, *, full: bool = True) -> dict[str, Any]:
             evaluation_manifest.get("schema_version") != EVALUATION_SCHEMA_VERSION
             or evaluation_manifest.get("status") != "complete"
             or evaluation_manifest.get("run_id") != manifest.get("run_id")
+            or evaluation_manifest.get("identity") != manifest.get("run_id")
             or evaluation_manifest.get("cache_id") != manifest.get("cache_id")
         ):
             raise ValueError("evaluation manifest identity/status mismatch")
