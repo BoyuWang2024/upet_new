@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -10,6 +13,20 @@ from Uncertainty_Quantification.ConfidenceHead.confidence_head.config import Con
 from Uncertainty_Quantification.ConfidenceHead.confidence_head.identity import cache_id
 from Uncertainty_Quantification.ConfidenceHead.confidence_head.run_naming import build_run_name
 from Uncertainty_Quantification.ConfidenceHead.confidence_head.workflows import commands
+
+
+SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+
+
+def _load_script(name: str):
+    spec = importlib.util.spec_from_file_location(
+        name.removesuffix(".py"), SCRIPTS / name
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _config(tmp_path: Path, *, resume_from: Path | None = None) -> ConfidenceConfig:
@@ -326,3 +343,37 @@ def test_train_from_config_rejects_resume_outside_derived_run_directory(
         match="resume checkpoint must be within derived run directory",
     ):
         commands.train_from_config(config)
+
+@pytest.mark.parametrize(
+    "script",
+    ["build_cache.py", "train.py", "evaluate.py", "verify.py"],
+)
+def test_script_help_exposes_only_config(script: str) -> None:
+    result = subprocess.run(
+        [sys.executable, str(SCRIPTS / script), "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "--config" in result.stdout
+
+
+def test_train_script_loads_config_and_dispatches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_script("train.py")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("profile: smoke\n", encoding="utf-8")
+    loaded_config = object()
+    seen: list[object] = []
+    monkeypatch.setattr(module, "load_config", lambda path: loaded_config)
+    monkeypatch.setattr(
+        module,
+        "train_from_config",
+        lambda config: seen.append(config) or Path("/run"),
+    )
+
+    assert module.main(["--config", str(config_path)]) == 0
+    assert seen == [loaded_config]
