@@ -9,8 +9,8 @@ import random
 import subprocess
 import sys
 import tempfile
-from collections.abc import Mapping
-from contextlib import nullcontext
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -21,7 +21,7 @@ import torch
 import yaml
 from torch.utils.data import DataLoader
 
-from ..artifacts import atomic_write_json, load_verified_torch, sha256_file
+from ..artifacts import atomic_write_json, load_verified_torch
 from ..binning import BinningSpec, fixed_linear_binning, labels_from_thresholds
 from ..cache import CachedSplitDataset, collate_cached_structures
 from ..config import ConfidenceConfig
@@ -30,6 +30,7 @@ from ..identity import binning_id, config_id, model_loss_id, run_id
 from ..losses import LossOutput, confidence_loss
 from ..model import ConfidenceModel
 from ..trainer import (
+    CHECKPOINT_SCHEMA_VERSION,
     EarlyStoppingState,
     LossAccumulator,
     TrainingIdentity,
@@ -179,6 +180,94 @@ def _safe_run_dir(root: Path, run_name: str, *, resume: bool) -> Path:
     return run_dir
 
 
+@contextmanager
+def _exclusive_run_lock(root: Path, run_name: str) -> Iterator[None]:
+    """Serialize cooperative train_run writers for one run name."""
+    _validate_run_name(run_name)
+    output_root = Path(root).resolve()
+    runs_root = Path(root) / "runs"
+    if runs_root.is_symlink():
+        raise ValueError("runs directory must not be a symlink")
+    runs_root.mkdir(parents=True, exist_ok=True)
+    if runs_root.is_symlink() or not runs_root.resolve().is_relative_to(output_root):
+        raise ValueError("runs directory escapes output root")
+    lock_root = runs_root / ".locks"
+    if lock_root.is_symlink():
+        raise ValueError("run lock directory must not be a symlink")
+    lock_root.mkdir(exist_ok=True)
+    if lock_root.is_symlink():
+        raise ValueError("run lock directory must not be a symlink")
+    lock_name = hashlib.sha256(run_name.encode("utf-8")).hexdigest() + ".lock"
+    lock_path = lock_root / lock_name
+    if lock_path.is_symlink():
+        raise ValueError("run lock file must not be a symlink")
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(lock_path, flags, 0o600)
+    handle = os.fdopen(descriptor, "r+b", buffering=0)
+    locked = False
+    try:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                if os.fstat(handle.fileno()).st_size == 0:
+                    handle.write(b"\0")
+                handle.seek(0)
+                msvcrt.locking(  # type: ignore[attr-defined]
+                    handle.fileno(),
+                    msvcrt.LK_NBLCK,  # type: ignore[attr-defined]
+                    1,
+                )
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except OSError as error:
+            raise ValueError(
+                f"an active writer holds the run lock for {run_name!r}"
+            ) from error
+        yield
+    finally:
+        if locked:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(  # type: ignore[attr-defined]
+                    handle.fileno(),
+                    msvcrt.LK_UNLCK,  # type: ignore[attr-defined]
+                    1,
+                )
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
+def _run_directory_identity(run_dir: Path, output_root: Path) -> tuple[int, int]:
+    if run_dir.is_symlink():
+        raise ValueError("run directory must not be a symlink")
+    resolved = run_dir.resolve()
+    expected_root = (Path(output_root).resolve() / "runs").resolve()
+    if not resolved.is_relative_to(expected_root):
+        raise ValueError("run directory escapes output root")
+    stat = run_dir.stat(follow_symlinks=False)
+    return stat.st_dev, stat.st_ino
+
+
+def _assert_run_directory_identity(
+    run_dir: Path,
+    output_root: Path,
+    expected: tuple[int, int],
+) -> None:
+    if _run_directory_identity(run_dir, output_root) != expected:
+        raise ValueError("run directory identity changed during publication")
+
+
 def _atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -193,6 +282,32 @@ def _atomic_write_text(path: Path, text: str) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+_ROLLBACK_ARTIFACTS = (
+    "manifest.json",
+    "resolved_config.yaml",
+    "binning.json",
+    "checkpoints/best.pt",
+    "checkpoints/last.pt",
+    "logs/metrics.jsonl",
+)
 
 
 def _bin_payload(force: BinningSpec, energy: BinningSpec) -> dict[str, Any]:
@@ -345,11 +460,6 @@ def _epoch(
     return force, energy, total, steps
 
 
-def _artifact_entry(run_dir: Path, relative: str) -> dict[str, str]:
-    path = run_dir / relative
-    return {"path": relative, "sha256": sha256_file(path)}
-
-
 def _resume_artifact_bytes(
     run_dir: Path,
     manifest: Mapping[str, Any],
@@ -377,6 +487,103 @@ def _resume_artifact_bytes(
     return path, expected, data
 
 
+def _validate_checkpoint_identity(
+    path: Path,
+    entry: Mapping[str, str],
+    identity: TrainingIdentity,
+) -> Mapping[str, Any]:
+    snapshot = load_verified_torch(
+        path,
+        expected_sha256=entry["sha256"],
+        weights_only=False,
+    )
+    if not isinstance(snapshot, Mapping):
+        raise ValueError(f"checkpoint artifact must be a mapping: {path}")
+    if snapshot.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
+        raise ValueError(f"checkpoint artifact schema mismatch: {path}")
+    for field in ("config_id", "cache_id", "binning_id", "model_loss_id"):
+        if snapshot.get(field) != getattr(identity, field):
+            raise ValueError(f"checkpoint artifact {field} mismatch: {path}")
+    return snapshot
+
+
+def _validate_publish_artifacts(
+    *,
+    run_dir: Path,
+    resolved: Mapping[str, Any],
+    bins: Mapping[str, Any],
+    identity: TrainingIdentity,
+    resume_artifacts: Mapping[str, tuple[Path, str, bytes]],
+    best_rewritten: bool,
+) -> dict[str, dict[str, str]]:
+    relatives = (
+        "resolved_config.yaml",
+        "binning.json",
+        "checkpoints/best.pt",
+        "checkpoints/last.pt",
+        "logs/metrics.jsonl",
+    )
+    payloads: dict[str, bytes] = {}
+    artifacts: dict[str, dict[str, str]] = {}
+    for relative in relatives:
+        path = run_dir / relative
+        try:
+            data = path.read_bytes()
+        except OSError as error:
+            raise ValueError(
+                f"unable to read artifact before publish {relative}: {error}"
+            ) from error
+        payloads[relative] = data
+        artifacts[relative] = {
+            "path": relative,
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+    try:
+        published_resolved = yaml.safe_load(
+            payloads["resolved_config.yaml"].decode("utf-8")
+        )
+        published_bins = json.loads(payloads["binning.json"].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, yaml.YAMLError) as error:
+        raise ValueError(f"invalid static artifact before publish: {error}") from error
+    if published_resolved != resolved or published_bins != bins:
+        raise ValueError("static artifact changed before publish")
+    if resume_artifacts:
+        for relative in ("resolved_config.yaml", "binning.json"):
+            if artifacts[relative]["sha256"] != resume_artifacts[relative][1]:
+                raise ValueError(f"resume artifact changed before publish: {relative}")
+        if (
+            not best_rewritten
+            and artifacts["checkpoints/best.pt"]["sha256"]
+            != resume_artifacts["checkpoints/best.pt"][1]
+        ):
+            raise ValueError("best checkpoint artifact changed before publish")
+    best = _validate_checkpoint_identity(
+        run_dir / "checkpoints" / "best.pt",
+        artifacts["checkpoints/best.pt"],
+        identity,
+    )
+    last = _validate_checkpoint_identity(
+        run_dir / "checkpoints" / "last.pt",
+        artifacts["checkpoints/last.pt"],
+        identity,
+    )
+    del best
+    metrics = _read_metrics(payloads["logs/metrics.jsonl"])
+    try:
+        _validate_resume_metrics(
+            metrics,
+            restored_epoch=int(last["epoch"]),
+            global_step=int(last["global_step"]),
+            learning_rate=float(last["learning_rate"]),
+            ema=None if last["ema"] is None else float(last["ema"]),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            f"metrics and last checkpoint disagree before publish: {error}"
+        ) from error
+    return artifacts
+
+
 def _validate_resume_metrics(
     records: list[dict[str, int | float]],
     *,
@@ -402,7 +609,7 @@ def _validate_resume_metrics(
             raise ValueError(f"resume metrics {label} disagrees with checkpoint")
 
 
-def train_run(
+def _train_run_locked(
     config: ConfidenceConfig,
     *,
     cache_manifest_path: Path,
@@ -439,6 +646,7 @@ def train_run(
     )
     if resume_from is None:
         run_dir.mkdir(parents=True)
+    run_directory_identity = _run_directory_identity(run_dir, config.run.output_root)
     manifest_path = run_dir / "manifest.json"
     started_at = datetime.now(UTC).isoformat()
     resume_started_at = started_at
@@ -522,6 +730,9 @@ def train_run(
             raise ValueError("resume provenance history must be a list")
         previous_history = list(raw_history)
     if resume_from is None:
+        _assert_run_directory_identity(
+            run_dir, config.run.output_root, run_directory_identity
+        )
         atomic_write_json(manifest_path, base_manifest)
         _atomic_write_text(
             run_dir / "resolved_config.yaml",
@@ -577,6 +788,7 @@ def train_run(
     best_step: int | None = None
     metric_records: list[dict[str, int | float]] = []
     start_epoch = 0
+    best_rewritten = False
     if resume_from is not None:
         assert previous_manifest is not None
         checkpoint = Path(resume_from).resolve()
@@ -661,6 +873,9 @@ def train_run(
             identity=identity,
             sampler_generator=sampler,
         )
+        _assert_run_directory_identity(
+            run_dir, config.run.output_root, run_directory_identity
+        )
         external_stop = commit_epoch_checkpoints(
             checkpoint_dir=run_dir / "checkpoints",
             snapshot=snapshot,
@@ -670,6 +885,8 @@ def train_run(
             max_epochs=config.trainer.max_epochs,
         )
         externally_stopped = external_stop
+        if update.should_save_best:
+            best_rewritten = True
         assert control.ema is not None
         record: dict[str, int | float] = {
             "epoch": epoch,
@@ -684,6 +901,9 @@ def train_run(
             "val/total_loss_ema": control.ema,
         }
         metric_records.append(record)
+        _assert_run_directory_identity(
+            run_dir, config.run.output_root, run_directory_identity
+        )
         _atomic_write_text(
             run_dir / "logs" / "metrics.jsonl",
             "".join(json.dumps(item, sort_keys=True) + "\n" for item in metric_records),
@@ -691,16 +911,17 @@ def train_run(
         if update.should_stop or external_stop:
             break
 
-    training_artifacts = {
-        relative: _artifact_entry(run_dir, relative)
-        for relative in (
-            "resolved_config.yaml",
-            "binning.json",
-            "checkpoints/best.pt",
-            "checkpoints/last.pt",
-            "logs/metrics.jsonl",
-        )
-    }
+    _assert_run_directory_identity(
+        run_dir, config.run.output_root, run_directory_identity
+    )
+    training_artifacts = _validate_publish_artifacts(
+        run_dir=run_dir,
+        resolved=resolved,
+        bins=bins,
+        identity=identity,
+        resume_artifacts=resume_artifacts,
+        best_rewritten=best_rewritten,
+    )
     complete = {
         **base_manifest,
         "status": "complete",
@@ -732,5 +953,83 @@ def train_run(
                 "completed_at": completed_at,
             },
         ]
+    _assert_run_directory_identity(
+        run_dir, config.run.output_root, run_directory_identity
+    )
     atomic_write_json(manifest_path, complete)
+    _assert_run_directory_identity(
+        run_dir, config.run.output_root, run_directory_identity
+    )
     return run_dir
+
+
+def _snapshot_resume_artifacts(run_dir: Path) -> dict[str, bytes | None]:
+    snapshot: dict[str, bytes | None] = {}
+    for relative in _ROLLBACK_ARTIFACTS:
+        path = run_dir / relative
+        snapshot[relative] = path.read_bytes() if path.is_file() else None
+    return snapshot
+
+
+def _restore_resume_artifacts(
+    run_dir: Path,
+    snapshot: Mapping[str, bytes | None],
+) -> None:
+    for relative, data in snapshot.items():
+        path = run_dir / relative
+        if data is None:
+            path.unlink(missing_ok=True)
+        else:
+            _atomic_write_bytes(path, data)
+
+
+def train_run(
+    config: ConfidenceConfig,
+    *,
+    cache_manifest_path: Path,
+    run_name: str,
+    stop_after_epoch: int | None = None,
+    resume_from: Path | None = None,
+) -> Path:
+    """Run one cooperative, per-run locked training transaction.
+
+    The lock serializes all writers using this API. Arbitrary same-user
+    processes that ignore the lock protocol are outside the threat model.
+    """
+    with _exclusive_run_lock(config.run.output_root, run_name):
+        rollback: dict[str, bytes | None] | None = None
+        rollback_identity: tuple[int, int] | None = None
+        if resume_from is not None:
+            run_dir = _safe_run_dir(
+                config.run.output_root,
+                run_name,
+                resume=True,
+            )
+            rollback_identity = _run_directory_identity(
+                run_dir,
+                config.run.output_root,
+            )
+            rollback = _snapshot_resume_artifacts(run_dir)
+        try:
+            return _train_run_locked(
+                config,
+                cache_manifest_path=cache_manifest_path,
+                run_name=run_name,
+                stop_after_epoch=stop_after_epoch,
+                resume_from=resume_from,
+            )
+        except Exception as error:
+            if rollback is not None and rollback_identity is not None:
+                try:
+                    _assert_run_directory_identity(
+                        run_dir,
+                        config.run.output_root,
+                        rollback_identity,
+                    )
+                    _restore_resume_artifacts(run_dir, rollback)
+                except Exception as rollback_error:
+                    raise ExceptionGroup(
+                        "training failed and resume rollback also failed",
+                        [error, rollback_error],
+                    ) from error
+            raise
