@@ -373,7 +373,7 @@ def _resume_artifact_bytes(
         ) from error
     actual = hashlib.sha256(data).hexdigest()
     if not isinstance(expected, str) or actual != expected:
-        raise ValueError(f"resume artifact sha256 mismatch: {relative}")
+        raise ValueError(f"resume artifact {relative} sha256 mismatch")
     return path, expected, data
 
 
