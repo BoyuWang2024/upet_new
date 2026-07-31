@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import json
+import runpy
 from pathlib import Path
 import subprocess
 import sys
@@ -368,12 +370,44 @@ def test_train_script_loads_config_and_dispatches(
     config_path.write_text("profile: smoke\n", encoding="utf-8")
     loaded_config = object()
     seen: list[object] = []
-    monkeypatch.setattr(module, "load_config", lambda path: loaded_config)
     monkeypatch.setattr(
-        module,
+        importlib.import_module("confidence_head.config"),
+        "load_config",
+        lambda path: loaded_config,
+    )
+    monkeypatch.setattr(
+        importlib.import_module("confidence_head.workflows.commands"),
         "train_from_config",
         lambda config: seen.append(config) or Path("/run"),
     )
 
     assert module.main(["--config", str(config_path)]) == 0
     assert seen == [loaded_config]
+
+
+@pytest.mark.parametrize(
+    "script",
+    ["build_cache.py", "train.py", "evaluate.py", "verify.py"],
+)
+def test_script_help_does_not_import_torch(script: str) -> None:
+    script_path = SCRIPTS / script
+    probe = "\n".join(
+        (
+            "import runpy",
+            "import sys",
+            f"sys.argv = [{str(script_path)!r}, '--help']",
+            "try:",
+            f"    runpy.run_path({str(script_path)!r}, run_name='__main__')",
+            "except SystemExit as error:",
+            "    assert error.code == 0",
+            "assert 'torch' not in sys.modules",
+        )
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "--config" in result.stdout
