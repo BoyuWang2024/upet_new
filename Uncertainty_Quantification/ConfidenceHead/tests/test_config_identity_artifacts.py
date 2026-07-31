@@ -122,22 +122,30 @@ def test_paths_resolve_from_repo_root_not_cwd(
 
 
 @pytest.mark.parametrize("field", ["force_num_bins", "energy_num_bins"])
-def test_binning_config_matches_fixed_linear_contract(field: str) -> None:
+def test_binning_rejects_legacy_num_bin_fields(field: str) -> None:
     with pytest.raises(ValidationError, match=field):
-        BinningConfig.model_validate({field: 2})
+        BinningConfig.model_validate({field: 3})
 
-    config = BinningConfig(force_num_bins=3, energy_num_bins=3)
+
+def test_model_heads_are_the_single_num_bins_source(tmp_path: Path) -> None:
+    raw = _valid_config(tmp_path)
+    raw["model"] = {
+        "force": {"num_bins": 7},
+        "energy": {"num_bins": 11},
+    }
+
+    config = ConfidenceConfig.model_validate(raw)
     force_spec = fixed_linear_binning(
-        config.force_num_bins,
-        config.force_max_error,
+        config.model.force.num_bins,
+        config.binning.force_max_error,
     )
     energy_spec = fixed_linear_binning(
-        config.energy_num_bins,
-        config.energy_max_error,
+        config.model.energy.num_bins,
+        config.binning.energy_max_error,
     )
 
-    assert force_spec.num_bins == 3
-    assert energy_spec.num_bins == 3
+    assert force_spec.num_bins == 7
+    assert energy_spec.num_bins == 11
 
 
 def test_load_config_rejects_duplicate_yaml_keys(tmp_path: Path) -> None:

@@ -78,8 +78,8 @@ def _verify_identity(root: Path, manifest: Mapping[str, Any]) -> None:
         {
             "model": resolved["model"],
             "loss": resolved["loss"],
-            "force_num_bins": resolved["binning"]["force_num_bins"],
-            "energy_num_bins": resolved["binning"]["energy_num_bins"],
+            "force_num_bins": resolved["model"]["force"]["num_bins"],
+            "energy_num_bins": resolved["model"]["energy"]["num_bins"],
         }
     )
     expected = {

@@ -100,9 +100,7 @@ class CacheConfig(StrictModel):
 
 class BinningConfig(StrictModel):
     algorithm: Literal["fixed_linear_v1"] = "fixed_linear_v1"
-    force_num_bins: int = Field(default=50, ge=3)
     force_max_error: float = Field(default=0.5, gt=0, allow_inf_nan=False)
-    energy_num_bins: int = Field(default=50, ge=3)
     energy_max_error: float = Field(default=0.3, gt=0, allow_inf_nan=False)
 
 

@@ -9,13 +9,14 @@ from typing import Any
 
 import torch
 
+from ..binning import fixed_linear_binning
 from ..cache import SCHEMA_VERSION
 from ..config import ConfidenceConfig
 from ..identity import cache_id
 from ..run_naming import build_run_name, resolve_run_dir
 from .build_cache import build_cache
 from .evaluate import evaluate_run
-from .train import train_run
+from .train import RUN_SCHEMA_VERSION, _bin_payload, _identities, train_run
 from .verify import verify_run
 
 
@@ -180,18 +181,6 @@ def resolve_unique_cache_manifest(config: ConfidenceConfig) -> Path:
     return matches[0]
 
 
-def _selected_cache_id(config: ConfidenceConfig, cache_manifest_path: Path) -> str:
-    cache_root = (config.run.output_root / "cache").resolve()
-    cache_identity = _matching_cache_id(
-        cache_manifest_path,
-        _expected_cache_identity(config),
-        cache_root,
-    )
-    if cache_identity is None:
-        raise ValueError("matching cache manifest was not found")
-    return cache_identity
-
-
 def _validate_resume_path(run_dir: Path, resume_from: Path | None) -> Path | None:
     if resume_from is None:
         return None
@@ -199,6 +188,54 @@ def _validate_resume_path(run_dir: Path, resume_from: Path | None) -> Path | Non
     if not resolved.is_relative_to(run_dir):
         raise ValueError("resume checkpoint must be within derived run directory")
     return resolved
+
+
+def _configured_run_manifest(
+    config: ConfidenceConfig,
+    cache_manifest_path: Path,
+    run_dir: Path,
+) -> dict[str, Any]:
+    try:
+        cache_manifest = json.loads(
+            Path(cache_manifest_path).read_text(encoding="utf-8")
+        )
+        run_manifest = json.loads(
+            (Path(run_dir) / "manifest.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(
+            f"invalid configured run identity artifact: {error}"
+        ) from error
+    if not isinstance(cache_manifest, Mapping) or not isinstance(run_manifest, dict):
+        raise ValueError("configured run identity artifacts must contain mappings")
+    bins = _bin_payload(
+        fixed_linear_binning(
+            config.model.force.num_bins,
+            config.binning.force_max_error,
+        ),
+        fixed_linear_binning(
+            config.model.energy.num_bins,
+            config.binning.energy_max_error,
+        ),
+    )
+    identity, expected_run_id, _ = _identities(config, cache_manifest, bins)
+    expected = {
+        "config_id": identity.config_id,
+        "cache_id": identity.cache_id,
+        "binning_id": identity.binning_id,
+        "model_loss_id": identity.model_loss_id,
+        "run_id": expected_run_id,
+        "identity": expected_run_id,
+    }
+    if (
+        run_manifest.get("schema_version") != RUN_SCHEMA_VERSION
+        or run_manifest.get("status") != "complete"
+    ):
+        raise ValueError("configured run schema/status identity mismatch")
+    for field, value in expected.items():
+        if run_manifest.get(field) != value:
+            raise ValueError(f"configured run {field} identity mismatch")
+    return run_manifest
 
 
 def build_cache_from_config(config: ConfidenceConfig) -> Path:
@@ -223,6 +260,7 @@ def evaluate_from_config(config: ConfidenceConfig) -> Path:
     """Evaluate the best checkpoint of the derived run."""
     cache_manifest_path = resolve_unique_cache_manifest(config)
     run_dir = resolve_run_dir(config)
+    _configured_run_manifest(config, cache_manifest_path, run_dir)
     return evaluate_run(
         run_dir,
         cache_manifest_path=cache_manifest_path,
@@ -233,16 +271,6 @@ def evaluate_from_config(config: ConfidenceConfig) -> Path:
 def verify_from_config(config: ConfidenceConfig) -> dict[str, Any]:
     """Fully verify the derived run after confirming its cache identity."""
     cache_manifest_path = resolve_unique_cache_manifest(config)
-    cache_identity = _selected_cache_id(config, cache_manifest_path)
     run_dir = resolve_run_dir(config)
-    try:
-        run_manifest = json.loads(
-            (run_dir / "manifest.json").read_text(encoding="utf-8")
-        )
-    except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"invalid run manifest: {error}") from error
-    if not isinstance(run_manifest, Mapping):
-        raise ValueError("run manifest must contain a mapping")
-    if run_manifest.get("cache_id") != cache_identity:
-        raise ValueError("run cache_id does not match selected cache")
+    _configured_run_manifest(config, cache_manifest_path, run_dir)
     return verify_run(run_dir, full=True)

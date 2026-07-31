@@ -43,8 +43,10 @@ build_cache.py 输出匹配配置身份的缓存清单路径；train.py 输出�
 
 ~~~
 trainer:
-  resume_from: Uncertainty_Quantification/ConfidenceHead/outputs/<派生运行目录>/last.pt
+  resume_from: Uncertainty_Quantification/ConfidenceHead/outputs/runs/<run-name>/checkpoints/last.pt
 ~~~
+
+恢复训练通常使用 `last.pt`；`evaluate.py` 默认评估 `best.pt`。
 
 恢复路径必须位于该配置派生的 run 目录内，否则训练会拒绝执行，以免串用其他实验的检查点。
 

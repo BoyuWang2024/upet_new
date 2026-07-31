@@ -52,9 +52,7 @@ def _config(tmp_path: Path, *, resume_from: Path | None = None) -> ConfidenceCon
                 for index, split in enumerate(("train", "validation", "test"), 1)
             },
             "binning": {
-                "force_num_bins": 3,
                 "force_max_error": 0.5,
-                "energy_num_bins": 3,
                 "energy_max_error": 0.3,
             },
             "model": {
@@ -115,6 +113,37 @@ def _manifest(config: ConfidenceConfig) -> dict[str, object]:
         "cache_id": identity,
         "identity_payload": payload,
         "splits": {},
+    }
+
+
+def _run_manifest(
+    config: ConfidenceConfig,
+    cache_manifest: dict[str, object],
+) -> dict[str, object]:
+    bins = commands._bin_payload(
+        commands.fixed_linear_binning(
+            config.model.force.num_bins,
+            config.binning.force_max_error,
+        ),
+        commands.fixed_linear_binning(
+            config.model.energy.num_bins,
+            config.binning.energy_max_error,
+        ),
+    )
+    identity, run_identity, _ = commands._identities(
+        config,
+        cache_manifest,
+        bins,
+    )
+    return {
+        "schema_version": commands.RUN_SCHEMA_VERSION,
+        "status": "complete",
+        "identity": run_identity,
+        "run_id": run_identity,
+        "config_id": identity.config_id,
+        "cache_id": identity.cache_id,
+        "binning_id": identity.binning_id,
+        "model_loss_id": identity.model_loss_id,
     }
 
 
@@ -263,22 +292,24 @@ def test_evaluate_from_config_defaults_to_best_checkpoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = _config(tmp_path)
+    cache_manifest = _manifest(config)
+    cache_path = _write_manifest(
+        config.run.output_root / "cache" / "only" / "manifest.json",
+        cache_manifest,
+    )
+    run_dir = commands.resolve_run_dir(config)
+    run_dir.mkdir(parents=True)
+    _write_manifest(run_dir / "manifest.json", _run_manifest(config, cache_manifest))
     seen: dict[str, object] = {}
     monkeypatch.setattr(
         commands,
-        "resolve_unique_cache_manifest",
-        lambda value: Path("/cache/manifest.json"),
-    )
-    monkeypatch.setattr(commands, "resolve_run_dir", lambda value: Path("/run"))
-    monkeypatch.setattr(
-        commands,
         "evaluate_run",
-        lambda value, **kwargs: seen.update(kwargs) or Path("/run/evaluation"),
+        lambda value, **kwargs: seen.update(kwargs) or run_dir / "evaluation",
     )
 
-    assert commands.evaluate_from_config(config) == Path("/run/evaluation")
+    assert commands.evaluate_from_config(config) == run_dir / "evaluation"
     assert seen == {
-        "cache_manifest_path": Path("/cache/manifest.json"),
+        "cache_manifest_path": cache_path.resolve(),
         "checkpoint_path": None,
     }
 
@@ -294,9 +325,9 @@ def test_verify_from_config_requests_full_verification(
     )
     run_dir = commands.resolve_run_dir(config)
     run_dir.mkdir(parents=True)
-    (run_dir / "manifest.json").write_text(
-        json.dumps({"cache_id": cache_manifest["cache_id"]}),
-        encoding="utf-8",
+    _write_manifest(
+        run_dir / "manifest.json",
+        _run_manifest(config, cache_manifest),
     )
     seen: dict[str, object] = {}
     monkeypatch.setattr(
@@ -313,23 +344,23 @@ def test_verify_from_config_rejects_run_cache_mismatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = _config(tmp_path)
+    cache_manifest = _manifest(config)
     _write_manifest(
         config.run.output_root / "cache" / "only" / "manifest.json",
-        _manifest(config),
+        cache_manifest,
     )
     run_dir = commands.resolve_run_dir(config)
     run_dir.mkdir(parents=True)
-    (run_dir / "manifest.json").write_text(
-        json.dumps({"cache_id": "cache-other"}),
-        encoding="utf-8",
-    )
+    run_manifest = _run_manifest(config, cache_manifest)
+    run_manifest["cache_id"] = "cache-other"
+    _write_manifest(run_dir / "manifest.json", run_manifest)
     monkeypatch.setattr(
         commands,
         "verify_run",
         lambda value, **kwargs: pytest.fail("verify_run must not be called"),
     )
 
-    with pytest.raises(ValueError, match="run cache_id does not match selected cache"):
+    with pytest.raises(ValueError, match="configured run cache_id identity mismatch"):
         commands.verify_from_config(config)
 
 

@@ -24,9 +24,7 @@ cache:
   shard_max_atoms: 100000
 binning:
   algorithm: fixed_linear_v1
-  force_num_bins: 50
   force_max_error: 0.5
-  energy_num_bins: 50
   energy_max_error: 0.3
 model:
   force:

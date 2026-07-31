@@ -27,9 +27,7 @@ def _config(tmp_path: Path) -> ConfidenceConfig:
                 for index, split in enumerate(("train", "validation", "test"), 1)
             },
             "binning": {
-                "force_num_bins": 3,
                 "force_max_error": 0.5,
-                "energy_num_bins": 3,
                 "energy_max_error": 0.3,
             },
             "model": {

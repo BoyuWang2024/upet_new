@@ -324,12 +324,19 @@ def _bin_payload(force: BinningSpec, energy: BinningSpec) -> dict[str, Any]:
     return {"force": branch(force), "energy": branch(energy)}
 
 
+def _resolved_experiment_config(config: ConfidenceConfig) -> dict[str, Any]:
+    """Return semantic experiment config without resume control state."""
+    resolved = config.model_dump(mode="json")
+    resolved["trainer"]["resume_from"] = None
+    return resolved
+
+
 def _identities(
     config: ConfidenceConfig,
     cache_manifest: Mapping[str, Any],
     bins: Mapping[str, Any],
 ) -> tuple[TrainingIdentity, str, dict[str, Any]]:
-    resolved = config.model_dump(mode="json")
+    resolved = _resolved_experiment_config(config)
     config_identity = config_id(resolved)
     bin_identity = binning_id(dict(bins))
     model_loss_payload = {
@@ -1115,6 +1122,8 @@ def train_run(
         rollback_identity: tuple[int, int] | None = None
         run_dir: Path | None = None
         tracker: Tracker | None = None
+        finish_summary: dict[str, Any] = {"stop_reason": "exception"}
+        finish_status = "failed"
         if resume_from is not None:
             run_dir = _safe_run_dir(
                 config.run.output_root,
@@ -1136,48 +1145,48 @@ def train_run(
             tracker = started_tracker
 
         try:
-            result = _train_run_locked(
-                config,
-                cache_manifest_path=cache_manifest_path,
-                run_name=run_name,
-                stop_after_epoch=stop_after_epoch,
-                resume_from=resume_from,
-                begin_resume_writes=begin_resume_writes
-                if run_dir is not None
-                else None,
-                tracker_factory=tracker_factory,
-                on_tracker_started=on_tracker_started,
-            )
-        except Exception as error:
-            rollback_error: Exception | None = None
-            if rollback is not None and rollback_identity is not None and run_dir:
-                try:
-                    _assert_run_directory_identity(
-                        run_dir,
-                        config.run.output_root,
-                        rollback_identity,
-                    )
-                    _restore_resume_artifacts(run_dir, rollback)
-                except Exception as caught_rollback_error:
-                    rollback_error = caught_rollback_error
-            if tracker is not None:
-                tracker.finish({"stop_reason": "exception"}, status="failed")
-            if rollback_error is not None:
-                raise ExceptionGroup(
-                    "training failed and resume rollback also failed",
-                    [error, rollback_error],
-                ) from error
-            raise
+            try:
+                result = _train_run_locked(
+                    config,
+                    cache_manifest_path=cache_manifest_path,
+                    run_name=run_name,
+                    stop_after_epoch=stop_after_epoch,
+                    resume_from=resume_from,
+                    begin_resume_writes=begin_resume_writes
+                    if run_dir is not None
+                    else None,
+                    tracker_factory=tracker_factory,
+                    on_tracker_started=on_tracker_started,
+                )
+            except Exception as error:
+                rollback_error: Exception | None = None
+                if rollback is not None and rollback_identity is not None and run_dir:
+                    try:
+                        _assert_run_directory_identity(
+                            run_dir,
+                            config.run.output_root,
+                            rollback_identity,
+                        )
+                        _restore_resume_artifacts(run_dir, rollback)
+                    except Exception as caught_rollback_error:
+                        rollback_error = caught_rollback_error
+                if rollback_error is not None:
+                    raise ExceptionGroup(
+                        "training failed and resume rollback also failed",
+                        [error, rollback_error],
+                    ) from error
+                raise
 
-        if tracker is None:
-            raise RuntimeError("training completed without starting a tracker")
-        complete_manifest = _load_json(result / "manifest.json")
-        tracker.finish(
-            {
+            if tracker is None:
+                raise RuntimeError("training completed without starting a tracker")
+            complete_manifest = _load_json(result / "manifest.json")
+            finish_summary = {
                 "best_epoch": complete_manifest["best_epoch"],
                 "best_metric": complete_manifest["best_metric"],
                 "stop_reason": complete_manifest["stop_reason"],
-            },
-            status="success",
-        )
-        return result
+            }
+            finish_status = "success"
+            return result
+        finally:
+            if tracker is not None:
+                tracker.finish(finish_summary, status=finish_status)

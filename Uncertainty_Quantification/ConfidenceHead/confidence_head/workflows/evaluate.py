@@ -35,7 +35,15 @@ from ..identity import cache_id
 from ..metrics import classification_metrics
 from ..model import ConfidenceModel
 from ..trainer import CHECKPOINT_SCHEMA_VERSION
-from .train import RUN_SCHEMA_VERSION, _bin_payload, _identities
+from .train import (
+    RUN_SCHEMA_VERSION,
+    _assert_run_directory_identity,
+    _bin_payload,
+    _exclusive_run_lock,
+    _identities,
+    _run_directory_identity,
+    _safe_run_dir,
+)
 
 
 EVALUATION_SCHEMA_VERSION = "upet_confidence_evaluation_v1"
@@ -118,6 +126,53 @@ def _offsets(counts: list[torch.Tensor]) -> torch.Tensor:
     return result
 
 
+def _evaluation_directory_identity(
+    run_dir: Path,
+) -> tuple[Path, tuple[int, int]]:
+    evaluation_dir = run_dir / "evaluation"
+    if evaluation_dir.is_symlink():
+        raise ValueError("evaluation directory must not be a symlink")
+    evaluation_dir.mkdir(exist_ok=True)
+    if evaluation_dir.is_symlink() or not evaluation_dir.is_dir():
+        raise ValueError("evaluation directory must be a regular directory")
+    resolved = evaluation_dir.resolve()
+    if not resolved.is_relative_to(run_dir.resolve()):
+        raise ValueError("evaluation directory escapes run directory")
+    stat = evaluation_dir.stat(follow_symlinks=False)
+    return evaluation_dir, (stat.st_dev, stat.st_ino)
+
+
+def _assert_evaluation_directory_identity(
+    run_dir: Path,
+    evaluation_dir: Path,
+    expected: tuple[int, int],
+) -> None:
+    if evaluation_dir.is_symlink():
+        raise ValueError("evaluation directory must not be a symlink")
+    resolved = evaluation_dir.resolve()
+    if not resolved.is_relative_to(run_dir.resolve()):
+        raise ValueError("evaluation directory escapes run directory")
+    stat = evaluation_dir.stat(follow_symlinks=False)
+    if (stat.st_dev, stat.st_ino) != expected:
+        raise ValueError("evaluation directory identity changed during publication")
+
+
+def _assert_evaluation_write_target(
+    *,
+    run_dir: Path,
+    output_root: Path,
+    run_identity: tuple[int, int],
+    evaluation_dir: Path,
+    evaluation_identity: tuple[int, int],
+) -> None:
+    _assert_run_directory_identity(run_dir, output_root, run_identity)
+    _assert_evaluation_directory_identity(
+        run_dir,
+        evaluation_dir,
+        evaluation_identity,
+    )
+
+
 def _declared_artifact(run_dir: Path, manifest: Mapping[str, Any], path: Path) -> Path:
     candidate = path.resolve()
     if not candidate.is_relative_to(run_dir):
@@ -150,9 +205,11 @@ def _checkpoint_identity(
             raise ValueError(f"checkpoint {field} mismatch")
 
 
-def evaluate_run(
+def _evaluate_run_locked(
     run_dir: Path,
     *,
+    output_root: Path,
+    run_identity: tuple[int, int],
     cache_manifest_path: Path,
     checkpoint_path: Path | None = None,
 ) -> Path:
@@ -207,6 +264,14 @@ def evaluate_run(
     ):
         if manifest.get(field) != expected:
             raise ValueError(f"evaluation run {field} identity mismatch")
+    evaluation_dir, evaluation_identity = _evaluation_directory_identity(run_dir)
+    _assert_evaluation_write_target(
+        run_dir=run_dir,
+        output_root=output_root,
+        run_identity=run_identity,
+        evaluation_dir=evaluation_dir,
+        evaluation_identity=evaluation_identity,
+    )
     dataset = CachedSplitDataset(cache_path, "test", cache_identity)
 
     if checkpoint_path is None:
@@ -320,9 +385,22 @@ def evaluate_run(
     predictions["atom_offsets"] = _offsets(atom_counts)
     predictions["force_representatives"] = force_spec.representatives
     predictions["energy_representatives"] = energy_spec.representatives
-    evaluation_dir = run_dir / "evaluation"
     prediction_path = evaluation_dir / "test_predictions.pt"
+    _assert_evaluation_write_target(
+        run_dir=run_dir,
+        output_root=output_root,
+        run_identity=run_identity,
+        evaluation_dir=evaluation_dir,
+        evaluation_identity=evaluation_identity,
+    )
     atomic_torch_save(prediction_path, predictions)
+    _assert_evaluation_write_target(
+        run_dir=run_dir,
+        output_root=output_root,
+        run_identity=run_identity,
+        evaluation_dir=evaluation_dir,
+        evaluation_identity=evaluation_identity,
+    )
 
     force_logits = predictions["force_logits"].reshape(
         -1, predictions["force_logits"].shape[-1]
@@ -343,11 +421,39 @@ def evaluate_run(
         ),
     }
     metrics_path = evaluation_dir / "metrics.json"
+    _assert_evaluation_write_target(
+        run_dir=run_dir,
+        output_root=output_root,
+        run_identity=run_identity,
+        evaluation_dir=evaluation_dir,
+        evaluation_identity=evaluation_identity,
+    )
     atomic_write_json(metrics_path, metrics)
+    _assert_evaluation_write_target(
+        run_dir=run_dir,
+        output_root=output_root,
+        run_identity=run_identity,
+        evaluation_dir=evaluation_dir,
+        evaluation_identity=evaluation_identity,
+    )
     force_csv = evaluation_dir / "force_bin_summary.csv"
     energy_csv = evaluation_dir / "energy_bin_summary.csv"
+    _assert_evaluation_write_target(
+        run_dir=run_dir,
+        output_root=output_root,
+        run_identity=run_identity,
+        evaluation_dir=evaluation_dir,
+        evaluation_identity=evaluation_identity,
+    )
     _write_csv(
         force_csv, force_labels, force_observed, force_expected, force_spec.num_bins
+    )
+    _assert_evaluation_write_target(
+        run_dir=run_dir,
+        output_root=output_root,
+        run_identity=run_identity,
+        evaluation_dir=evaluation_dir,
+        evaluation_identity=evaluation_identity,
     )
     _write_csv(
         energy_csv,
@@ -355,6 +461,13 @@ def evaluate_run(
         energy_observed,
         energy_expected,
         energy_spec.num_bins,
+    )
+    _assert_evaluation_write_target(
+        run_dir=run_dir,
+        output_root=output_root,
+        run_identity=run_identity,
+        evaluation_dir=evaluation_dir,
+        evaluation_identity=evaluation_identity,
     )
     artifacts = {
         path.name: {"path": path.name, "sha256": sha256_file(path)}
@@ -380,7 +493,21 @@ def evaluate_run(
         "completed_at": datetime.now(UTC).isoformat(),
     }
     evaluation_manifest_path = evaluation_dir / "manifest.json"
+    _assert_evaluation_write_target(
+        run_dir=run_dir,
+        output_root=output_root,
+        run_identity=run_identity,
+        evaluation_dir=evaluation_dir,
+        evaluation_identity=evaluation_identity,
+    )
     atomic_write_json(evaluation_manifest_path, evaluation_manifest)
+    _assert_evaluation_write_target(
+        run_dir=run_dir,
+        output_root=output_root,
+        run_identity=run_identity,
+        evaluation_dir=evaluation_dir,
+        evaluation_identity=evaluation_identity,
+    )
 
     updated = dict(manifest)
     declared = dict(updated["artifacts"])
@@ -398,5 +525,47 @@ def evaluate_run(
         "status": "complete",
         "manifest": "evaluation/manifest.json",
     }
+    _assert_evaluation_write_target(
+        run_dir=run_dir,
+        output_root=output_root,
+        run_identity=run_identity,
+        evaluation_dir=evaluation_dir,
+        evaluation_identity=evaluation_identity,
+    )
     atomic_write_json(manifest_path, updated)
+    _assert_evaluation_write_target(
+        run_dir=run_dir,
+        output_root=output_root,
+        run_identity=run_identity,
+        evaluation_dir=evaluation_dir,
+        evaluation_identity=evaluation_identity,
+    )
     return evaluation_dir
+
+
+def evaluate_run(
+    run_dir: Path,
+    *,
+    cache_manifest_path: Path,
+    checkpoint_path: Path | None = None,
+) -> Path:
+    """Evaluate one run while serializing and confining all publications."""
+    requested = Path(run_dir)
+    if requested.is_symlink() or requested.parent.name != "runs":
+        raise ValueError("evaluation run directory must be a regular derived run")
+    output_root = requested.parent.parent
+    run_name = requested.name
+    with _exclusive_run_lock(output_root, run_name):
+        safe_run_dir = _safe_run_dir(output_root, run_name, resume=True)
+        if safe_run_dir.resolve() != requested.resolve():
+            raise ValueError("evaluation run directory does not match derived run")
+        run_identity = _run_directory_identity(safe_run_dir, output_root)
+        result = _evaluate_run_locked(
+            safe_run_dir,
+            output_root=output_root,
+            run_identity=run_identity,
+            cache_manifest_path=cache_manifest_path,
+            checkpoint_path=checkpoint_path,
+        )
+        _assert_run_directory_identity(safe_run_dir, output_root, run_identity)
+        return result

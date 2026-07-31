@@ -22,6 +22,7 @@ from Uncertainty_Quantification.ConfidenceHead.confidence_head.config import (
     ConfidenceConfig,
     RunConfig,
     SchedulerConfig,
+    load_config,
 )
 from Uncertainty_Quantification.ConfidenceHead.confidence_head.metrics import (
     classification_metrics,
@@ -34,6 +35,7 @@ evaluate_module = import_module(f"{_WORKFLOWS}.evaluate")
 evaluate_run = evaluate_module.evaluate_run
 train_module = import_module(f"{_WORKFLOWS}.train")
 train_run = train_module.train_run
+commands_module = import_module(f"{_WORKFLOWS}.commands")
 
 
 def _structure(
@@ -130,9 +132,7 @@ def config(tmp_path: Path) -> ConfidenceConfig:
             },
             "data": data,
             "binning": {
-                "force_num_bins": 3,
                 "force_max_error": 0.5,
-                "energy_num_bins": 3,
                 "energy_max_error": 0.3,
             },
             "model": {
@@ -166,6 +166,54 @@ def config(tmp_path: Path) -> ConfidenceConfig:
             "logging": {"wandb": False},
         }
     )
+
+
+def test_train_from_yaml_resumes_when_only_resume_path_changes(
+    tmp_path: Path,
+    config: ConfidenceConfig,
+    complete_cache: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = config.model_dump(mode="json")
+    raw["trainer"]["max_epochs"] = 2
+    config_path = tmp_path / "resume.yaml"
+    config_path.write_text(yaml.safe_dump(raw, sort_keys=True), encoding="utf-8")
+    monkeypatch.setattr(
+        commands_module,
+        "resolve_unique_cache_manifest",
+        lambda _: complete_cache,
+    )
+    real_train_run = commands_module.train_run
+    calls = 0
+
+    def stop_only_first_run(value: ConfidenceConfig, **kwargs: Any) -> Path:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            kwargs["stop_after_epoch"] = 0
+        return real_train_run(value, **kwargs)
+
+    monkeypatch.setattr(commands_module, "train_run", stop_only_first_run)
+    initial_config = load_config(config_path, repo_root=tmp_path)
+    initial = commands_module.train_from_config(initial_config)
+    raw["trainer"]["resume_from"] = str(initial / "checkpoints" / "last.pt")
+    config_path.write_text(yaml.safe_dump(raw, sort_keys=True), encoding="utf-8")
+
+    resumed_config = load_config(config_path, repo_root=tmp_path)
+    resumed = commands_module.train_from_config(resumed_config)
+
+    assert resumed == initial
+    records = [
+        json.loads(line)
+        for line in (resumed / "logs" / "metrics.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [record["epoch"] for record in records] == [0, 1]
+    persisted = yaml.safe_load(
+        (resumed / "resolved_config.yaml").read_text(encoding="utf-8")
+    )
+    assert persisted["trainer"]["resume_from"] is None
 
 
 def test_training_and_validation_loaders_use_trainer_batch_size(
@@ -231,6 +279,45 @@ def test_classification_metrics_match_direct_hand_calculation() -> None:
             "overflow_fraction": 1 / 3,
         }
     )
+
+
+def test_config_entrypoints_reject_run_name_collisions_before_writing(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_name = commands_module.build_run_name(config)
+    run_dir = train_run(
+        config,
+        cache_manifest_path=complete_cache,
+        run_name=run_name,
+    )
+    monkeypatch.setattr(
+        commands_module,
+        "resolve_unique_cache_manifest",
+        lambda _: complete_cache,
+    )
+    mutations = (
+        ("model", "force", "dropout", 0.25),
+        ("model", "energy", "signed_root", False),
+        ("optimizer", None, "learning_rate", 0.002),
+        ("trainer", None, "batch_size", 1),
+        ("run", None, "seed", config.run.seed + 1),
+        ("logging", None, "wandb_project", "collision"),
+    )
+
+    for section, branch, field, value in mutations:
+        raw = config.model_dump()
+        target = raw[section] if branch is None else raw[section][branch]
+        target[field] = value
+        changed = ConfidenceConfig.model_validate(raw)
+        assert commands_module.resolve_run_dir(changed) == run_dir
+        with pytest.raises(ValueError, match="configured run .*identity mismatch"):
+            commands_module.evaluate_from_config(changed)
+        assert not (run_dir / "evaluation").exists()
+        with pytest.raises(ValueError, match="configured run .*identity mismatch"):
+            commands_module.verify_from_config(changed)
+        assert not (run_dir / "evaluation").exists()
 
 
 def test_train_evaluate_and_verify_synthetic_complete_cache(
@@ -323,6 +410,26 @@ def test_train_evaluate_and_verify_synthetic_complete_cache(
     assert not [
         path for path in run_dir.rglob("*") if path.suffix.lower() in image_suffixes
     ]
+
+
+def test_evaluate_rejects_external_evaluation_symlink_before_writing(
+    tmp_path: Path,
+    config: ConfidenceConfig,
+    complete_cache: Path,
+) -> None:
+    run_dir = train_run(
+        config,
+        cache_manifest_path=complete_cache,
+        run_name="evaluation-symlink",
+    )
+    external = tmp_path / "external-evaluation"
+    external.mkdir()
+    (run_dir / "evaluation").symlink_to(external, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="evaluation directory.*symlink"):
+        evaluate_run(run_dir, cache_manifest_path=complete_cache)
+
+    assert list(external.iterdir()) == []
 
 
 def test_full_verify_rejects_a_hash_modified_declared_artifact(
@@ -593,7 +700,6 @@ def test_distinct_force_and_energy_bin_counts_train_and_evaluate(
     config = _config_copy(
         config,
         trainer={"max_epochs": 1},
-        binning={"force_num_bins": 3, "energy_num_bins": 5},
         model={
             "force": {"hidden_dims": [4], "dropout": 0.0, "num_bins": 3},
             "energy": {
@@ -621,6 +727,7 @@ def test_distinct_force_and_energy_bin_counts_train_and_evaluate(
     assert predictions["energy_logits"].shape == (2, 5)
     assert predictions["force_representatives"].shape == (3,)
     assert predictions["energy_representatives"].shape == (5,)
+    assert verify_run(run_dir, full=True)["status"] == "complete"
 
 
 def test_amp_is_explicitly_unsupported_on_every_device() -> None:
@@ -1665,6 +1772,68 @@ def test_failed_resume_preflight_does_not_start_tracker(
         )
 
     assert starts == []
+
+
+def test_post_publish_summary_failure_finishes_wandb_once_as_failed(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config_copy(config, logging={"wandb": True})
+
+    class FailingFinishRun:
+        id = "post-summary-run"
+
+        def __init__(self) -> None:
+            self.summary: dict[str, Any] = {}
+            self.finish_exit_codes: list[int] = []
+
+        def log(self, _: dict[str, int | float]) -> None:
+            pass
+
+        def finish(self, *, exit_code: int) -> None:
+            self.finish_exit_codes.append(exit_code)
+            raise RuntimeError("synthetic cleanup failure")
+
+    class FakeWandb:
+        def __init__(self) -> None:
+            self.run = FailingFinishRun()
+
+        def init(self, **_: Any) -> FailingFinishRun:
+            return self.run
+
+    fake_wandb = FakeWandb()
+
+    def tracker_factory(logging: Any, **kwargs: Any) -> Any:
+        return train_module.WandbTracker.start(
+            logging,
+            **kwargs,
+            wandb_module=fake_wandb,
+        )
+
+    original_load_json = train_module._load_json
+
+    def fail_post_publish_summary(path: Path) -> dict[str, Any]:
+        value = original_load_json(path)
+        if Path(path).parent.name == "post-summary-failure":
+            raise RuntimeError("synthetic post-publish summary failure")
+        return value
+
+    monkeypatch.setattr(train_module, "_load_json", fail_post_publish_summary)
+    with pytest.warns(RuntimeWarning, match="finish"):
+        with pytest.raises(
+            RuntimeError,
+            match="synthetic post-publish summary failure",
+        ):
+            train_run(
+                config,
+                cache_manifest_path=complete_cache,
+                run_name="post-summary-failure",
+                tracker_factory=tracker_factory,
+            )
+
+    assert fake_wandb.run.summary["status"] == "failed"
+    assert fake_wandb.run.finish_exit_codes == [1]
 
 
 def test_training_exception_safely_finishes_started_tracker(
