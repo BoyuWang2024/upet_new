@@ -1348,9 +1348,8 @@ def test_resume_rolls_back_if_best_changes_after_preflight(
     def mutate_best_after_checkpoint_commit(**kwargs: Any) -> bool:
         nonlocal mutated
         external_stop = original_commit(**kwargs)
-        if not mutated:
-            mutated = True
-            (run_dir / "checkpoints" / "best.pt").write_bytes(b"replaced best")
+        mutated = True
+        (run_dir / "checkpoints" / "best.pt").write_bytes(b"replaced best")
         return external_stop
 
     monkeypatch.setattr(
