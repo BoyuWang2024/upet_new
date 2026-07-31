@@ -543,6 +543,8 @@ resume 前必须核对所有上游 identity。任何不匹配都直接失败。�
 - resume 在发布前重新验证配置、分箱、checkpoint 和 metrics，失败时恢复进入事务前的已有产物；
 - 任意同用户进程若绕过锁协议直接改写 run 目录，不属于本实现承诺防护的威胁范围；
 - 若未来需要抵御此类非协作写入者，必须升级为基于目录文件描述符的 `openat`/`renameat` 方案。
+- resume 必须先校验旧 manifest 声明的全部 evaluation 产物；成功继续训练时删除这些已失效产物和声明，
+  后续 evaluation 必须基于新的训练结果重新计算。
 
 checkpoint 使用：
 
