@@ -537,6 +537,13 @@ scheduler 和 early stopping 必须读取同一个 epoch EMA 值。每次 schedu
 resume 前必须核对所有上游 identity。任何不匹配都直接失败。恢复后从下一个未完成 epoch
 开始，不能重复已经提交的 epoch，也不能重置 scheduler、EMA、best value 或 sampler。
 
+并发与事务保证采用“协作写入者”威胁模型：
+
+- 同一 run 的所有 `train_run` 调用必须遵守每个 run 的 advisory lock，并由该锁串行化；
+- resume 在发布前重新验证配置、分箱、checkpoint 和 metrics，失败时恢复进入事务前的已有产物；
+- 任意同用户进程若绕过锁协议直接改写 run 目录，不属于本实现承诺防护的威胁范围；
+- 若未来需要抵御此类非协作写入者，必须升级为基于目录文件描述符的 `openat`/`renameat` 方案。
+
 checkpoint 使用：
 
 ```text
