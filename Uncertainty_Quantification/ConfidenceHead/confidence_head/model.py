@@ -22,22 +22,23 @@ class ConfidenceModel(nn.Module):
         self,
         force_input_dim: int,
         energy_input_dim: int,
-        hidden_dims: tuple[int, ...],
-        num_bins: int,
+        force_hidden_dims: tuple[int, ...],
+        energy_hidden_dims: tuple[int, ...],
+        force_dropout: float,
+        energy_dropout: float,
+        force_num_bins: int,
+        energy_num_bins: int,
         cumulant_order: int,
         signed_root: bool,
-        dropout: float,
-        force_num_bins: int | None = None,
-        energy_num_bins: int | None = None,
     ) -> None:
         super().__init__()
         self.force_input_dim = force_input_dim
         self.energy_input_dim = energy_input_dim
         self.force_head = ComponentConfidenceHead(
             force_input_dim,
-            hidden_dims,
-            dropout,
-            num_bins if force_num_bins is None else force_num_bins,
+            force_hidden_dims,
+            force_dropout,
+            force_num_bins,
         )
         self.energy_adapter = LocalToGlobalCumulantAdapter(
             energy_input_dim,
@@ -46,9 +47,9 @@ class ConfidenceModel(nn.Module):
         )
         self.energy_head = ConfidenceHead(
             energy_input_dim * cumulant_order,
-            hidden_dims,
-            dropout,
-            num_bins if energy_num_bins is None else energy_num_bins,
+            energy_hidden_dims,
+            energy_dropout,
+            energy_num_bins,
         )
 
     def forward(

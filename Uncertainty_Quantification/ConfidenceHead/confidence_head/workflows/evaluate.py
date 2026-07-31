@@ -55,10 +55,10 @@ def _load_mapping(path: Path, *, yaml_file: bool = False) -> dict[str, Any]:
 def _specs(config: ConfidenceConfig) -> tuple[BinningSpec, BinningSpec]:
     return (
         fixed_linear_binning(
-            config.binning.force_num_bins, config.binning.force_max_error
+            config.model.force.num_bins, config.binning.force_max_error
         ),
         fixed_linear_binning(
-            config.binning.energy_num_bins, config.binning.energy_max_error
+            config.model.energy.num_bins, config.binning.energy_max_error
         ),
     )
 
@@ -235,14 +235,15 @@ def evaluate_run(
 
     model = ConfidenceModel(
         force_input_dim=int(manifest["force_feature_dim"]),
-        num_bins=config.binning.force_num_bins,
         energy_input_dim=int(manifest["energy_feature_dim"]),
-        hidden_dims=config.model.hidden_dims,
-        force_num_bins=config.binning.force_num_bins,
-        energy_num_bins=config.binning.energy_num_bins,
-        cumulant_order=config.model.cumulant_order,
-        signed_root=config.model.signed_root,
-        dropout=config.model.dropout,
+        force_hidden_dims=config.model.force.hidden_dims,
+        energy_hidden_dims=config.model.energy.hidden_dims,
+        force_dropout=config.model.force.dropout,
+        energy_dropout=config.model.energy.dropout,
+        force_num_bins=config.model.force.num_bins,
+        energy_num_bins=config.model.energy.num_bins,
+        cumulant_order=config.model.energy.cumulant_order,
+        signed_root=config.model.energy.signed_root,
     )
     model.load_state_dict(snapshot["model"])
     device = torch.device(config.run.device)
@@ -251,7 +252,7 @@ def evaluate_run(
     generator.manual_seed(config.run.seed)
     loader = DataLoader(
         dataset,
-        batch_size=config.cache.batch_size,
+        batch_size=config.trainer.batch_size,
         shuffle=False,
         num_workers=config.cache.num_workers,
         collate_fn=collate_cached_structures,

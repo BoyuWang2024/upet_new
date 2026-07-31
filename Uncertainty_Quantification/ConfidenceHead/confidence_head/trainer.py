@@ -175,17 +175,24 @@ def update_control_state(
 
 def build_plateau_scheduler(
     optimizer: torch.optim.Optimizer,
+    *,
+    factor: float,
+    patience: int,
+    threshold: float,
+    threshold_mode: Literal["abs"],
+    cooldown: int,
+    min_lr: float,
 ) -> torch.optim.lr_scheduler.ReduceLROnPlateau:
-    """Construct the single scheduler approved by the experiment design."""
+    """Construct a plateau scheduler from validated configuration values."""
     return torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode="min",
-        factor=0.5,
-        patience=5,
-        threshold=1e-4,
-        threshold_mode="abs",
-        cooldown=0,
-        min_lr=1e-6,
+        factor=factor,
+        patience=patience,
+        threshold=threshold,
+        threshold_mode=threshold_mode,
+        cooldown=cooldown,
+        min_lr=min_lr,
     )
 
 

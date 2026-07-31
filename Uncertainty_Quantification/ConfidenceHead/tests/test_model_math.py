@@ -25,12 +25,17 @@ def test_model_uses_strictly_separate_force_and_energy_readouts() -> None:
     model = ConfidenceModel(
         force_input_dim=2,
         energy_input_dim=2,
-        hidden_dims=(4,),
-        num_bins=5,
+        force_hidden_dims=(7,),
+        energy_hidden_dims=(11, 5),
+        force_dropout=0.1,
+        energy_dropout=0.2,
+        force_num_bins=13,
+        energy_num_bins=17,
         cumulant_order=1,
         signed_root=True,
-        dropout=0.0,
     )
+    assert model.force_head.heads[0].network[0].out_features == 7
+    assert model.energy_head.network[0].out_features == 11
     force_features = torch.zeros(3, 2)
     energy_features = torch.full((3, 2), 7.0)
     offsets = torch.tensor([0, 1, 3])
@@ -47,8 +52,8 @@ def test_model_uses_strictly_separate_force_and_energy_readouts() -> None:
     finally:
         handle.remove()
 
-    assert output.force_logits.shape == (3, 3, 5)
-    assert output.energy_logits.shape == (2, 5)
+    assert output.force_logits.shape == (3, 3, 13)
+    assert output.energy_logits.shape == (2, 17)
     assert len(energy_head_inputs) == 1
     torch.testing.assert_close(
         energy_head_inputs[0],
@@ -176,11 +181,14 @@ def test_model_rejects_invalid_readout_feature_shapes(
     model = ConfidenceModel(
         force_input_dim=2,
         energy_input_dim=2,
-        hidden_dims=(4,),
-        num_bins=5,
+        force_hidden_dims=(4,),
+        energy_hidden_dims=(4,),
+        force_dropout=0.0,
+        energy_dropout=0.0,
+        force_num_bins=5,
+        energy_num_bins=5,
         cumulant_order=1,
         signed_root=True,
-        dropout=0.0,
     )
 
     with pytest.raises(ValueError, match="features"):

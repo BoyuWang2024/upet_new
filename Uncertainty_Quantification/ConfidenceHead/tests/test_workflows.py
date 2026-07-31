@@ -136,12 +136,21 @@ def config(tmp_path: Path) -> ConfidenceConfig:
                 "energy_max_error": 0.3,
             },
             "model": {
-                "hidden_dims": [4],
-                "dropout": 0.0,
-                "cumulant_order": 2,
-                "signed_root": True,
+                "force": {
+                    "hidden_dims": [4],
+                    "dropout": 0.0,
+                    "num_bins": 3,
+                },
+                "energy": {
+                    "hidden_dims": [4],
+                    "dropout": 0.0,
+                    "num_bins": 3,
+                    "cumulant_order": 2,
+                    "signed_root": True,
+                },
             },
             "trainer": {
+                "batch_size": 2,
                 "max_epochs": 2,
                 "ema_beta": 0.95,
                 "early_stopping_patience": 15,
@@ -156,6 +165,27 @@ def config(tmp_path: Path) -> ConfidenceConfig:
             },
         }
     )
+
+
+def test_training_and_validation_loaders_use_trainer_batch_size(
+    config: ConfidenceConfig,
+) -> None:
+    config = _config_copy(
+        config,
+        cache={"batch_size": 2},
+        trainer={"batch_size": 7},
+    )
+    generator = torch.Generator().manual_seed(7)
+
+    train_loader = train_module._loader(
+        [{}], config, shuffle=True, generator=generator
+    )
+    validation_loader = train_module._loader(
+        [{}], config, shuffle=False, generator=generator
+    )
+
+    assert train_loader.batch_size == 7
+    assert validation_loader.batch_size == 7
 
 
 def _pearson(left: torch.Tensor, right: torch.Tensor) -> float:
@@ -565,6 +595,16 @@ def test_distinct_force_and_energy_bin_counts_train_and_evaluate(
         config,
         trainer={"max_epochs": 1},
         binning={"force_num_bins": 3, "energy_num_bins": 5},
+        model={
+            "force": {"hidden_dims": [4], "dropout": 0.0, "num_bins": 3},
+            "energy": {
+                "hidden_dims": [4],
+                "dropout": 0.0,
+                "num_bins": 5,
+                "cumulant_order": 2,
+                "signed_root": True,
+            },
+        },
     )
     run_dir = train_run(
         config,
@@ -593,30 +633,20 @@ def test_amp_is_explicitly_unsupported_on_every_device() -> None:
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("monitor", "other"),
         ("factor", 0.25),
         ("patience", 4),
         ("threshold", 0.0),
-        ("threshold_mode", "rel"),
         ("cooldown", 1),
         ("min_lr", 0.0),
     ],
 )
-def test_scheduler_configuration_is_fixed_to_approved_constants(
+def test_scheduler_configuration_accepts_validated_values(
     field: str,
     value: Any,
 ) -> None:
-    assert SchedulerConfig().model_dump() == {
-        "monitor": "val/total_loss_ema",
-        "factor": 0.5,
-        "patience": 5,
-        "threshold": 0.0001,
-        "threshold_mode": "abs",
-        "cooldown": 0,
-        "min_lr": 0.000001,
-    }
-    with pytest.raises(ValidationError, match=field):
-        SchedulerConfig.model_validate({field: value})
+    scheduler = SchedulerConfig.model_validate({field: value})
+
+    assert getattr(scheduler, field) == value
 
 
 def test_max_epochs_stop_reason_is_recorded_in_manifest_and_last_checkpoint(

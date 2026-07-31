@@ -334,8 +334,8 @@ def _identities(
     model_loss_payload = {
         "model": resolved["model"],
         "loss": resolved["loss"],
-        "force_num_bins": resolved["binning"]["force_num_bins"],
-        "energy_num_bins": resolved["binning"]["energy_num_bins"],
+        "force_num_bins": resolved["model"]["force"]["num_bins"],
+        "energy_num_bins": resolved["model"]["energy"]["num_bins"],
     }
     model_identity = model_loss_id(model_loss_payload)
     training = TrainingIdentity(
@@ -364,7 +364,7 @@ def _loader(
 ) -> DataLoader[dict[str, Any]]:
     return DataLoader(
         dataset,
-        batch_size=config.cache.batch_size,
+        batch_size=config.trainer.batch_size,
         shuffle=shuffle,
         num_workers=config.cache.num_workers,
         collate_fn=collate_cached_structures,
@@ -638,10 +638,10 @@ def _train_run_locked(
             raise ValueError(f"cache manifest is missing {split!r}")
 
     force_spec = fixed_linear_binning(
-        config.binning.force_num_bins, config.binning.force_max_error
+        config.model.force.num_bins, config.binning.force_max_error
     )
     energy_spec = fixed_linear_binning(
-        config.binning.energy_num_bins, config.binning.energy_max_error
+        config.model.energy.num_bins, config.binning.energy_max_error
     )
     bins = _bin_payload(force_spec, energy_spec)
     identity, run_identity, resolved = _identities(config, cache_manifest, bins)
@@ -790,20 +790,29 @@ def _train_run_locked(
     model = ConfidenceModel(
         force_input_dim=force_dim,
         energy_input_dim=energy_dim,
-        hidden_dims=config.model.hidden_dims,
-        force_num_bins=config.binning.force_num_bins,
-        num_bins=config.binning.force_num_bins,
-        energy_num_bins=config.binning.energy_num_bins,
-        cumulant_order=config.model.cumulant_order,
-        signed_root=config.model.signed_root,
-        dropout=config.model.dropout,
+        force_hidden_dims=config.model.force.hidden_dims,
+        energy_hidden_dims=config.model.energy.hidden_dims,
+        force_dropout=config.model.force.dropout,
+        energy_dropout=config.model.energy.dropout,
+        force_num_bins=config.model.force.num_bins,
+        energy_num_bins=config.model.energy.num_bins,
+        cumulant_order=config.model.energy.cumulant_order,
+        signed_root=config.model.energy.signed_root,
     ).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=config.optimizer.lr,
+        lr=config.optimizer.learning_rate,
         weight_decay=config.optimizer.weight_decay,
     )
-    scheduler = build_plateau_scheduler(optimizer)
+    scheduler = build_plateau_scheduler(
+        optimizer,
+        factor=config.scheduler.factor,
+        patience=config.scheduler.patience,
+        threshold=config.scheduler.threshold,
+        threshold_mode=config.scheduler.threshold_mode,
+        cooldown=config.scheduler.cooldown,
+        min_lr=config.scheduler.min_lr,
+    )
     sampler = torch.Generator(device="cpu")
     sampler.manual_seed(config.run.seed)
     train_loader = _loader(train_data, config, shuffle=True, generator=sampler)

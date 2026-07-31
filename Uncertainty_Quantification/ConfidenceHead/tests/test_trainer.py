@@ -42,7 +42,15 @@ def _model_optimizer_scheduler() -> tuple[
 ]:
     model = torch.nn.Linear(2, 2)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    scheduler = build_plateau_scheduler(optimizer)
+    scheduler = build_plateau_scheduler(
+        optimizer,
+        factor=0.5,
+        patience=5,
+        threshold=1e-4,
+        threshold_mode="abs",
+        cooldown=0,
+        min_lr=1e-6,
+    )
     return model, optimizer, scheduler
 
 
@@ -282,16 +290,26 @@ def test_min_epochs_prevents_an_early_stop() -> None:
     assert update.should_stop is False
 
 
-def test_plateau_scheduler_has_the_only_approved_parameters() -> None:
-    _, optimizer, scheduler = _model_optimizer_scheduler()
+def test_plateau_scheduler_uses_validated_configuration() -> None:
+    parameter = torch.nn.Parameter(torch.tensor(1.0))
+    optimizer = torch.optim.AdamW([parameter], lr=0.01)
+    scheduler = build_plateau_scheduler(
+        optimizer,
+        factor=0.25,
+        patience=3,
+        threshold=1e-5,
+        threshold_mode="abs",
+        cooldown=2,
+        min_lr=1e-7,
+    )
 
     assert scheduler.mode == "min"
-    assert scheduler.factor == pytest.approx(0.5)
-    assert scheduler.patience == 5
-    assert scheduler.threshold == pytest.approx(1e-4)
+    assert scheduler.factor == pytest.approx(0.25)
+    assert scheduler.patience == 3
+    assert scheduler.threshold == pytest.approx(1e-5)
     assert scheduler.threshold_mode == "abs"
-    assert scheduler.cooldown == 0
-    assert scheduler.min_lrs == pytest.approx([1e-6])
+    assert scheduler.cooldown == 2
+    assert scheduler.min_lrs == pytest.approx([1e-7])
     assert scheduler.optimizer is optimizer
 
 
