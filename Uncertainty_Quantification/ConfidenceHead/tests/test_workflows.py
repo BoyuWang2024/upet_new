@@ -1709,3 +1709,40 @@ def test_training_exception_safely_finishes_started_tracker(
     assert trackers[0].finishes == [
         ({"stop_reason": "exception"}, "failed")
     ]
+
+
+
+def test_legacy_v1_manifest_without_tracking_resumes_and_migrates(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+) -> None:
+    resumable, run_dir = _resume_candidate(
+        config,
+        complete_cache,
+        "legacy-v1-tracking-migration",
+    )
+    manifest_path = run_dir / "manifest.json"
+    legacy_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert legacy_manifest["schema_version"] == train_module.RUN_SCHEMA_VERSION
+    del legacy_manifest["tracking"]
+    manifest_path.write_text(
+        json.dumps(legacy_manifest, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    resumed = train_run(
+        resumable,
+        cache_manifest_path=complete_cache,
+        run_name="legacy-v1-tracking-migration",
+        resume_from=run_dir / "checkpoints" / "last.pt",
+    )
+
+    migrated = json.loads(
+        (resumed / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert migrated["tracking"] == {
+        "wandb_enabled": False,
+        "wandb_mode": "offline",
+        "wandb_project": "upet-confidence-head",
+        "wandb_run_id": None,
+    }

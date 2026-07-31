@@ -865,7 +865,15 @@ def _train_run_locked(
 
     resume_id: str | None = None
     if previous_manifest is not None:
-        previous_tracking = previous_manifest.get("tracking")
+        if "tracking" not in previous_manifest:
+            previous_tracking: Any = {
+                "wandb_enabled": config.logging.wandb,
+                "wandb_mode": config.logging.wandb_mode,
+                "wandb_project": config.logging.wandb_project,
+                "wandb_run_id": None,
+            }
+        else:
+            previous_tracking = previous_manifest["tracking"]
         if not isinstance(previous_tracking, Mapping):
             raise ValueError("resume tracking declaration must be a mapping")
         for field, expected in (

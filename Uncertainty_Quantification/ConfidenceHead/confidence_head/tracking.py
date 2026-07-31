@@ -70,8 +70,19 @@ class WandbTracker:
             _warn("init", error)
             return cls(_run=None, run_id=resume_id)
         raw_run_id = getattr(run, "id", None)
-        run_id = str(raw_run_id) if raw_run_id is not None else resume_id
-        return cls(_run=run, run_id=run_id)
+        sdk_run_id = str(raw_run_id) if raw_run_id is not None else None
+        if resume_id is not None:
+            if sdk_run_id != resume_id:
+                _warn(
+                    "resume ID validation",
+                    RuntimeError(
+                        f"SDK returned mismatched run ID {sdk_run_id!r}; "
+                        f"expected {resume_id!r}"
+                    ),
+                )
+                return cls(_run=None, run_id=resume_id)
+            return cls(_run=run, run_id=resume_id)
+        return cls(_run=run, run_id=sdk_run_id)
 
     def log(self, metrics: dict[str, int | float]) -> None:
         """Record one already-committed local epoch record."""
@@ -88,6 +99,9 @@ class WandbTracker:
             return
         try:
             self._run.summary.update({**summary, "status": status})
-            self._run.finish()
+        except Exception as error:
+            _warn("finish summary", error)
+        try:
+            self._run.finish(exit_code=0 if status == "success" else 1)
         except Exception as error:
             _warn("finish", error)
