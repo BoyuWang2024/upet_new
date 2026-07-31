@@ -196,6 +196,27 @@ def test_tracker_warns_and_disables_logging_when_resume_id_changes() -> None:
     tracker.log({"epoch": 1})
     assert tracker.run_id == "stable-old-id"
     assert fake_wandb.run.logged == []
+    assert fake_wandb.run.finish_exit_codes == [1]
+    assert fake_wandb.run.finished is True
+
+
+def test_resume_id_mismatch_cleanup_failure_warns_without_propagating() -> None:
+    fake_wandb = _FakeWandb(failure="finish", run_id="unexpected-new-id")
+
+    with pytest.warns(RuntimeWarning) as caught:
+        tracker = WandbTracker.start(
+            LoggingConfig(),
+            run_name="resume-mismatch-cleanup-failure",
+            resolved_config={},
+            resume_id="stable-old-id",
+            wandb_module=fake_wandb,
+        )
+
+    messages = [str(warning.message) for warning in caught]
+    assert any("resume ID" in message for message in messages)
+    assert any("finish" in message for message in messages)
+    assert tracker.run_id == "stable-old-id"
+    assert fake_wandb.run.finish_exit_codes == [1]
 
 
 def test_tracker_failed_status_finishes_with_nonzero_exit_code() -> None:

@@ -32,6 +32,13 @@ def _warn(stage: str, error: Exception) -> None:
     )
 
 
+def _finish_run(run: Any, *, exit_code: int) -> None:
+    try:
+        run.finish(exit_code=exit_code)
+    except Exception as error:
+        _warn("finish", error)
+
+
 @dataclass
 class WandbTracker:
     """Small W&B boundary that never makes remote tracking authoritative."""
@@ -80,6 +87,7 @@ class WandbTracker:
                         f"expected {resume_id!r}"
                     ),
                 )
+                _finish_run(run, exit_code=1)
                 return cls(_run=None, run_id=resume_id)
             return cls(_run=run, run_id=resume_id)
         return cls(_run=run, run_id=sdk_run_id)
@@ -101,7 +109,7 @@ class WandbTracker:
             self._run.summary.update({**summary, "status": status})
         except Exception as error:
             _warn("finish summary", error)
-        try:
-            self._run.finish(exit_code=0 if status == "success" else 1)
-        except Exception as error:
-            _warn("finish", error)
+        _finish_run(
+            self._run,
+            exit_code=0 if status == "success" else 1,
+        )
