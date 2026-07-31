@@ -1061,6 +1061,7 @@ def test_resume_prevalidates_all_previous_artifacts_before_any_write(
     config: ConfidenceConfig,
     complete_cache: Path,
     failure: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     resumable, run_dir = _resume_candidate(
         config,
@@ -1095,6 +1096,14 @@ def test_resume_prevalidates_all_previous_artifacts_before_any_write(
     else:
         best = run_dir / "checkpoints" / "best.pt"
         best.write_bytes(best.read_bytes() + b"tampered")
+    writes: list[Path] = []
+    original_atomic_write_bytes = train_module._atomic_write_bytes
+
+    def record_atomic_write(path: Path, data: bytes) -> None:
+        writes.append(Path(path))
+        original_atomic_write_bytes(path, data)
+
+    monkeypatch.setattr(train_module, "_atomic_write_bytes", record_atomic_write)
     before = _resume_transaction_bytes(run_dir)
 
     with pytest.raises(
@@ -1108,6 +1117,75 @@ def test_resume_prevalidates_all_previous_artifacts_before_any_write(
         )
 
     assert _resume_transaction_bytes(run_dir) == before
+    assert writes == []
+
+
+def test_resume_prevalidates_declared_evaluation_artifacts_before_any_write(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resumable, run_dir = _resume_candidate(
+        config,
+        complete_cache,
+        "resume-evaluation-preflight",
+    )
+    evaluation_dir = evaluate_run(run_dir, cache_manifest_path=complete_cache)
+    metrics = evaluation_dir / "metrics.json"
+    metrics.write_bytes(metrics.read_bytes() + b"tampered")
+    writes: list[Path] = []
+    original_atomic_write_bytes = train_module._atomic_write_bytes
+
+    def record_atomic_write(path: Path, data: bytes) -> None:
+        writes.append(Path(path))
+        original_atomic_write_bytes(path, data)
+
+    monkeypatch.setattr(train_module, "_atomic_write_bytes", record_atomic_write)
+
+    with pytest.raises(ValueError, match="evaluation/metrics.json|sha256"):
+        train_run(
+            resumable,
+            cache_manifest_path=complete_cache,
+            run_name="resume-evaluation-preflight",
+            resume_from=run_dir / "checkpoints" / "last.pt",
+        )
+
+    assert writes == []
+
+
+def test_successful_resume_invalidates_declared_evaluation_artifacts(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+) -> None:
+    resumable, run_dir = _resume_candidate(
+        config,
+        complete_cache,
+        "resume-invalidates-evaluation",
+    )
+    evaluate_run(run_dir, cache_manifest_path=complete_cache)
+    before = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    evaluation_relatives = {
+        relative
+        for relative in before["artifacts"]
+        if relative.startswith("evaluation/")
+    }
+    assert evaluation_relatives
+
+    train_run(
+        resumable,
+        cache_manifest_path=complete_cache,
+        run_name="resume-invalidates-evaluation",
+        resume_from=run_dir / "checkpoints" / "last.pt",
+    )
+
+    after = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert "evaluation" not in after
+    assert not {
+        relative
+        for relative in after["artifacts"]
+        if relative.startswith("evaluation/")
+    }
+    assert all(not (run_dir / relative).exists() for relative in evaluation_relatives)
 
 
 def test_resume_parses_the_same_metrics_bytes_whose_digest_was_verified(
@@ -1225,6 +1303,41 @@ def test_verify_rejects_malformed_or_mismatched_evaluation_identity(
     )
 
     with pytest.raises(ValueError, match="evaluation.*identity|evaluation.*mapping"):
+        verify_run(run_dir, full=False)
+
+
+def test_verify_binds_evaluation_checkpoint_to_declared_run_checkpoint(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+) -> None:
+    run_dir = train_run(
+        config,
+        cache_manifest_path=complete_cache,
+        run_name="evaluation-checkpoint-binding",
+    )
+    evaluation_dir = evaluate_run(run_dir, cache_manifest_path=complete_cache)
+    evaluation_path = evaluation_dir / "manifest.json"
+    evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
+    replacement = run_dir / "resolved_config.yaml"
+    evaluation["checkpoint"] = {
+        "path": "../resolved_config.yaml",
+        "sha256": _sha256(replacement),
+    }
+    evaluation_path.write_text(
+        json.dumps(evaluation, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    manifest_path = run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifacts"]["evaluation/manifest.json"]["sha256"] = _sha256(
+        evaluation_path
+    )
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="evaluation checkpoint.*declared"):
         verify_run(run_dir, full=False)
 
 
