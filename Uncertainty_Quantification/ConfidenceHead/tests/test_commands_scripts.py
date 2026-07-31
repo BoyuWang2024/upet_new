@@ -7,6 +7,7 @@ import pytest
 
 from Uncertainty_Quantification.ConfidenceHead.confidence_head.cache import SCHEMA_VERSION
 from Uncertainty_Quantification.ConfidenceHead.confidence_head.config import ConfidenceConfig
+from Uncertainty_Quantification.ConfidenceHead.confidence_head.identity import cache_id
 from Uncertainty_Quantification.ConfidenceHead.confidence_head.run_naming import build_run_name
 from Uncertainty_Quantification.ConfidenceHead.confidence_head.workflows import commands
 
@@ -15,7 +16,10 @@ def _config(tmp_path: Path, *, resume_from: Path | None = None) -> ConfidenceCon
     return ConfidenceConfig.model_validate(
         {
             "profile": "smoke",
-            "checkpoint": {"path": tmp_path / "model.ckpt", "expected_sha256": "a" * 64},
+            "checkpoint": {
+                "path": tmp_path / "model.ckpt",
+                "expected_sha256": "a" * 64,
+            },
             "data": {
                 split: {
                     "path": tmp_path / f"{split}.xyz",
@@ -31,7 +35,11 @@ def _config(tmp_path: Path, *, resume_from: Path | None = None) -> ConfidenceCon
             },
             "model": {
                 "force": {"hidden_dims": [4], "num_bins": 3},
-                "energy": {"hidden_dims": [4], "num_bins": 3, "cumulant_order": 2},
+                "energy": {
+                    "hidden_dims": [4],
+                    "num_bins": 3,
+                    "cumulant_order": 2,
+                },
             },
             "loss": {"force_coefficient": 1.0, "energy_coefficient": 1.5},
             "trainer": {"resume_from": resume_from},
@@ -41,24 +49,50 @@ def _config(tmp_path: Path, *, resume_from: Path | None = None) -> ConfidenceCon
 
 
 def _manifest(config: ConfidenceConfig) -> dict[str, object]:
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "checkpoint": {"sha256": config.checkpoint.expected_sha256},
+        "splits": {
+            split: {
+                "sha256": getattr(config.data, split).expected_sha256,
+                "structure_count": 2,
+                "atom_count": 3,
+                "force_component_count": 9,
+            }
+            for split in ("train", "validation", "test")
+        },
+        "outputs": config.readouts.model_dump(),
+        "features": {"force_dim": 2, "energy_dim": 3, "dtype": "float32"},
+        "cache": {
+            "batch_size": config.cache.batch_size,
+            "shard_max_atoms": config.cache.shard_max_atoms,
+        },
+        "execution": {
+            "device": config.run.device,
+            "model_dtype": "float32",
+            "system_dtype": "float32",
+            "autocast": config.run.amp,
+            "autocast_dtype": None,
+        },
+        "versions": {
+            "python": "3.11.0",
+            "torch": "2.0.0",
+            "metatomic": "not-installed",
+            "metatrain": "not-installed",
+            "upet": "not-installed",
+            "upet_git": "unknown",
+        },
+    }
+    identity = cache_id(
+        {"schema_version": SCHEMA_VERSION, "identity_payload": payload}
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "status": "complete",
-        "identity_payload": {
-            "checkpoint": {"sha256": config.checkpoint.expected_sha256},
-            "splits": {
-                split: {"sha256": getattr(config.data, split).expected_sha256}
-                for split in ("train", "validation", "test")
-            },
-            "outputs": config.readouts.model_dump(),
-            "execution": {
-                "device": config.run.device,
-                "model_dtype": "float32",
-                "system_dtype": "float32",
-                "autocast": config.run.amp,
-                "autocast_dtype": None,
-            },
-        },
+        "identity": identity,
+        "cache_id": identity,
+        "identity_payload": payload,
+        "splits": {},
     }
 
 
@@ -68,11 +102,25 @@ def _write_manifest(path: Path, manifest: dict[str, object]) -> Path:
     return path
 
 
+def _refresh_identity(manifest: dict[str, object]) -> None:
+    identity = cache_id(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "identity_payload": manifest["identity_payload"],
+        }
+    )
+    manifest["identity"] = identity
+    manifest["cache_id"] = identity
+
+
 def test_resolve_unique_cache_manifest_rejects_missing_match(tmp_path: Path) -> None:
     config = _config(tmp_path)
     manifest = _manifest(config)
     manifest["status"] = "incomplete"
-    _write_manifest(config.run.output_root / "cache" / "candidate" / "manifest.json", manifest)
+    _write_manifest(
+        config.run.output_root / "cache" / "candidate" / "manifest.json",
+        manifest,
+    )
 
     with pytest.raises(ValueError, match="matching cache manifest was not found"):
         commands.resolve_unique_cache_manifest(config)
@@ -83,8 +131,14 @@ def test_resolve_unique_cache_manifest_requires_exactly_one_match(
 ) -> None:
     config = _config(tmp_path)
     manifest = _manifest(config)
-    _write_manifest(config.run.output_root / "cache" / "one" / "manifest.json", manifest)
-    _write_manifest(config.run.output_root / "cache" / "two" / "manifest.json", manifest)
+    _write_manifest(
+        config.run.output_root / "cache" / "one" / "manifest.json",
+        manifest,
+    )
+    _write_manifest(
+        config.run.output_root / "cache" / "two" / "manifest.json",
+        manifest,
+    )
 
     with pytest.raises(ValueError, match="multiple matching cache manifests"):
         commands.resolve_unique_cache_manifest(config)
@@ -96,7 +150,57 @@ def test_resolve_unique_cache_manifest_returns_matching_path(tmp_path: Path) -> 
         config.run.output_root / "cache" / "only" / "manifest.json",
         _manifest(config),
     )
+
     assert commands.resolve_unique_cache_manifest(config) == path.resolve()
+
+
+def test_resolve_unique_cache_manifest_rejects_inconsistent_cache_id(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    manifest = _manifest(config)
+    manifest["cache_id"] = "cache-tampered"
+    _write_manifest(
+        config.run.output_root / "cache" / "candidate" / "manifest.json",
+        manifest,
+    )
+
+    with pytest.raises(ValueError, match="matching cache manifest was not found"):
+        commands.resolve_unique_cache_manifest(config)
+
+
+def test_resolve_unique_cache_manifest_rejects_mismatched_cache_policy(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    manifest = _manifest(config)
+    payload = manifest["identity_payload"]
+    assert isinstance(payload, dict)
+    cache = payload["cache"]
+    assert isinstance(cache, dict)
+    cache["batch_size"] = config.cache.batch_size + 1
+    _refresh_identity(manifest)
+    _write_manifest(
+        config.run.output_root / "cache" / "candidate" / "manifest.json",
+        manifest,
+    )
+
+    with pytest.raises(ValueError, match="matching cache manifest was not found"):
+        commands.resolve_unique_cache_manifest(config)
+
+
+def test_resolve_unique_cache_manifest_rejects_symlink_escape(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    external = tmp_path / "external"
+    _write_manifest(external / "manifest.json", _manifest(config))
+    cache_root = config.run.output_root / "cache"
+    cache_root.mkdir(parents=True)
+    (cache_root / "escaped").symlink_to(external, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="matching cache manifest was not found"):
+        commands.resolve_unique_cache_manifest(config)
 
 
 def test_build_cache_from_config_returns_low_level_manifest(
@@ -105,6 +209,7 @@ def test_build_cache_from_config_returns_low_level_manifest(
     config = _config(tmp_path)
     expected = Path("/cache/manifest.json")
     monkeypatch.setattr(commands, "build_cache", lambda value: expected)
+
     assert commands.build_cache_from_config(config) == expected
 
 
@@ -160,13 +265,18 @@ def test_verify_from_config_requests_full_verification(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = _config(tmp_path)
-    seen: dict[str, object] = {}
-    monkeypatch.setattr(
-        commands,
-        "resolve_unique_cache_manifest",
-        lambda value: Path("/cache/manifest.json"),
+    cache_manifest = _manifest(config)
+    _write_manifest(
+        config.run.output_root / "cache" / "only" / "manifest.json",
+        cache_manifest,
     )
-    monkeypatch.setattr(commands, "resolve_run_dir", lambda value: Path("/run"))
+    run_dir = commands.resolve_run_dir(config)
+    run_dir.mkdir(parents=True)
+    (run_dir / "manifest.json").write_text(
+        json.dumps({"cache_id": cache_manifest["cache_id"]}),
+        encoding="utf-8",
+    )
+    seen: dict[str, object] = {}
     monkeypatch.setattr(
         commands,
         "verify_run",
@@ -175,6 +285,30 @@ def test_verify_from_config_requests_full_verification(
 
     assert commands.verify_from_config(config) == {"status": "ok"}
     assert seen == {"full": True}
+
+
+def test_verify_from_config_rejects_run_cache_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    _write_manifest(
+        config.run.output_root / "cache" / "only" / "manifest.json",
+        _manifest(config),
+    )
+    run_dir = commands.resolve_run_dir(config)
+    run_dir.mkdir(parents=True)
+    (run_dir / "manifest.json").write_text(
+        json.dumps({"cache_id": "cache-other"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        commands,
+        "verify_run",
+        lambda value, **kwargs: pytest.fail("verify_run must not be called"),
+    )
+
+    with pytest.raises(ValueError, match="run cache_id does not match selected cache"):
+        commands.verify_from_config(config)
 
 
 def test_train_from_config_rejects_resume_outside_derived_run_directory(
