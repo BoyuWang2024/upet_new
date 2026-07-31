@@ -30,6 +30,7 @@ from ..errors import energy_per_atom_error, force_component_error
 from ..identity import binning_id, config_id, model_loss_id, run_id
 from ..losses import LossOutput, confidence_loss
 from ..model import ConfidenceModel
+from ..tracking import Tracker, TrackerFactory, WandbTracker
 from ..trainer import (
     CHECKPOINT_SCHEMA_VERSION,
     EarlyStoppingState,
@@ -41,7 +42,6 @@ from ..trainer import (
     commit_epoch_checkpoints,
     restore_training_snapshot,
 )
-from ..tracking import Tracker, TrackerFactory, WandbTracker
 
 
 RUN_SCHEMA_VERSION = "upet_confidence_run_v1"
@@ -876,12 +876,13 @@ def _train_run_locked(
             previous_tracking = previous_manifest["tracking"]
         if not isinstance(previous_tracking, Mapping):
             raise ValueError("resume tracking declaration must be a mapping")
-        for field, expected in (
+        tracking_expectations: tuple[tuple[str, object], ...] = (
             ("wandb_enabled", config.logging.wandb),
             ("wandb_mode", config.logging.wandb_mode),
             ("wandb_project", config.logging.wandb_project),
-        ):
-            if previous_tracking.get(field) != expected:
+        )
+        for field, tracking_expected in tracking_expectations:
+            if previous_tracking.get(field) != tracking_expected:
                 raise ValueError(f"resume tracking {field} mismatch")
         raw_resume_id = previous_tracking.get("wandb_run_id")
         if raw_resume_id is not None and not isinstance(raw_resume_id, str):

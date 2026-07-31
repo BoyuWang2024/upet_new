@@ -5,6 +5,7 @@ from argparse import ArgumentParser
 from collections.abc import Sequence
 from pathlib import Path
 
+
 CONFIDENCE_HEAD_ROOT = Path(__file__).resolve().parents[1]
 if str(CONFIDENCE_HEAD_ROOT) not in sys.path:
     sys.path.insert(0, str(CONFIDENCE_HEAD_ROOT))
@@ -18,7 +19,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     from confidence_head.config import load_config
     from confidence_head.workflows.commands import train_from_config
 
-    artifact = train_from_config(load_config(args.config))
+    artifact = train_from_config(load_config(args.config.resolve()))
     print(artifact)
     return 0
 

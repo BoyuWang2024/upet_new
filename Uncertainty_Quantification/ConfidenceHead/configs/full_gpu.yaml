@@ -60,17 +60,17 @@ scheduler:
   cooldown: 0
   min_lr: 0.000001
 trainer:
-  batch_size: 32
-  max_epochs: 200
+  batch_size: 128
+  max_epochs: 100
   ema_beta: 0.95
-  early_stopping_patience: 15
+  early_stopping_patience: 20
   min_delta: 0.0001
   min_epochs: 3
   monitor: val/total_loss_ema
   resume_from: null
 run:
   output_root: /XYFS01/HOME/yt_hku_psmanyam/yt_hku_psmanyam_3/code/upet_new/Uncertainty_Quantification/ConfidenceHead/outputs
-  name_prefix: full-gpu
+  name_prefix: upet_full
   seed: 1234
   device: cuda
   amp: false

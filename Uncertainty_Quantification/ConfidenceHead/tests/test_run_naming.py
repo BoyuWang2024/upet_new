@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from Uncertainty_Quantification.ConfidenceHead.confidence_head.config import ConfidenceConfig
+from Uncertainty_Quantification.ConfidenceHead.confidence_head.config import (
+    ConfidenceConfig,
+)
 from Uncertainty_Quantification.ConfidenceHead.confidence_head.run_naming import (
     build_run_name,
     resolve_run_dir,
@@ -13,7 +15,10 @@ def _config(tmp_path: Path) -> ConfidenceConfig:
     return ConfidenceConfig.model_validate(
         {
             "profile": "smoke",
-            "checkpoint": {"path": tmp_path / "model.ckpt", "expected_sha256": "a" * 64},
+            "checkpoint": {
+                "path": tmp_path / "model.ckpt",
+                "expected_sha256": "a" * 64,
+            },
             "data": {
                 split: {
                     "path": tmp_path / f"{split}.xyz",
@@ -39,8 +44,7 @@ def _config(tmp_path: Path) -> ConfidenceConfig:
 
 def test_run_name_encodes_branch_semantics(tmp_path: Path) -> None:
     assert build_run_name(_config(tmp_path)) == (
-        "demo_fixed-linear_f3-fmax0.5-fw1-fmlp4_"
-        "e3-emax0.3-ew1.5-emlp4-order2"
+        "demo_fixed-linear_f3-fmax0.5-fw1-fmlp4_e3-emax0.3-ew1.5-emlp4-order2"
     )
 
 
@@ -62,6 +66,7 @@ def test_run_name_changes_when_energy_head_changes(tmp_path: Path) -> None:
 
 def test_resolve_run_dir_stays_beneath_runs_root(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    assert resolve_run_dir(config) == (
-        config.run.output_root / "runs" / build_run_name(config)
-    ).resolve()
+    assert (
+        resolve_run_dir(config)
+        == (config.run.output_root / "runs" / build_run_name(config)).resolve()
+    )

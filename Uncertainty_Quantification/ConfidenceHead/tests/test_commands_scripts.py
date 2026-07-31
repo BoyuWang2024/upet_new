@@ -3,17 +3,22 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import json
-import runpy
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
-from Uncertainty_Quantification.ConfidenceHead.confidence_head.cache import SCHEMA_VERSION
-from Uncertainty_Quantification.ConfidenceHead.confidence_head.config import ConfidenceConfig
+from Uncertainty_Quantification.ConfidenceHead.confidence_head.cache import (
+    SCHEMA_VERSION,
+)
+from Uncertainty_Quantification.ConfidenceHead.confidence_head.config import (
+    ConfidenceConfig,
+)
 from Uncertainty_Quantification.ConfidenceHead.confidence_head.identity import cache_id
-from Uncertainty_Quantification.ConfidenceHead.confidence_head.run_naming import build_run_name
+from Uncertainty_Quantification.ConfidenceHead.confidence_head.run_naming import (
+    build_run_name,
+)
 from Uncertainty_Quantification.ConfidenceHead.confidence_head.workflows import commands
 
 
@@ -102,9 +107,7 @@ def _manifest(config: ConfidenceConfig) -> dict[str, object]:
             "upet_git": "unknown",
         },
     }
-    identity = cache_id(
-        {"schema_version": SCHEMA_VERSION, "identity_payload": payload}
-    )
+    identity = cache_id({"schema_version": SCHEMA_VERSION, "identity_payload": payload})
     return {
         "schema_version": SCHEMA_VERSION,
         "status": "complete",
@@ -346,6 +349,7 @@ def test_train_from_config_rejects_resume_outside_derived_run_directory(
     ):
         commands.train_from_config(config)
 
+
 @pytest.mark.parametrize(
     "script",
     ["build_cache.py", "train.py", "evaluate.py", "verify.py"],
@@ -383,6 +387,44 @@ def test_train_script_loads_config_and_dispatches(
 
     assert module.main(["--config", str(config_path)]) == 0
     assert seen == [loaded_config]
+
+
+@pytest.mark.parametrize(
+    ("script", "command_name"),
+    [
+        ("build_cache.py", "build_cache_from_config"),
+        ("train.py", "train_from_config"),
+        ("evaluate.py", "evaluate_from_config"),
+        ("verify.py", "verify_from_config"),
+    ],
+)
+def test_script_resolves_relative_config_from_current_directory(
+    script: str,
+    command_name: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_script(script)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("profile: smoke\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    loaded_config = object()
+    seen_paths: list[Path] = []
+    config_module = importlib.import_module("confidence_head.config")
+    command_module = importlib.import_module("confidence_head.workflows.commands")
+    monkeypatch.setattr(
+        config_module,
+        "load_config",
+        lambda path: seen_paths.append(path) or loaded_config,
+    )
+    monkeypatch.setattr(
+        command_module,
+        command_name,
+        lambda config: Path("/artifact"),
+    )
+
+    assert module.main(["--config", "config.yaml"]) == 0
+    assert seen_paths == [config_path.resolve()]
 
 
 @pytest.mark.parametrize(

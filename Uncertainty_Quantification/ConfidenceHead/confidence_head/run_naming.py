@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 from pathlib import Path
-import re
 
 from .config import ConfidenceConfig
 

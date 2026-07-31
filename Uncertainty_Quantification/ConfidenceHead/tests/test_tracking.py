@@ -87,9 +87,7 @@ def test_tracker_records_metrics_summary_and_finishes() -> None:
         "resume": None,
     }
     assert tracker.run_id == "run-abc123"
-    assert fake_wandb.run.logged == [
-        {"epoch": 0, "val/total_loss_ema": 1.25}
-    ]
+    assert fake_wandb.run.logged == [{"epoch": 0, "val/total_loss_ema": 1.25}]
     assert fake_wandb.run.summary == {
         "best_epoch": 0,
         "best_metric": 1.25,

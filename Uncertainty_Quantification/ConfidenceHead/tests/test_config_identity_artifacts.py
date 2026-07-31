@@ -303,3 +303,35 @@ def test_shipped_config_contracts(
     assert config.binning.force_max_error == 0.5
     assert config.binning.energy_max_error == 0.3
     assert config.trainer.monitor == "val/total_loss_ema"
+
+
+@pytest.mark.parametrize(
+    (
+        "name",
+        "hidden_dims",
+        "batch_size",
+        "max_epochs",
+        "early_stopping_patience",
+        "name_prefix",
+    ),
+    [
+        ("n20_local_cpu.yaml", (16,), 2, 1, 1, "upet_n20_local_cpu"),
+        ("n20_cpu.yaml", (16,), 2, 1, 1, "upet_n20_cpu"),
+        ("full_gpu.yaml", (256, 256, 256), 128, 100, 20, "upet_full"),
+    ],
+)
+def test_shipped_config_training_defaults(
+    name: str,
+    hidden_dims: tuple[int, ...],
+    batch_size: int,
+    max_epochs: int,
+    early_stopping_patience: int,
+    name_prefix: str,
+) -> None:
+    """Protect the approved smoke and production compute budgets."""
+    config = load_config(CONFIDENCE_ROOT / "configs" / name)
+
+    assert config.model.force.hidden_dims == hidden_dims
+    assert config.model.energy.hidden_dims == hidden_dims
+    assert config.trainer.batch_size == batch_size
+    assert config.trainer.max_epochs == max_epochs

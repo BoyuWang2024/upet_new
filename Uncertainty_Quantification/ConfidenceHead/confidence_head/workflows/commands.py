@@ -116,14 +116,19 @@ def _is_complete_identity_payload(
         return False
 
     versions = payload.get("versions")
-    return isinstance(versions, Mapping) and set(versions) == {
-        "python",
-        "torch",
-        "metatomic",
-        "metatrain",
-        "upet",
-        "upet_git",
-    } and all(isinstance(value, str) and value for value in versions.values())
+    return (
+        isinstance(versions, Mapping)
+        and set(versions)
+        == {
+            "python",
+            "torch",
+            "metatomic",
+            "metatrain",
+            "upet",
+            "upet_git",
+        }
+        and all(isinstance(value, str) and value for value in versions.values())
+    )
 
 
 def _matching_cache_id(

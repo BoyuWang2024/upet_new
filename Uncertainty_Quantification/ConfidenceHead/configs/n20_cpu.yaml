@@ -27,12 +27,12 @@ binning:
 model:
   force:
     enabled: true
-    hidden_dims: [256, 256, 256]
+    hidden_dims: [16]
     dropout: 0.0
     num_bins: 50
   energy:
     enabled: true
-    hidden_dims: [256, 256, 256]
+    hidden_dims: [16]
     dropout: 0.0
     num_bins: 50
     cumulant_order: 3
@@ -56,17 +56,17 @@ scheduler:
   cooldown: 0
   min_lr: 0.000001
 trainer:
-  batch_size: 32
-  max_epochs: 200
+  batch_size: 2
+  max_epochs: 1
   ema_beta: 0.95
-  early_stopping_patience: 15
+  early_stopping_patience: 1
   min_delta: 0.0001
-  min_epochs: 3
+  min_epochs: 1
   monitor: val/total_loss_ema
   resume_from: null
 run:
   output_root: /XYFS01/HOME/yt_hku_psmanyam/yt_hku_psmanyam_3/code/upet_new/Uncertainty_Quantification/ConfidenceHead/outputs
-  name_prefix: n20-cpu
+  name_prefix: upet_n20_cpu
   seed: 1234
   device: cpu
   amp: false

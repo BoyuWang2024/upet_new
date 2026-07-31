@@ -417,7 +417,10 @@ def restore_training_snapshot(
         raise ValueError("checkpoint CUDA RNG state count does not match devices")
 
     python_rng = cast(tuple[Any, ...], snapshot.get("python_rng_state"))
-    numpy_rng = snapshot.get("numpy_rng_state")
+    numpy_rng = cast(
+        tuple[str, Any, int, int, float] | dict[str, Any],
+        snapshot.get("numpy_rng_state"),
+    )
     try:
         random.Random().setstate(copy.deepcopy(python_rng))
     except Exception as error:

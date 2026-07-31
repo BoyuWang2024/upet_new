@@ -178,9 +178,7 @@ def test_training_and_validation_loaders_use_trainer_batch_size(
     )
     generator = torch.Generator().manual_seed(7)
 
-    train_loader = train_module._loader(
-        [{}], config, shuffle=True, generator=generator
-    )
+    train_loader = train_module._loader([{}], config, shuffle=True, generator=generator)
     validation_loader = train_module._loader(
         [{}], config, shuffle=False, generator=generator
     )
@@ -1536,9 +1534,11 @@ def test_training_tracker_commits_locally_before_logging_and_reuses_run_id(
             self.finishes: list[tuple[dict[str, Any], str]] = []
 
         def log(self, metrics: dict[str, int | float]) -> None:
-            metric_lines = (run_dir / "logs" / "metrics.jsonl").read_text(
-                encoding="utf-8"
-            ).splitlines()
+            metric_lines = (
+                (run_dir / "logs" / "metrics.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            )
             assert json.loads(metric_lines[-1]) == metrics
             assert (run_dir / "checkpoints" / "last.pt").is_file()
             self.logged.append(dict(metrics))
@@ -1564,9 +1564,9 @@ def test_training_tracker_commits_locally_before_logging_and_reuses_run_id(
                 "resolved_config": resolved_config,
                 "resume_id": resume_id,
                 "manifest_status": (
-                    json.loads(
-                        (run_dir / "manifest.json").read_text(encoding="utf-8")
-                    )["status"]
+                    json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))[
+                        "status"
+                    ]
                     if (run_dir / "manifest.json").is_file()
                     else None
                 ),
@@ -1600,9 +1600,7 @@ def test_training_tracker_commits_locally_before_logging_and_reuses_run_id(
         resume_from=initial / "checkpoints" / "last.pt",
         tracker_factory=tracker_factory,
     )
-    final_manifest = json.loads(
-        (resumed / "manifest.json").read_text(encoding="utf-8")
-    )
+    final_manifest = json.loads((resumed / "manifest.json").read_text(encoding="utf-8"))
 
     assert [start["resume_id"] for start in starts] == [None, "wandb-run-123"]
     assert [start["manifest_status"] for start in starts] == [None, "complete"]
@@ -1706,10 +1704,7 @@ def test_training_exception_safely_finishes_started_tracker(
             tracker_factory=tracker_factory,
         )
 
-    assert trackers[0].finishes == [
-        ({"stop_reason": "exception"}, "failed")
-    ]
-
+    assert trackers[0].finishes == [({"stop_reason": "exception"}, "failed")]
 
 
 def test_legacy_v1_manifest_without_tracking_resumes_and_migrates(
@@ -1737,9 +1732,7 @@ def test_legacy_v1_manifest_without_tracking_resumes_and_migrates(
         resume_from=run_dir / "checkpoints" / "last.pt",
     )
 
-    migrated = json.loads(
-        (resumed / "manifest.json").read_text(encoding="utf-8")
-    )
+    migrated = json.loads((resumed / "manifest.json").read_text(encoding="utf-8"))
     assert migrated["tracking"] == {
         "wandb_enabled": False,
         "wandb_mode": "offline",
