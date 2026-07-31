@@ -346,3 +346,25 @@ def test_shipped_config_training_defaults(
     assert config.trainer.max_epochs == max_epochs
     assert config.trainer.early_stopping_patience == early_stopping_patience
     assert config.run.name_prefix == name_prefix
+
+
+def test_load_config_preserves_absolute_symlink_spelling(tmp_path: Path) -> None:
+    physical_dir = tmp_path / "physical"
+    physical_dir.mkdir()
+    checkpoint = physical_dir / "checkpoint.ckpt"
+    checkpoint.write_bytes(b"checkpoint")
+    visible_dir = tmp_path / "visible"
+    try:
+        visible_dir.symlink_to(physical_dir, target_is_directory=True)
+    except (NotImplementedError, OSError):
+        pytest.skip("directory symlinks are unavailable on this platform")
+
+    raw = _valid_config(tmp_path)
+    configured_checkpoint = visible_dir / checkpoint.name
+    raw["checkpoint"]["path"] = str(configured_checkpoint)
+    config_path = tmp_path / "confidence.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    config = load_config(config_path, repo_root=tmp_path)
+
+    assert config.checkpoint.path == configured_checkpoint

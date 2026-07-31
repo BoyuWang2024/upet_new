@@ -227,7 +227,7 @@ def _resolve_path(raw: str | Path, repo_root: Path) -> Path:
     path = Path(raw).expanduser()
     if not path.is_absolute():
         path = repo_root / path
-    return path.resolve()
+    return path.absolute()
 
 
 def _resolve_config_paths(raw: dict[str, Any], repo_root: Path) -> None:
