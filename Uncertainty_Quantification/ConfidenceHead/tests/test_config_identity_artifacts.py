@@ -198,3 +198,108 @@ def test_incomplete_manifest_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="complete"):
         require_complete_manifest(path, expected_identity="cache-123")
+
+
+CONFIDENCE_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_config_exposes_independent_heads_scheduler_batch_and_logging(
+    tmp_path: Path,
+) -> None:
+    """Protect independently configurable force and energy head workflows."""
+    raw = _valid_config(tmp_path)
+    raw["model"] = {
+        "force": {"enabled": True, "hidden_dims": [8], "dropout": 0.1, "num_bins": 31},
+        "energy": {
+            "enabled": True,
+            "hidden_dims": [12, 6],
+            "dropout": 0.2,
+            "num_bins": 17,
+            "cumulant_order": 4,
+            "signed_root": False,
+        },
+    }
+    raw["scheduler"] = {
+        "name": "reduce_lr_on_plateau",
+        "monitor": "val/total_loss_ema",
+        "factor": 0.25,
+        "patience": 3,
+        "threshold": 1e-5,
+        "threshold_mode": "abs",
+        "cooldown": 2,
+        "min_lr": 1e-7,
+    }
+    raw["trainer"] = {
+        "batch_size": 64,
+        "max_epochs": 9,
+        "ema_beta": 0.9,
+        "early_stopping_patience": 4,
+        "min_delta": 1e-5,
+        "min_epochs": 2,
+        "monitor": "val/total_loss_ema",
+        "resume_from": str(tmp_path / "outputs/runs/demo/checkpoints/last.pt"),
+    }
+    raw["run"] = {"name_prefix": "demo"}
+    raw["logging"] = {
+        "jsonl": True,
+        "wandb": True,
+        "wandb_mode": "offline",
+        "wandb_project": "upet-confidence-head",
+    }
+
+    config = ConfidenceConfig.model_validate(raw)
+
+    assert config.model.force.hidden_dims == (8,)
+    assert config.model.energy.hidden_dims == (12, 6)
+    assert config.trainer.batch_size == 64
+    assert config.scheduler.factor == 0.25
+    assert config.logging.wandb_mode == "offline"
+
+
+@pytest.mark.parametrize(
+    ("section", "value", "match"),
+    [
+        ("run", {"name_prefix": "../unsafe"}, "name_prefix"),
+        ("logging", {"wandb_mode": "disabled"}, "wandb_mode"),
+        ("model", {"force": {"hidden_dims": []}}, "hidden_dims"),
+        ("model", {"energy": {"enabled": False}}, "enabled"),
+        ("trainer", {"batch_size": 0}, "batch_size"),
+        ("optimizer", {"name": "sgd"}, "name"),
+        ("scheduler", {"monitor": "val/loss"}, "monitor"),
+        ("trainer", {"monitor": "val/loss"}, "monitor"),
+    ],
+)
+def test_config_rejects_invalid_workflow_settings(
+    tmp_path: Path,
+    section: str,
+    value: dict[str, Any],
+    match: str,
+) -> None:
+    """Protect the immutable workflow constraints from unsafe substitutions."""
+    raw = _valid_config(tmp_path)
+    raw[section] = value
+
+    with pytest.raises(ValidationError, match=match):
+        ConfidenceConfig.model_validate(raw)
+
+
+@pytest.mark.parametrize(
+    ("name", "profile", "device", "wandb_mode"),
+    [
+        ("n20_local_cpu.yaml", "smoke", "cpu", "offline"),
+        ("n20_cpu.yaml", "smoke", "cpu", "offline"),
+        ("full_gpu.yaml", "production", "cuda", "online"),
+    ],
+)
+def test_shipped_config_contracts(
+    name: str, profile: str, device: str, wandb_mode: str
+) -> None:
+    """Protect the runnable profile, device, logging, and binning contracts."""
+    config = load_config(CONFIDENCE_ROOT / "configs" / name)
+
+    assert config.profile == profile
+    assert config.run.device == device
+    assert config.logging.wandb_mode == wandb_mode
+    assert config.binning.force_max_error == 0.5
+    assert config.binning.energy_max_error == 0.3
+    assert config.trainer.monitor == "val/total_loss_ema"

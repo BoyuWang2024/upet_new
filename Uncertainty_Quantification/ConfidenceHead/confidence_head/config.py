@@ -106,11 +106,11 @@ class BinningConfig(StrictModel):
     energy_max_error: float = Field(default=0.3, gt=0, allow_inf_nan=False)
 
 
-class ModelConfig(StrictModel):
+class BranchModelConfig(StrictModel):
+    enabled: Literal[True] = True
     hidden_dims: tuple[int, ...] = (256, 256, 256)
     dropout: float = Field(default=0.0, ge=0, lt=1, allow_inf_nan=False)
-    cumulant_order: int = Field(default=3, ge=1, le=8)
-    signed_root: bool = True
+    num_bins: int = Field(default=50, ge=3)
 
     @field_validator("hidden_dims")
     @classmethod
@@ -118,6 +118,16 @@ class ModelConfig(StrictModel):
         if not value or any(dimension <= 0 for dimension in value):
             raise ValueError("hidden_dims must contain only positive dimensions")
         return value
+
+
+class EnergyModelConfig(BranchModelConfig):
+    cumulant_order: int = Field(default=3, ge=1, le=8)
+    signed_root: bool = True
+
+
+class ModelConfig(StrictModel):
+    force: BranchModelConfig = Field(default_factory=BranchModelConfig)
+    energy: EnergyModelConfig = Field(default_factory=EnergyModelConfig)
 
 
 class LossConfig(StrictModel):
@@ -128,45 +138,39 @@ class LossConfig(StrictModel):
 
 
 class OptimizerConfig(StrictModel):
-    lr: float = Field(default=0.001, gt=0, allow_inf_nan=False)
+    name: Literal["adamw"] = "adamw"
+    learning_rate: float = Field(default=0.001, gt=0, allow_inf_nan=False)
     weight_decay: float = Field(default=0.0, ge=0, allow_inf_nan=False)
 
 
 class SchedulerConfig(StrictModel):
+    name: Literal["reduce_lr_on_plateau"] = "reduce_lr_on_plateau"
     monitor: Literal["val/total_loss_ema"] = "val/total_loss_ema"
-    factor: float = 0.5
-    patience: int = 5
-    threshold: float = 0.0001
+    factor: float = Field(default=0.5, gt=0, lt=1, allow_inf_nan=False)
+    patience: int = Field(default=5, ge=0)
+    threshold: float = Field(default=0.0001, ge=0, allow_inf_nan=False)
     threshold_mode: Literal["abs"] = "abs"
-    cooldown: int = 0
-    min_lr: float = 0.000001
-
-    @model_validator(mode="after")
-    def validate_fixed_scheduler(self) -> "SchedulerConfig":
-        approved = {
-            "factor": 0.5,
-            "patience": 5,
-            "threshold": 0.0001,
-            "cooldown": 0,
-            "min_lr": 0.000001,
-        }
-        for field, expected in approved.items():
-            if getattr(self, field) != expected:
-                raise ValueError(f"{field} must be fixed at {expected}")
-        return self
+    cooldown: int = Field(default=0, ge=0)
+    min_lr: float = Field(default=0.000001, ge=0, allow_inf_nan=False)
 
 
 class TrainerConfig(StrictModel):
+    batch_size: int = Field(default=32, gt=0)
     max_epochs: int = Field(default=200, gt=0)
     ema_beta: float = Field(default=0.95, ge=0, lt=1, allow_inf_nan=False)
     early_stopping_patience: int = Field(default=15, gt=0)
     min_delta: float = Field(default=1e-4, ge=0, allow_inf_nan=False)
     min_epochs: int = Field(default=3, gt=0)
     monitor: Literal["val/total_loss_ema"] = "val/total_loss_ema"
+    resume_from: Path | None = None
 
 
 class RunConfig(StrictModel):
     output_root: Path = Path("Uncertainty_Quantification/ConfidenceHead/outputs")
+    name_prefix: str = Field(
+        default="confidence-head",
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
     seed: int = 1234
     device: str = Field(default="cpu", min_length=1)
     amp: bool = False
@@ -176,6 +180,13 @@ class RunConfig(StrictModel):
         if self.amp:
             raise ValueError("amp is unsupported and must be false")
         return self
+
+
+class LoggingConfig(StrictModel):
+    jsonl: Literal[True] = True
+    wandb: bool = True
+    wandb_mode: Literal["offline", "online"] = "offline"
+    wandb_project: str = Field(default="upet-confidence-head", min_length=1)
 
 
 class ConfidenceConfig(StrictModel):
@@ -192,6 +203,7 @@ class ConfidenceConfig(StrictModel):
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     trainer: TrainerConfig = Field(default_factory=TrainerConfig)
     run: RunConfig = Field(default_factory=RunConfig)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
     @model_validator(mode="after")
     def validate_split_identities(self) -> "ConfidenceConfig":
@@ -231,6 +243,10 @@ def _resolve_config_paths(raw: dict[str, Any], repo_root: Path) -> None:
             split = data.get(split_name)
             if isinstance(split, dict) and "path" in split:
                 split["path"] = _resolve_path(split["path"], repo_root)
+
+    trainer = raw.get("trainer")
+    if isinstance(trainer, dict) and trainer.get("resume_from"):
+        trainer["resume_from"] = _resolve_path(trainer["resume_from"], repo_root)
 
     run = raw.setdefault("run", {})
     if isinstance(run, dict):

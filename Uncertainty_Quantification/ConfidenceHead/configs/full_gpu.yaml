@@ -1,0 +1,81 @@
+profile: production
+allow_identical_splits: false
+checkpoint:
+  path: /HOME/yt_hku_psmanyam/yt_hku_psmanyam_3/code/upet/pet-omatpes-l-v0.1.0.ckpt
+  expected_sha256: 879b1045391d88869522605a8b8b3cedeed74668e7062fdd7487548ab7b08004
+data:
+  train:
+    path: /XYFS01/HOME/yt_hku_psmanyam/yt_hku_psmanyam_3/code/upet/matpes_train.extxyz
+    expected_sha256: 42bc5b908fbd70da740175f824fd87169dcc4bf62258e5096c3eda7e3372eae1
+  validation:
+    path: /XYFS01/HOME/yt_hku_psmanyam/yt_hku_psmanyam_3/code/upet/matpes_val.extxyz
+    expected_sha256: 5f267bbe8a6690196470ee86c04cc7a3ee2839ccbda542a7bff4bea88b9e9078
+  test:
+    path: /XYFS01/HOME/yt_hku_psmanyam/yt_hku_psmanyam_3/code/upet/matpes_test.extxyz
+    expected_sha256: 76d0c38064af8a904eac1b736b07e2ed952838d4311574d83664a4967ba6ec98
+readouts:
+  energy_prediction: energy
+  force_prediction: non_conservative_forces
+  energy_features: mtt::aux::energy_last_layer_features
+  force_features: mtt::aux::non_conservative_forces_last_layer_features
+cache:
+  batch_size: 2
+  num_workers: 0
+  shard_max_atoms: 100000
+binning:
+  algorithm: fixed_linear_v1
+  force_num_bins: 50
+  force_max_error: 0.5
+  energy_num_bins: 50
+  energy_max_error: 0.3
+model:
+  force:
+    enabled: true
+    hidden_dims: [256, 256, 256]
+    dropout: 0.0
+    num_bins: 50
+  energy:
+    enabled: true
+    hidden_dims: [256, 256, 256]
+    dropout: 0.0
+    num_bins: 50
+    cumulant_order: 3
+    signed_root: true
+loss:
+  force_coefficient: 1.0
+  energy_coefficient: 1.5
+  label_smoothing: 0
+  class_weights: null
+optimizer:
+  name: adamw
+  learning_rate: 0.001
+  weight_decay: 0.0
+scheduler:
+  name: reduce_lr_on_plateau
+  monitor: val/total_loss_ema
+  factor: 0.5
+  patience: 5
+  threshold: 0.0001
+  threshold_mode: abs
+  cooldown: 0
+  min_lr: 0.000001
+trainer:
+  batch_size: 32
+  max_epochs: 200
+  ema_beta: 0.95
+  early_stopping_patience: 15
+  min_delta: 0.0001
+  min_epochs: 3
+  monitor: val/total_loss_ema
+  resume_from: null
+run:
+  output_root: /XYFS01/HOME/yt_hku_psmanyam/yt_hku_psmanyam_3/code/upet_new/Uncertainty_Quantification/ConfidenceHead/outputs
+  name_prefix: full-gpu
+  seed: 1234
+  device: cuda
+  amp: false
+logging:
+  jsonl: true
+  wandb: true
+  wandb_mode: online
+  wandb_project: upet-confidence-head
