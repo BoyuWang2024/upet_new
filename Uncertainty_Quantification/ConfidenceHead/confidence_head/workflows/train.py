@@ -41,6 +41,7 @@ from ..trainer import (
     commit_epoch_checkpoints,
     restore_training_snapshot,
 )
+from ..tracking import Tracker, TrackerFactory, WandbTracker
 
 
 RUN_SCHEMA_VERSION = "upet_confidence_run_v1"
@@ -620,6 +621,8 @@ def _train_run_locked(
     stop_after_epoch: int | None = None,
     resume_from: Path | None = None,
     begin_resume_writes: Callable[[], None] | None = None,
+    tracker_factory: TrackerFactory,
+    on_tracker_started: Callable[[Tracker], None],
 ) -> Path:
     """Train confidence heads and atomically publish a complete run manifest."""
     cache_path = Path(cache_manifest_path).resolve()
@@ -762,17 +765,6 @@ def _train_run_locked(
         if not isinstance(raw_history, list):
             raise ValueError("resume provenance history must be a list")
         previous_history = list(raw_history)
-    if resume_from is None:
-        _assert_run_directory_identity(
-            run_dir, config.run.output_root, run_directory_identity
-        )
-        atomic_write_json(manifest_path, base_manifest)
-        _atomic_write_text(
-            run_dir / "resolved_config.yaml",
-            yaml.safe_dump(resolved, sort_keys=True),
-        )
-        atomic_write_json(run_dir / "binning.json", bins)
-
     train_data = CachedSplitDataset(cache_path, "train", cache_identity)
     validation_data = CachedSplitDataset(cache_path, "validation", cache_identity)
     train_meta = split_metadata["train"]
@@ -870,6 +862,48 @@ def _train_run_locked(
             learning_rate=restored.learning_rate,
             ema=restored.control_state.ema,
         )
+
+    resume_id: str | None = None
+    if previous_manifest is not None:
+        previous_tracking = previous_manifest.get("tracking")
+        if not isinstance(previous_tracking, Mapping):
+            raise ValueError("resume tracking declaration must be a mapping")
+        for field, expected in (
+            ("wandb_enabled", config.logging.wandb),
+            ("wandb_mode", config.logging.wandb_mode),
+            ("wandb_project", config.logging.wandb_project),
+        ):
+            if previous_tracking.get(field) != expected:
+                raise ValueError(f"resume tracking {field} mismatch")
+        raw_resume_id = previous_tracking.get("wandb_run_id")
+        if raw_resume_id is not None and not isinstance(raw_resume_id, str):
+            raise ValueError("resume W&B run ID must be a string or null")
+        resume_id = raw_resume_id
+
+    tracker = tracker_factory(
+        config.logging,
+        run_name=run_name,
+        resolved_config=resolved,
+        resume_id=resume_id,
+    )
+    on_tracker_started(tracker)
+    base_manifest["tracking"] = {
+        "wandb_enabled": config.logging.wandb,
+        "wandb_mode": config.logging.wandb_mode,
+        "wandb_project": config.logging.wandb_project,
+        "wandb_run_id": tracker.run_id,
+    }
+    if resume_from is None:
+        _assert_run_directory_identity(
+            run_dir, config.run.output_root, run_directory_identity
+        )
+        atomic_write_json(manifest_path, base_manifest)
+        _atomic_write_text(
+            run_dir / "resolved_config.yaml",
+            yaml.safe_dump(resolved, sort_keys=True),
+        )
+        atomic_write_json(run_dir / "binning.json", bins)
+    else:
         if begin_resume_writes is None:
             raise RuntimeError("resume transaction callback is missing")
         begin_resume_writes()
@@ -959,6 +993,7 @@ def _train_run_locked(
             run_dir / "logs" / "metrics.jsonl",
             "".join(json.dumps(item, sort_keys=True) + "\n" for item in metric_records),
         )
+        tracker.log(record)
         if update.should_stop or external_stop:
             break
 
@@ -1059,6 +1094,7 @@ def train_run(
     run_name: str,
     stop_after_epoch: int | None = None,
     resume_from: Path | None = None,
+    tracker_factory: TrackerFactory = WandbTracker.start,
 ) -> Path:
     """Run one cooperative, per-run locked training transaction.
 
@@ -1069,6 +1105,7 @@ def train_run(
         rollback: dict[str, bytes | None] | None = None
         rollback_identity: tuple[int, int] | None = None
         run_dir: Path | None = None
+        tracker: Tracker | None = None
         if resume_from is not None:
             run_dir = _safe_run_dir(
                 config.run.output_root,
@@ -1085,8 +1122,12 @@ def train_run(
             if rollback is None and run_dir is not None:
                 rollback = _snapshot_resume_artifacts(run_dir)
 
+        def on_tracker_started(started_tracker: Tracker) -> None:
+            nonlocal tracker
+            tracker = started_tracker
+
         try:
-            return _train_run_locked(
+            result = _train_run_locked(
                 config,
                 cache_manifest_path=cache_manifest_path,
                 run_name=run_name,
@@ -1095,8 +1136,11 @@ def train_run(
                 begin_resume_writes=begin_resume_writes
                 if run_dir is not None
                 else None,
+                tracker_factory=tracker_factory,
+                on_tracker_started=on_tracker_started,
             )
         except Exception as error:
+            rollback_error: Exception | None = None
             if rollback is not None and rollback_identity is not None and run_dir:
                 try:
                     _assert_run_directory_identity(
@@ -1105,9 +1149,26 @@ def train_run(
                         rollback_identity,
                     )
                     _restore_resume_artifacts(run_dir, rollback)
-                except Exception as rollback_error:
-                    raise ExceptionGroup(
-                        "training failed and resume rollback also failed",
-                        [error, rollback_error],
-                    ) from error
+                except Exception as caught_rollback_error:
+                    rollback_error = caught_rollback_error
+            if tracker is not None:
+                tracker.finish({"stop_reason": "exception"}, status="failed")
+            if rollback_error is not None:
+                raise ExceptionGroup(
+                    "training failed and resume rollback also failed",
+                    [error, rollback_error],
+                ) from error
             raise
+
+        if tracker is None:
+            raise RuntimeError("training completed without starting a tracker")
+        complete_manifest = _load_json(result / "manifest.json")
+        tracker.finish(
+            {
+                "best_epoch": complete_manifest["best_epoch"],
+                "best_metric": complete_manifest["best_metric"],
+                "stop_reason": complete_manifest["stop_reason"],
+            },
+            status="success",
+        )
+        return result

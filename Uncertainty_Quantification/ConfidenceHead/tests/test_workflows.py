@@ -163,6 +163,7 @@ def config(tmp_path: Path) -> ConfidenceConfig:
                 "device": "cpu",
                 "amp": False,
             },
+            "logging": {"wandb": False},
         }
     )
 
@@ -1513,3 +1514,198 @@ def test_resume_rolls_back_if_best_changes_after_preflight(
         )
     assert mutated
     assert _resume_transaction_bytes(run_dir) == before
+
+
+def test_training_tracker_commits_locally_before_logging_and_reuses_run_id(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+) -> None:
+    config = _config_copy(
+        config,
+        trainer={"max_epochs": 2},
+        logging={"wandb": True},
+    )
+    run_dir = config.run.output_root / "runs" / "tracked-resume"
+    trackers: list[Any] = []
+    starts: list[dict[str, Any]] = []
+
+    class RecordingTracker:
+        def __init__(self, resume_id: str | None) -> None:
+            self.run_id = resume_id or "wandb-run-123"
+            self.logged: list[dict[str, int | float]] = []
+            self.finishes: list[tuple[dict[str, Any], str]] = []
+
+        def log(self, metrics: dict[str, int | float]) -> None:
+            metric_lines = (run_dir / "logs" / "metrics.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            assert json.loads(metric_lines[-1]) == metrics
+            assert (run_dir / "checkpoints" / "last.pt").is_file()
+            self.logged.append(dict(metrics))
+
+        def finish(self, summary: dict[str, Any], *, status: str) -> None:
+            manifest = json.loads(
+                (run_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            assert manifest["status"] == "complete"
+            self.finishes.append((dict(summary), status))
+
+    def tracker_factory(
+        logging: Any,
+        *,
+        run_name: str,
+        resolved_config: dict[str, Any],
+        resume_id: str | None,
+    ) -> RecordingTracker:
+        starts.append(
+            {
+                "enabled": logging.wandb,
+                "run_name": run_name,
+                "resolved_config": resolved_config,
+                "resume_id": resume_id,
+                "manifest_status": (
+                    json.loads(
+                        (run_dir / "manifest.json").read_text(encoding="utf-8")
+                    )["status"]
+                    if (run_dir / "manifest.json").is_file()
+                    else None
+                ),
+            }
+        )
+        tracker = RecordingTracker(resume_id)
+        trackers.append(tracker)
+        return tracker
+
+    initial = train_run(
+        config,
+        cache_manifest_path=complete_cache,
+        run_name="tracked-resume",
+        stop_after_epoch=0,
+        tracker_factory=tracker_factory,
+    )
+    initial_manifest = json.loads(
+        (initial / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert initial_manifest["tracking"] == {
+        "wandb_enabled": True,
+        "wandb_mode": "offline",
+        "wandb_project": "upet-confidence-head",
+        "wandb_run_id": "wandb-run-123",
+    }
+
+    resumed = train_run(
+        config,
+        cache_manifest_path=complete_cache,
+        run_name="tracked-resume",
+        resume_from=initial / "checkpoints" / "last.pt",
+        tracker_factory=tracker_factory,
+    )
+    final_manifest = json.loads(
+        (resumed / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert [start["resume_id"] for start in starts] == [None, "wandb-run-123"]
+    assert [start["manifest_status"] for start in starts] == [None, "complete"]
+    assert [record["epoch"] for tracker in trackers for record in tracker.logged] == [
+        0,
+        1,
+    ]
+    expected_fields = {
+        "epoch",
+        "global_step",
+        "learning_rate",
+        "train/force_loss",
+        "train/energy_loss",
+        "train/total_loss",
+        "val/force_loss",
+        "val/energy_loss",
+        "val/total_loss",
+        "val/total_loss_ema",
+    }
+    assert all(
+        set(record) == expected_fields
+        for tracker in trackers
+        for record in tracker.logged
+    )
+    assert final_manifest["tracking"]["wandb_run_id"] == "wandb-run-123"
+    final_summary, final_status = trackers[-1].finishes[-1]
+    assert final_status == "success"
+    assert final_summary == {
+        "best_epoch": final_manifest["best_epoch"],
+        "best_metric": final_manifest["best_metric"],
+        "stop_reason": final_manifest["stop_reason"],
+    }
+
+
+def test_failed_resume_preflight_does_not_start_tracker(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+) -> None:
+    resumable, run_dir = _resume_candidate(
+        config,
+        complete_cache,
+        "tracker-after-resume-preflight",
+    )
+    metrics_path = run_dir / "logs" / "metrics.jsonl"
+    metrics_path.write_text(
+        metrics_path.read_text(encoding="utf-8") + " ",
+        encoding="utf-8",
+    )
+    starts: list[str | None] = []
+
+    def tracker_factory(*_: Any, resume_id: str | None, **__: Any) -> Any:
+        starts.append(resume_id)
+        raise AssertionError("tracker must not start before resume preflight passes")
+
+    with pytest.raises(ValueError, match="metrics.*sha256"):
+        train_run(
+            resumable,
+            cache_manifest_path=complete_cache,
+            run_name="tracker-after-resume-preflight",
+            resume_from=run_dir / "checkpoints" / "last.pt",
+            tracker_factory=tracker_factory,
+        )
+
+    assert starts == []
+
+
+def test_training_exception_safely_finishes_started_tracker(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config_copy(config, logging={"wandb": True})
+    trackers: list[Any] = []
+
+    class RecordingTracker:
+        run_id = "failed-run"
+
+        def __init__(self) -> None:
+            self.finishes: list[tuple[dict[str, Any], str]] = []
+
+        def log(self, metrics: dict[str, int | float]) -> None:
+            raise AssertionError(f"unexpected metrics after failure: {metrics}")
+
+        def finish(self, summary: dict[str, Any], *, status: str) -> None:
+            self.finishes.append((dict(summary), status))
+
+    def tracker_factory(*_: Any, **__: Any) -> RecordingTracker:
+        tracker = RecordingTracker()
+        trackers.append(tracker)
+        return tracker
+
+    def fail_epoch(**_: Any) -> Any:
+        raise RuntimeError("synthetic training failure")
+
+    monkeypatch.setattr(train_module, "_epoch", fail_epoch)
+    with pytest.raises(RuntimeError, match="synthetic training failure"):
+        train_run(
+            config,
+            cache_manifest_path=complete_cache,
+            run_name="failed-tracker",
+            tracker_factory=tracker_factory,
+        )
+
+    assert trackers[0].finishes == [
+        ({"stop_reason": "exception"}, "failed")
+    ]
