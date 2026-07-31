@@ -353,6 +353,17 @@ def verify_run(run_dir: Path, *, full: bool = True) -> dict[str, Any]:
             raise ValueError("evaluation checkpoint escapes run directory")
         if not checkpoint_path.is_file():
             raise ValueError("evaluation checkpoint is missing")
+        checkpoint_relative = checkpoint_path.relative_to(root).as_posix()
+        declared_checkpoint = manifest["artifacts"].get(checkpoint_relative)
+        if (
+            not checkpoint_relative.startswith("checkpoints/")
+            or not isinstance(declared_checkpoint, Mapping)
+            or declared_checkpoint.get("path") != checkpoint_relative
+            or declared_checkpoint.get("sha256") != checkpoint.get("sha256")
+        ):
+            raise ValueError(
+                "evaluation checkpoint is not bound to a declared run checkpoint"
+            )
         if full and sha256_file(checkpoint_path) != checkpoint.get("sha256"):
             raise ValueError("evaluation checkpoint sha256 mismatch")
         _verify_artifacts(

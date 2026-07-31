@@ -9,7 +9,7 @@ import random
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
@@ -301,8 +301,7 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
-_ROLLBACK_ARTIFACTS = (
-    "manifest.json",
+_TRAINING_ARTIFACTS = (
     "resolved_config.yaml",
     "binning.json",
     "checkpoints/best.pt",
@@ -620,6 +619,7 @@ def _train_run_locked(
     run_name: str,
     stop_after_epoch: int | None = None,
     resume_from: Path | None = None,
+    begin_resume_writes: Callable[[], None] | None = None,
 ) -> Path:
     """Train confidence heads and atomically publish a complete run manifest."""
     cache_path = Path(cache_manifest_path).resolve()
@@ -677,6 +677,7 @@ def _train_run_locked(
     previous_manifest: dict[str, Any] | None = None
     previous_history: list[dict[str, Any]] = []
     resume_artifacts: dict[str, tuple[Path, str, bytes]] = {}
+    stale_evaluation_artifacts: tuple[str, ...] = ()
     if resume_from is not None:
         previous_manifest = _load_json(manifest_path)
         if (
@@ -694,16 +695,44 @@ def _train_run_locked(
         ):
             if previous_manifest.get(field) != expected:
                 raise ValueError(f"resume run {field} identity mismatch")
-        for relative in (
-            "resolved_config.yaml",
-            "binning.json",
-            "checkpoints/best.pt",
-            "checkpoints/last.pt",
-            "logs/metrics.jsonl",
-        ):
+        declared = previous_manifest.get("artifacts")
+        if not isinstance(declared, Mapping):
+            raise ValueError("resume run has no declared artifacts")
+        for relative in declared:
+            if not isinstance(relative, str):
+                raise ValueError("resume artifact names must be strings")
+            if relative not in _TRAINING_ARTIFACTS and not relative.startswith(
+                "evaluation/"
+            ):
+                raise ValueError(f"unsupported resume artifact: {relative}")
             resume_artifacts[relative] = _resume_artifact_bytes(
                 run_dir, previous_manifest, relative
             )
+        for relative in _TRAINING_ARTIFACTS:
+            if relative not in resume_artifacts:
+                raise ValueError(f"resume artifact is not declared: {relative}")
+        stale_evaluation_artifacts = tuple(
+            sorted(
+                relative
+                for relative in resume_artifacts
+                if relative.startswith("evaluation/")
+            )
+        )
+        if stale_evaluation_artifacts:
+            evaluation = previous_manifest.get("evaluation")
+            if (
+                not isinstance(evaluation, Mapping)
+                or evaluation.get("status") != "complete"
+                or evaluation.get("manifest") not in stale_evaluation_artifacts
+            ):
+                raise ValueError("resume evaluation declaration is invalid")
+            evaluation_manifest = json.loads(
+                resume_artifacts[str(evaluation["manifest"])][2].decode("utf-8")
+            )
+            if not isinstance(evaluation_manifest, Mapping):
+                raise ValueError("resume evaluation manifest must be a mapping")
+        elif "evaluation" in previous_manifest:
+            raise ValueError("resume evaluation declaration has no artifacts")
         try:
             previous_resolved = yaml.safe_load(
                 resume_artifacts["resolved_config.yaml"][2].decode("utf-8")
@@ -832,6 +861,13 @@ def _train_run_locked(
             learning_rate=restored.learning_rate,
             ema=restored.control_state.ema,
         )
+        if stale_evaluation_artifacts:
+            if begin_resume_writes is None:
+                raise RuntimeError("resume transaction callback is missing")
+            begin_resume_writes()
+            for relative in stale_evaluation_artifacts:
+                resume_artifacts[relative][0].unlink()
+
     externally_stopped = False
     for epoch in range(start_epoch, config.trainer.max_epochs):
         train_force, train_energy, train_total, steps = _epoch(
@@ -877,6 +913,8 @@ def _train_run_locked(
             identity=identity,
             sampler_generator=sampler,
         )
+        if begin_resume_writes is not None:
+            begin_resume_writes()
         _assert_run_directory_identity(
             run_dir, config.run.output_root, run_directory_identity
         )
@@ -957,6 +995,8 @@ def _train_run_locked(
                 "completed_at": completed_at,
             },
         ]
+    if begin_resume_writes is not None:
+        begin_resume_writes()
     _assert_run_directory_identity(
         run_dir, config.run.output_root, run_directory_identity
     )
@@ -968,10 +1008,26 @@ def _train_run_locked(
 
 
 def _snapshot_resume_artifacts(run_dir: Path) -> dict[str, bytes | None]:
+    manifest_path = run_dir / "manifest.json"
+    manifest_data = manifest_path.read_bytes()
+    manifest = json.loads(manifest_data.decode("utf-8"))
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, Mapping):
+        raise ValueError("resume run has no declared artifacts")
+    relatives = {"manifest.json"}
+    for relative in artifacts:
+        if not isinstance(relative, str):
+            raise ValueError("resume artifact names must be strings")
+        path = (run_dir / relative).resolve()
+        if not path.is_relative_to(run_dir.resolve()):
+            raise ValueError(f"resume artifact escapes run directory: {relative}")
+        relatives.add(relative)
     snapshot: dict[str, bytes | None] = {}
-    for relative in _ROLLBACK_ARTIFACTS:
+    for relative in sorted(relatives):
         path = run_dir / relative
-        snapshot[relative] = path.read_bytes() if path.is_file() else None
+        snapshot[relative] = (
+            manifest_data if relative == "manifest.json" else path.read_bytes()
+        )
     return snapshot
 
 
@@ -1003,6 +1059,7 @@ def train_run(
     with _exclusive_run_lock(config.run.output_root, run_name):
         rollback: dict[str, bytes | None] | None = None
         rollback_identity: tuple[int, int] | None = None
+        run_dir: Path | None = None
         if resume_from is not None:
             run_dir = _safe_run_dir(
                 config.run.output_root,
@@ -1013,7 +1070,12 @@ def train_run(
                 run_dir,
                 config.run.output_root,
             )
-            rollback = _snapshot_resume_artifacts(run_dir)
+
+        def begin_resume_writes() -> None:
+            nonlocal rollback
+            if rollback is None and run_dir is not None:
+                rollback = _snapshot_resume_artifacts(run_dir)
+
         try:
             return _train_run_locked(
                 config,
@@ -1021,9 +1083,12 @@ def train_run(
                 run_name=run_name,
                 stop_after_epoch=stop_after_epoch,
                 resume_from=resume_from,
+                begin_resume_writes=begin_resume_writes
+                if run_dir is not None
+                else None,
             )
         except Exception as error:
-            if rollback is not None and rollback_identity is not None:
+            if rollback is not None and rollback_identity is not None and run_dir:
                 try:
                     _assert_run_directory_identity(
                         run_dir,

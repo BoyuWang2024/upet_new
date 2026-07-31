@@ -1217,8 +1217,8 @@ def test_resume_parses_the_same_metrics_bytes_whose_digest_was_verified(
         data = original_read_bytes(path)
         if path.resolve() == metrics_path:
             metrics_reads += 1
-        # The first read snapshots rollback state; race the verified read itself.
-        if path.resolve() == metrics_path and metrics_reads == 2 and not swapped:
+        # Rollback snapshots start only after preflight; race the verified read.
+        if path.resolve() == metrics_path and metrics_reads == 1 and not swapped:
             swapped = True
             metrics_path.write_text("{not valid json\n", encoding="utf-8")
         return data
