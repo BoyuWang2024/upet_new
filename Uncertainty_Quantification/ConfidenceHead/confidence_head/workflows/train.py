@@ -22,6 +22,7 @@ import yaml
 from torch.utils.data import DataLoader
 
 from ..artifacts import atomic_write_json, load_verified_torch
+from ..artifacts import sha256_file as sha256_file
 from ..binning import BinningSpec, fixed_linear_binning, labels_from_thresholds
 from ..cache import CachedSplitDataset, collate_cached_structures
 from ..config import ConfidenceConfig
