@@ -309,7 +309,7 @@ def test_shipped_config_contracts(
     (
         "name",
         "hidden_dims",
-        "batch_size",
+        "trainer_batch_size",
         "max_epochs",
         "early_stopping_patience",
         "name_prefix",
@@ -323,7 +323,7 @@ def test_shipped_config_contracts(
 def test_shipped_config_training_defaults(
     name: str,
     hidden_dims: tuple[int, ...],
-    batch_size: int,
+    trainer_batch_size: int,
     max_epochs: int,
     early_stopping_patience: int,
     name_prefix: str,
@@ -333,5 +333,8 @@ def test_shipped_config_training_defaults(
 
     assert config.model.force.hidden_dims == hidden_dims
     assert config.model.energy.hidden_dims == hidden_dims
-    assert config.trainer.batch_size == batch_size
+    assert config.cache.batch_size == 2
+    assert config.trainer.batch_size == trainer_batch_size
     assert config.trainer.max_epochs == max_epochs
+    assert config.trainer.early_stopping_patience == early_stopping_patience
+    assert config.run.name_prefix == name_prefix
