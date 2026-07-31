@@ -492,11 +492,14 @@ def _validate_checkpoint_identity(
     entry: Mapping[str, str],
     identity: TrainingIdentity,
 ) -> Mapping[str, Any]:
-    snapshot = load_verified_torch(
-        path,
-        expected_sha256=entry["sha256"],
-        weights_only=False,
-    )
+    try:
+        snapshot = load_verified_torch(
+            path,
+            expected_sha256=entry["sha256"],
+            weights_only=False,
+        )
+    except Exception as error:
+        raise ValueError(f"invalid checkpoint artifact {path}: {error}") from error
     if not isinstance(snapshot, Mapping):
         raise ValueError(f"checkpoint artifact must be a mapping: {path}")
     if snapshot.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
