@@ -1032,14 +1032,18 @@ def test_run_and_evaluation_provenance_cover_dependencies_times_and_resume_histo
     assert evaluation_manifest["completed_at"]
 
 
-def _resume_transaction_bytes(run_dir: Path) -> dict[str, bytes]:
+def _resume_transaction_bytes(run_dir: Path) -> dict[str, bytes | None]:
     return {
-        relative: (run_dir / relative).read_bytes()
+        relative: path.read_bytes() if path.is_file() else None
         for relative in (
             "manifest.json",
+            "resolved_config.yaml",
+            "binning.json",
+            "checkpoints/best.pt",
             "checkpoints/last.pt",
             "logs/metrics.jsonl",
         )
+        for path in (run_dir / relative,)
     }
 
 
@@ -1249,3 +1253,117 @@ def test_evaluation_provenance_uses_the_checkpoint_digest_that_was_loaded(
         (evaluation_dir / "manifest.json").read_text(encoding="utf-8")
     )
     assert evaluation["checkpoint"]["sha256"] == loaded_digest
+
+
+def test_run_lock_rejects_a_second_writer_before_artifact_changes(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+) -> None:
+    resumable, run_dir = _resume_candidate(
+        config,
+        complete_cache,
+        "exclusive-run-writer",
+    )
+    before = _resume_transaction_bytes(run_dir)
+
+    with train_module._exclusive_run_lock(
+        resumable.run.output_root,
+        "exclusive-run-writer",
+    ):
+        with pytest.raises(ValueError, match="lock|writer|active"):
+            train_run(
+                resumable,
+                cache_manifest_path=complete_cache,
+                run_name="exclusive-run-writer",
+                resume_from=run_dir / "checkpoints" / "last.pt",
+            )
+        assert _resume_transaction_bytes(run_dir) == before
+
+    train_run(
+        resumable,
+        cache_manifest_path=complete_cache,
+        run_name="exclusive-run-writer",
+        resume_from=run_dir / "checkpoints" / "last.pt",
+    )
+
+
+@pytest.mark.parametrize("artifact", ["resolved_config.yaml", "binning.json"])
+def test_resume_rolls_back_if_static_artifact_changes_after_preflight(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact: str,
+) -> None:
+    run_name = f"resume-post-preflight-{artifact.split('.')[0]}"
+    resumable, run_dir = _resume_candidate(config, complete_cache, run_name)
+    before = _resume_transaction_bytes(run_dir)
+    original_epoch = train_module._epoch
+    mutated = False
+
+    def mutate_after_first_train_epoch(**kwargs: Any) -> Any:
+        nonlocal mutated
+        result = original_epoch(**kwargs)
+        if kwargs["optimizer"] is not None and not mutated:
+            mutated = True
+            path = run_dir / artifact
+            if artifact.endswith(".yaml"):
+                payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+                payload["run"]["seed"] += 1
+                path.write_text(
+                    yaml.safe_dump(payload, sort_keys=True),
+                    encoding="utf-8",
+                )
+            else:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload["energy"]["representatives"][0] += 0.01
+                path.write_text(
+                    json.dumps(payload, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+        return result
+
+    monkeypatch.setattr(train_module, "_epoch", mutate_after_first_train_epoch)
+    with pytest.raises(ValueError, match="changed|artifact|publish"):
+        train_run(
+            resumable,
+            cache_manifest_path=complete_cache,
+            run_name=run_name,
+            resume_from=run_dir / "checkpoints" / "last.pt",
+        )
+    assert mutated
+    assert _resume_transaction_bytes(run_dir) == before
+
+
+def test_resume_rolls_back_if_best_changes_after_preflight(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_name = "resume-post-preflight-best"
+    resumable, run_dir = _resume_candidate(config, complete_cache, run_name)
+    before = _resume_transaction_bytes(run_dir)
+    original_commit = train_module.commit_epoch_checkpoints
+    mutated = False
+
+    def mutate_best_after_checkpoint_commit(**kwargs: Any) -> bool:
+        nonlocal mutated
+        external_stop = original_commit(**kwargs)
+        if not mutated:
+            mutated = True
+            (run_dir / "checkpoints" / "best.pt").write_bytes(b"replaced best")
+        return external_stop
+
+    monkeypatch.setattr(
+        train_module,
+        "commit_epoch_checkpoints",
+        mutate_best_after_checkpoint_commit,
+    )
+    with pytest.raises((RuntimeError, ValueError), match="best|checkpoint|artifact"):
+        train_run(
+            resumable,
+            cache_manifest_path=complete_cache,
+            run_name=run_name,
+            resume_from=run_dir / "checkpoints" / "last.pt",
+        )
+    assert mutated
+    assert _resume_transaction_bytes(run_dir) == before
