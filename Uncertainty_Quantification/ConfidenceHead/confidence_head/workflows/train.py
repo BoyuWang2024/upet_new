@@ -861,10 +861,10 @@ def _train_run_locked(
             learning_rate=restored.learning_rate,
             ema=restored.control_state.ema,
         )
+        if begin_resume_writes is None:
+            raise RuntimeError("resume transaction callback is missing")
+        begin_resume_writes()
         if stale_evaluation_artifacts:
-            if begin_resume_writes is None:
-                raise RuntimeError("resume transaction callback is missing")
-            begin_resume_writes()
             for relative in stale_evaluation_artifacts:
                 resume_artifacts[relative][0].unlink()
 
