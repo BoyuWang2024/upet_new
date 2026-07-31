@@ -1124,6 +1124,7 @@ def test_resume_parses_the_same_metrics_bytes_whose_digest_was_verified(
     original_sha256_file = train_module.sha256_file
     original_read_bytes = Path.read_bytes
     swapped = False
+    metrics_reads = 0
 
     def replace_after_path_hash(path: Path) -> str:
         nonlocal swapped
@@ -1134,9 +1135,12 @@ def test_resume_parses_the_same_metrics_bytes_whose_digest_was_verified(
         return digest
 
     def replace_after_bytes_read(path: Path) -> bytes:
-        nonlocal swapped
+        nonlocal metrics_reads, swapped
         data = original_read_bytes(path)
-        if path.resolve() == metrics_path and not swapped:
+        if path.resolve() == metrics_path:
+            metrics_reads += 1
+        # The first read snapshots rollback state; race the verified read itself.
+        if path.resolve() == metrics_path and metrics_reads == 2 and not swapped:
             swapped = True
             metrics_path.write_text("{not valid json\n", encoding="utf-8")
         return data
