@@ -30,7 +30,8 @@ from Uncertainty_Quantification.ConfidenceHead.confidence_head.metrics import (
 
 
 _WORKFLOWS = "Uncertainty_Quantification.ConfidenceHead.confidence_head.workflows"
-verify_run = import_module(f"{_WORKFLOWS}.verify").verify_run
+verify_module = import_module(f"{_WORKFLOWS}.verify")
+verify_run = verify_module.verify_run
 evaluate_module = import_module(f"{_WORKFLOWS}.evaluate")
 evaluate_run = evaluate_module.evaluate_run
 train_module = import_module(f"{_WORKFLOWS}.train")
@@ -419,6 +420,8 @@ def test_train_evaluate_and_verify_synthetic_complete_cache(
     assert set(predictions) == {
         "force_logits",
         "force_labels",
+        "force_target_mode",
+        "force_error_definition",
         "force_observed_errors",
         "force_expected_errors",
         "energy_logits",
@@ -430,10 +433,12 @@ def test_train_evaluate_and_verify_synthetic_complete_cache(
         "force_representatives",
         "energy_representatives",
     }
-    assert predictions["force_logits"].shape == (3, 3, 3)
-    assert predictions["force_labels"].shape == (3, 3)
-    assert predictions["force_observed_errors"].shape == (3, 3)
-    assert predictions["force_expected_errors"].shape == (3, 3)
+    assert predictions["force_logits"].shape == (3, 3)
+    assert predictions["force_labels"].shape == (3,)
+    assert predictions["force_observed_errors"].shape == (3,)
+    assert predictions["force_expected_errors"].shape == (3,)
+    assert predictions["force_target_mode"] == "atom_mean"
+    assert predictions["force_error_definition"] == "abs_cartesian_component_mean_v1"
     assert predictions["energy_logits"].shape == (2, 3)
     assert predictions["energy_labels"].shape == (2,)
     assert predictions["energy_observed_errors"].shape == (2,)
@@ -448,10 +453,21 @@ def test_train_evaluate_and_verify_synthetic_complete_cache(
     )
 
     metrics = json.loads((evaluation_dir / "metrics.json").read_text())
-    assert metrics["force"]["sample_count"] == 9
+    assert evaluation_manifest["force_target_mode"] == "atom_mean"
+    assert evaluation_manifest["force_error_definition"] == (
+        "abs_cartesian_component_mean_v1"
+    )
+    assert evaluation_manifest["test_counts"] == {
+        "structures": 2,
+        "atoms": 3,
+        "force_components": 9,
+        "force_targets": 3,
+        "force_target_mode": "atom_mean",
+    }
+    assert metrics["force"]["sample_count"] == 3
     assert metrics["energy"]["sample_count"] == 2
-    assert metrics["force"]["overflow_count"] == 1
-    assert metrics["force"]["overflow_fraction"] == pytest.approx(1 / 9)
+    assert metrics["force"]["overflow_count"] == 0
+    assert metrics["force"]["overflow_fraction"] == 0.0
     assert metrics["energy"]["overflow_count"] == 1
     assert metrics["energy"]["overflow_fraction"] == pytest.approx(1 / 2)
     assert (evaluation_dir / "force_bin_summary.csv").is_file()
@@ -753,7 +769,12 @@ def test_distinct_force_and_energy_bin_counts_train_and_evaluate(
         config,
         trainer={"max_epochs": 1},
         model={
-            "force": {"hidden_dims": [4], "dropout": 0.0, "num_bins": 3},
+            "force": {
+                "hidden_dims": [4],
+                "dropout": 0.0,
+                "num_bins": 3,
+                "target_mode": "component",
+            },
             "energy": {
                 "hidden_dims": [4],
                 "dropout": 0.0,
@@ -776,10 +797,38 @@ def test_distinct_force_and_energy_bin_counts_train_and_evaluate(
     )
 
     assert predictions["force_logits"].shape == (3, 3, 3)
+    assert predictions["force_target_mode"] == "component"
+    assert predictions["force_error_definition"] == "abs_cartesian_component_v1"
+    evaluation_manifest = json.loads(
+        (evaluation_dir / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert evaluation_manifest["test_counts"] == {
+        "structures": 2,
+        "atoms": 3,
+        "force_components": 9,
+        "force_targets": 9,
+        "force_target_mode": "component",
+    }
     assert predictions["energy_logits"].shape == (2, 5)
     assert predictions["force_representatives"].shape == (3,)
     assert predictions["energy_representatives"].shape == (5,)
     assert verify_run(run_dir, full=True)["status"] == "complete"
+
+
+def test_legacy_missing_force_semantics_are_component_only() -> None:
+    verify_module._verify_force_semantics(
+        {}, "component", context="legacy component artifact"
+    )
+    verify_module._verify_count_semantics(
+        {"structures": 2, "atoms": 3, "force_components": 9},
+        "component",
+        3,
+    )
+
+    with pytest.raises(ValueError, match="force target semantics"):
+        verify_module._verify_force_semantics(
+            {}, "atom_mean", context="legacy atom-mean artifact"
+        )
 
 
 def test_amp_is_explicitly_unsupported_on_every_device() -> None:
@@ -857,6 +906,13 @@ def test_verify_rejects_invalid_prediction_semantics(
             force_representatives=value["force_representatives"].flip(0)
         ),
         "expected error": lambda value: value["energy_expected_errors"].add_(1.0),
+        "force target semantics": lambda value: value.update(
+            force_target_mode="component"
+        ),
+        "target semantics": lambda value: (
+            value.pop("force_target_mode"),
+            value.pop("force_error_definition"),
+        ),
     }
     for message, mutate in mutations.items():
         candidate = copy.deepcopy(original)

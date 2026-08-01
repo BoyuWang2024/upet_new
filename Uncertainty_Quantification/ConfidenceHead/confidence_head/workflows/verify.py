@@ -12,6 +12,8 @@ import yaml
 
 from ..artifacts import load_verified_torch, sha256_file
 from ..cache import SCHEMA_VERSION as CACHE_SCHEMA_VERSION
+from ..config import ForceTargetMode
+from ..errors import force_error_definition
 from ..identity import binning_id, config_id, model_loss_id, run_id
 from ..trainer import CHECKPOINT_SCHEMA_VERSION
 from .evaluate import EVALUATION_SCHEMA_VERSION
@@ -69,7 +71,7 @@ def _verify_artifacts(root: Path, artifacts: Any, *, full: bool) -> dict[str, Pa
     return paths
 
 
-def _verify_identity(root: Path, manifest: Mapping[str, Any]) -> None:
+def _verify_identity(root: Path, manifest: Mapping[str, Any]) -> str:
     resolved = _yaml_mapping(root / "resolved_config.yaml")
     bins = _mapping(root / "binning.json")
     expected_config_id = config_id(resolved)
@@ -93,12 +95,52 @@ def _verify_identity(root: Path, manifest: Mapping[str, Any]) -> None:
             raise ValueError(f"run {field} identity mismatch")
     if manifest.get("run_id") != run_id(expected):
         raise ValueError("run identity hash mismatch")
+    model = resolved.get("model")
+    force = model.get("force") if isinstance(model, Mapping) else None
+    if not isinstance(force, Mapping):
+        raise ValueError("resolved force model configuration is invalid")
+    mode = force.get("target_mode", "component")
+    if mode not in ("atom_mean", "component"):
+        raise ValueError("resolved force target mode is invalid")
+    _verify_force_semantics(manifest, mode, context="run manifest")
+    return mode
+
+
+def _verify_force_semantics(
+    payload: Mapping[str, Any],
+    expected_mode: ForceTargetMode,
+    *,
+    context: str,
+) -> None:
+    actual_mode = payload.get("force_target_mode")
+    actual_definition = payload.get("force_error_definition")
+    if actual_mode is None and actual_definition is None:
+        if expected_mode == "component":
+            return
+        raise ValueError(f"{context} force target semantics mismatch")
+    if actual_mode != expected_mode or actual_definition != force_error_definition(
+        expected_mode
+    ):
+        raise ValueError(f"{context} force target semantics mismatch")
+
+
+def _verify_count_semantics(
+    counts: Mapping[str, Any], mode: ForceTargetMode, atoms: int
+) -> None:
+    actual_mode = counts.get("force_target_mode")
+    actual_targets = counts.get("force_targets")
+    if actual_mode is None and actual_targets is None and mode == "component":
+        return
+    expected_targets = atoms if mode == "atom_mean" else 3 * atoms
+    if actual_mode != mode or actual_targets != expected_targets:
+        raise ValueError("evaluation force target counts disagree with mode")
 
 
 def _verify_checkpoint(
     path: Path,
     manifest: Mapping[str, Any],
     expected_sha256: str,
+    expected_mode: ForceTargetMode,
 ) -> None:
     snapshot = load_verified_torch(
         path, expected_sha256=expected_sha256, weights_only=False
@@ -110,12 +152,14 @@ def _verify_checkpoint(
     for field in ("config_id", "cache_id", "binning_id", "model_loss_id"):
         if snapshot.get(field) != manifest.get(field):
             raise ValueError(f"checkpoint {path} {field} mismatch")
+    _verify_force_semantics(snapshot, expected_mode, context=f"checkpoint {path}")
 
 
 def _verify_predictions(
     prediction_path: Path,
     evaluation_manifest: Mapping[str, Any],
     bins: Mapping[str, Any],
+    expected_mode: ForceTargetMode,
 ) -> None:
     predictions = torch.load(
         prediction_path, map_location="cpu", weights_only=True, mmap=True
@@ -136,10 +180,13 @@ def _verify_predictions(
         "force_representatives",
         "energy_representatives",
     }
-    if set(predictions) != required:
+    semantic_fields = {"force_target_mode", "force_error_definition"}
+    actual_fields = set(predictions)
+    if actual_fields not in (required, required | semantic_fields):
         raise ValueError("test prediction fields mismatch")
-    if not all(isinstance(value, torch.Tensor) for value in predictions.values()):
+    if not all(isinstance(predictions[name], torch.Tensor) for name in required):
         raise ValueError("prediction fields must be tensors")
+    _verify_force_semantics(predictions, expected_mode, context="test predictions")
 
     force_logits = predictions["force_logits"]
     force_labels = predictions["force_labels"]
@@ -171,14 +218,19 @@ def _verify_predictions(
         for value in (force_labels, energy_labels, ids, offsets)
     ):
         raise ValueError("prediction dtype mismatch: indices must be int64")
+    expected_force_ndim = 2 if expected_mode == "atom_mean" else 3
+    expected_label_ndim = 1 if expected_mode == "atom_mean" else 2
     if (
-        force_logits.ndim != 3
-        or force_labels.ndim != 2
-        or force_labels.shape[1] != 3
-        or force_logits.shape[:2] != force_labels.shape
+        force_logits.ndim != expected_force_ndim
+        or force_labels.ndim != expected_label_ndim
         or force_observed.shape != force_labels.shape
         or force_expected.shape != force_labels.shape
     ):
+        raise ValueError("force prediction shapes are inconsistent")
+    if expected_mode == "atom_mean":
+        if force_logits.shape[0] != len(force_labels):
+            raise ValueError("force prediction shapes are inconsistent")
+    elif force_labels.shape[1:] != (3,) or force_logits.shape[:2] != force_labels.shape:
         raise ValueError("force prediction shapes are inconsistent")
     if (
         energy_logits.ndim != 2
@@ -199,12 +251,14 @@ def _verify_predictions(
     ):
         raise ValueError("test atom offset shape or values are inconsistent")
     counts = evaluation_manifest.get("test_counts")
+    atom_count = int(offsets[-1])
     if not isinstance(counts, Mapping) or (
         counts.get("structures") != len(ids)
-        or counts.get("atoms") != len(force_labels)
-        or counts.get("force_components") != force_labels.numel()
+        or counts.get("atoms") != atom_count
+        or counts.get("force_components") != 3 * atom_count
     ):
         raise ValueError("test prediction counts disagree with manifest")
+    _verify_count_semantics(counts, expected_mode, atom_count)
     if (
         force_representatives.ndim != 1
         or len(force_representatives) != force_logits.shape[-1]
@@ -251,7 +305,7 @@ def _verify_predictions(
         raise ValueError("prediction structure IDs must be unique")
     if any(
         value.is_floating_point() and not bool(torch.isfinite(value).all())
-        for value in predictions.values()
+        for value in (predictions[name] for name in required)
     ):
         raise ValueError("test predictions contain non-finite values")
     calculated_force = torch.softmax(force_logits, dim=-1) @ force_representatives
@@ -308,18 +362,20 @@ def verify_run(run_dir: Path, *, full: bool = True) -> dict[str, Any]:
     ):
         raise ValueError("run manifest schema/status/identity mismatch")
     paths = _verify_artifacts(root, manifest.get("artifacts"), full=full)
-    _verify_identity(root, manifest)
+    force_mode = _verify_identity(root, manifest)
     if full:
         artifacts = manifest["artifacts"]
         _verify_checkpoint(
             paths["checkpoints/best.pt"],
             manifest,
             str(artifacts["checkpoints/best.pt"]["sha256"]),
+            force_mode,
         )
         _verify_checkpoint(
             paths["checkpoints/last.pt"],
             manifest,
             str(artifacts["checkpoints/last.pt"]["sha256"]),
+            force_mode,
         )
     images = [
         path for path in root.rglob("*") if path.suffix.lower() in _IMAGE_SUFFIXES
@@ -343,6 +399,9 @@ def verify_run(run_dir: Path, *, full: bool = True) -> dict[str, Any]:
             or evaluation_manifest.get("cache_id") != manifest.get("cache_id")
         ):
             raise ValueError("evaluation manifest identity/status mismatch")
+        _verify_force_semantics(
+            evaluation_manifest, force_mode, context="evaluation manifest"
+        )
         checkpoint = evaluation_manifest.get("checkpoint")
         if not isinstance(checkpoint, Mapping):
             raise ValueError("evaluation checkpoint declaration is missing")
@@ -377,7 +436,10 @@ def verify_run(run_dir: Path, *, full: bool = True) -> dict[str, Any]:
         _verify_cache(manifest, counts)
         bins = _mapping(root / "binning.json")
         _verify_predictions(
-            paths["evaluation/test_predictions.pt"], evaluation_manifest, bins
+            paths["evaluation/test_predictions.pt"],
+            evaluation_manifest,
+            bins,
+            force_mode,
         )
     return {
         "status": "complete",

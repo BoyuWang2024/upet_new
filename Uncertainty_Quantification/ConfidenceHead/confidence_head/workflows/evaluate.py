@@ -29,8 +29,8 @@ from ..binning import (
 )
 from ..cache import SCHEMA_VERSION as CACHE_SCHEMA_VERSION
 from ..cache import CachedSplitDataset, collate_cached_structures
-from ..config import ConfidenceConfig
-from ..errors import energy_per_atom_error, force_component_error
+from ..config import ConfidenceConfig, ForceTargetMode
+from ..errors import energy_per_atom_error, force_error, force_error_definition
 from ..identity import cache_id
 from ..metrics import classification_metrics
 from ..model import ConfidenceModel
@@ -195,14 +195,35 @@ def _declared_artifact(run_dir: Path, manifest: Mapping[str, Any], path: Path) -
     raise ValueError("checkpoint is not declared by run manifest")
 
 
+def _validate_force_semantics(
+    payload: Mapping[str, Any], expected_mode: ForceTargetMode, *, context: str
+) -> None:
+    actual_mode = payload.get("force_target_mode")
+    actual_definition = payload.get("force_error_definition")
+    if (
+        actual_mode is None
+        and actual_definition is None
+        and expected_mode == "component"
+    ):
+        return
+    if actual_mode != expected_mode or actual_definition != force_error_definition(
+        expected_mode
+    ):
+        raise ValueError(f"{context} force target semantics mismatch")
+
+
 def _checkpoint_identity(
-    snapshot: Mapping[str, Any], manifest: Mapping[str, Any]
+    snapshot: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    expected_mode: ForceTargetMode,
 ) -> None:
     if snapshot.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
         raise ValueError("checkpoint schema mismatch")
     for field in ("config_id", "cache_id", "binning_id", "model_loss_id"):
         if snapshot.get(field) != manifest.get(field):
             raise ValueError(f"checkpoint {field} mismatch")
+    _validate_force_semantics(manifest, expected_mode, context="run manifest")
+    _validate_force_semantics(snapshot, expected_mode, context="checkpoint")
 
 
 def _evaluate_run_locked(
@@ -237,6 +258,9 @@ def _evaluate_run_locked(
     if cache_manifest.get("status") != "complete":
         raise ValueError("evaluation cache manifest must be complete")
     cache_payload = cache_manifest.get("identity_payload")
+    _validate_force_semantics(
+        manifest, config.model.force.target_mode, context="run manifest"
+    )
     if not isinstance(cache_payload, Mapping):
         raise ValueError("evaluation cache identity_payload is missing")
     derived_cache_id = cache_id(
@@ -296,7 +320,7 @@ def _evaluate_run_locked(
     )
     if not isinstance(snapshot, Mapping):
         raise ValueError("checkpoint must contain a mapping")
-    _checkpoint_identity(snapshot, manifest)
+    _checkpoint_identity(snapshot, manifest, config.model.force.target_mode)
 
     model = ConfidenceModel(
         force_input_dim=int(manifest["force_feature_dim"]),
@@ -309,6 +333,7 @@ def _evaluate_run_locked(
         energy_num_bins=config.model.energy.num_bins,
         cumulant_order=config.model.energy.cumulant_order,
         signed_root=config.model.energy.signed_root,
+        force_target_mode=config.model.force.target_mode,
     )
     model.load_state_dict(snapshot["model"])
     device = torch.device(config.run.device)
@@ -350,8 +375,10 @@ def _evaluate_run_locked(
                 batch["energy_features"],
                 batch["atom_offsets"],
             )
-            force_observed = force_component_error(
-                batch["force_prediction"], batch["force_reference"]
+            force_observed = force_error(
+                batch["force_prediction"],
+                batch["force_reference"],
+                config.model.force.target_mode,
             )
             energy_observed = energy_per_atom_error(
                 batch["energy_prediction"],
@@ -385,6 +412,10 @@ def _evaluate_run_locked(
     predictions["atom_offsets"] = _offsets(atom_counts)
     predictions["force_representatives"] = force_spec.representatives
     predictions["energy_representatives"] = energy_spec.representatives
+    predictions["force_target_mode"] = config.model.force.target_mode
+    predictions["force_error_definition"] = force_error_definition(
+        config.model.force.target_mode
+    )
     prediction_path = evaluation_dir / "test_predictions.pt"
     _assert_evaluation_write_target(
         run_dir=run_dir,
@@ -479,6 +510,10 @@ def _evaluate_run_locked(
         "identity": manifest["run_id"],
         "run_id": manifest["run_id"],
         "cache_id": cache_identity,
+        "force_target_mode": config.model.force.target_mode,
+        "force_error_definition": force_error_definition(
+            config.model.force.target_mode
+        ),
         "checkpoint": {
             "path": checkpoint_relative,
             "sha256": checkpoint_sha,
@@ -486,7 +521,9 @@ def _evaluate_run_locked(
         "test_counts": {
             "structures": len(predictions["structure_ids"]),
             "atoms": int(predictions["atom_offsets"][-1]),
-            "force_components": predictions["force_labels"].numel(),
+            "force_components": 3 * int(predictions["atom_offsets"][-1]),
+            "force_targets": predictions["force_labels"].numel(),
+            "force_target_mode": config.model.force.target_mode,
         },
         "artifacts": artifacts,
         "started_at": started_at,
