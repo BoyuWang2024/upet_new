@@ -25,8 +25,12 @@ from ..artifacts import atomic_write_json, load_verified_torch
 from ..artifacts import sha256_file as sha256_file
 from ..binning import BinningSpec, fixed_linear_binning, labels_from_thresholds
 from ..cache import CachedSplitDataset, collate_cached_structures
-from ..config import ConfidenceConfig
-from ..errors import energy_per_atom_error, force_component_error
+from ..config import ConfidenceConfig, ForceTargetMode
+from ..errors import (
+    energy_per_atom_error,
+    force_component_error,
+    force_error_definition,
+)
 from ..identity import binning_id, config_id, model_loss_id, run_id
 from ..losses import LossOutput, confidence_loss
 from ..model import ConfidenceModel
@@ -311,7 +315,11 @@ _TRAINING_ARTIFACTS = (
 )
 
 
-def _bin_payload(force: BinningSpec, energy: BinningSpec) -> dict[str, Any]:
+def _bin_payload(
+    force: BinningSpec,
+    energy: BinningSpec,
+    force_target_mode: ForceTargetMode,
+) -> dict[str, Any]:
     def branch(spec: BinningSpec) -> dict[str, Any]:
         return {
             "algorithm": spec.algorithm,
@@ -321,7 +329,15 @@ def _bin_payload(force: BinningSpec, energy: BinningSpec) -> dict[str, Any]:
             "representatives": spec.representatives.tolist(),
         }
 
-    return {"force": branch(force), "energy": branch(energy)}
+    force_payload = branch(force)
+    if force_target_mode == "atom_mean":
+        force_payload.update(
+            {
+                "target_mode": force_target_mode,
+                "error_definition": force_error_definition(force_target_mode),
+            }
+        )
+    return {"force": force_payload, "energy": branch(energy)}
 
 
 def _resolved_experiment_config(config: ConfidenceConfig) -> dict[str, Any]:
@@ -653,7 +669,7 @@ def _train_run_locked(
     energy_spec = fixed_linear_binning(
         config.model.energy.num_bins, config.binning.energy_max_error
     )
-    bins = _bin_payload(force_spec, energy_spec)
+    bins = _bin_payload(force_spec, energy_spec, config.model.force.target_mode)
     identity, run_identity, resolved = _identities(config, cache_manifest, bins)
     run_dir = _safe_run_dir(
         config.run.output_root, run_name, resume=resume_from is not None

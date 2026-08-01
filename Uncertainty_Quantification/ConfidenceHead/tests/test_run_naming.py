@@ -40,8 +40,29 @@ def _config(tmp_path: Path) -> ConfidenceConfig:
     )
 
 
-def test_run_name_encodes_branch_semantics(tmp_path: Path) -> None:
+def _with_force_mode(config: ConfidenceConfig, mode: str) -> ConfidenceConfig:
+    return config.model_copy(
+        update={
+            "model": config.model.model_copy(
+                update={
+                    "force": config.model.force.model_copy(update={"target_mode": mode})
+                }
+            )
+        }
+    )
+
+
+def test_atom_mean_run_name_encodes_target_semantics(tmp_path: Path) -> None:
     assert build_run_name(_config(tmp_path)) == (
+        "demo_fixed-linear_f3-fmax0.5-ftarget-atommean-fw1-fmlp4_"
+        "e3-emax0.3-ew1.5-emlp4-order2"
+    )
+
+
+def test_component_run_name_preserves_historical_format(tmp_path: Path) -> None:
+    component = _with_force_mode(_config(tmp_path), "component")
+
+    assert build_run_name(component) == (
         "demo_fixed-linear_f3-fmax0.5-fw1-fmlp4_e3-emax0.3-ew1.5-emlp4-order2"
     )
 

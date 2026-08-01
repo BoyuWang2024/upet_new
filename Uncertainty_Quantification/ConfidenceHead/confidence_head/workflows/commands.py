@@ -217,6 +217,7 @@ def _configured_run_manifest(
             config.model.energy.num_bins,
             config.binning.energy_max_error,
         ),
+        config.model.force.target_mode,
     )
     identity, expected_run_id, _ = _identities(config, cache_manifest, bins)
     expected = {

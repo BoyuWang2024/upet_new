@@ -129,6 +129,7 @@ def _run_manifest(
             config.model.energy.num_bins,
             config.binning.energy_max_error,
         ),
+        config.model.force.target_mode,
     )
     identity, run_identity, _ = commands._identities(
         config,

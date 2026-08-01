@@ -230,7 +230,7 @@ def _evaluate_run_locked(
     )
     force_spec, energy_spec = _specs(config)
     bins = _load_mapping(run_dir / "binning.json")
-    if bins != _bin_payload(force_spec, energy_spec):
+    if bins != _bin_payload(force_spec, energy_spec, config.model.force.target_mode):
         raise ValueError("binning artifact identity disagrees with resolved config")
     cache_path = Path(cache_manifest_path).resolve()
     cache_manifest = _load_mapping(cache_path)

@@ -38,6 +38,30 @@ train_run = train_module.train_run
 commands_module = import_module(f"{_WORKFLOWS}.commands")
 
 
+def test_force_target_modes_share_thresholds_but_not_binning_identity() -> None:
+    force = train_module.fixed_linear_binning(5, 0.5)
+    energy = train_module.fixed_linear_binning(7, 0.3)
+
+    component = train_module._bin_payload(force, energy, "component")
+    atom_mean = train_module._bin_payload(force, energy, "atom_mean")
+
+    assert component["force"] == {
+        "algorithm": "fixed_linear_v1",
+        "num_bins": 5,
+        "max_error": 0.5,
+        "thresholds": force.thresholds.tolist(),
+        "representatives": force.representatives.tolist(),
+    }
+    assert "target_mode" not in component["force"]
+    assert atom_mean["force"] == {
+        **component["force"],
+        "target_mode": "atom_mean",
+        "error_definition": "abs_cartesian_component_mean_v1",
+    }
+    assert component["energy"] == atom_mean["energy"]
+    assert train_module.binning_id(component) != train_module.binning_id(atom_mean)
+
+
 def _structure(
     structure_id: int,
     num_atoms: int,

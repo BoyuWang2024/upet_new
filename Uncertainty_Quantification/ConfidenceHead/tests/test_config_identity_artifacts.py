@@ -22,6 +22,7 @@ from Uncertainty_Quantification.ConfidenceHead.confidence_head.config import (
 )
 from Uncertainty_Quantification.ConfidenceHead.confidence_head.identity import (
     config_id,
+    model_loss_id,
     stable_id,
 )
 
@@ -189,6 +190,36 @@ def test_config_id_accepts_resolved_config_paths(tmp_path: Path) -> None:
 
     assert first == second
     assert first.startswith("config-")
+
+
+def test_explicit_component_identity_matches_historical_missing_mode() -> None:
+    legacy = {
+        "model": {"force": {"num_bins": 50}},
+        "loss": {"force_coefficient": 1.0},
+    }
+    explicit_component = json.loads(json.dumps(legacy))
+    explicit_component["model"]["force"]["target_mode"] = "component"
+
+    assert config_id(explicit_component) == config_id(legacy)
+    assert model_loss_id(explicit_component) == model_loss_id(legacy)
+
+
+def test_atom_mean_identity_differs_from_component() -> None:
+    component = {
+        "model": {
+            "force": {"num_bins": 50, "target_mode": "component"},
+        },
+        "loss": {"force_coefficient": 1.0},
+    }
+    atom_mean = {
+        "model": {
+            "force": {"num_bins": 50, "target_mode": "atom_mean"},
+        },
+        "loss": {"force_coefficient": 1.0},
+    }
+
+    assert config_id(atom_mean) != config_id(component)
+    assert model_loss_id(atom_mean) != model_loss_id(component)
 
 
 def test_stable_id_ignores_mapping_order() -> None:

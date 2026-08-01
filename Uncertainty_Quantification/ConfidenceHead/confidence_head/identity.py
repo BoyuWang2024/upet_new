@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from collections.abc import Mapping
@@ -35,8 +36,19 @@ def stable_id(namespace: str, payload: Mapping[str, Any]) -> str:
     return f"{namespace}-{digest[:16]}"
 
 
+def _legacy_component_identity_payload(
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    normalized = copy.deepcopy(dict(payload))
+    model = normalized.get("model")
+    force = model.get("force") if isinstance(model, dict) else None
+    if isinstance(force, dict) and force.get("target_mode") == "component":
+        force.pop("target_mode")
+    return normalized
+
+
 def config_id(payload: Mapping[str, Any]) -> str:
-    return stable_id("config", payload)
+    return stable_id("config", _legacy_component_identity_payload(payload))
 
 
 def cache_id(payload: Mapping[str, Any]) -> str:
@@ -48,7 +60,7 @@ def binning_id(payload: Mapping[str, Any]) -> str:
 
 
 def model_loss_id(payload: Mapping[str, Any]) -> str:
-    return stable_id("model-loss", payload)
+    return stable_id("model-loss", _legacy_component_identity_payload(payload))
 
 
 def run_id(payload: Mapping[str, Any]) -> str:

@@ -25,10 +25,14 @@ def _hidden_dims(dimensions: tuple[int, ...]) -> str:
 def build_run_name(config: ConfidenceConfig) -> str:
     """Build a filesystem-safe name that captures both confidence branches."""
     algorithm = config.binning.algorithm.removesuffix("_v1").replace("_", "-")
+    force_target_tag = (
+        "-ftarget-atommean" if config.model.force.target_mode == "atom_mean" else ""
+    )
     name = (
         f"{config.run.name_prefix}_{algorithm}_"
         f"f{config.model.force.num_bins}"
         f"-fmax{_number(config.binning.force_max_error)}"
+        f"{force_target_tag}"
         f"-fw{_number(config.loss.force_coefficient)}"
         f"-fmlp{_hidden_dims(config.model.force.hidden_dims)}_"
         f"e{config.model.energy.num_bins}"
