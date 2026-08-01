@@ -51,6 +51,8 @@ class TrainingIdentity:
     cache_id: str
     binning_id: str
     model_loss_id: str
+    force_target_mode: str
+    force_error_definition: str
 
 
 @dataclass(frozen=True)
@@ -275,6 +277,8 @@ def capture_training_snapshot(
         "cache_id": identity.cache_id,
         "binning_id": identity.binning_id,
         "model_loss_id": identity.model_loss_id,
+        "force_target_mode": identity.force_target_mode,
+        "force_error_definition": identity.force_error_definition,
     }
 
 
@@ -289,6 +293,22 @@ def _require_snapshot_identity(
         "model_loss_id",
     ):
         actual_value = snapshot.get(field)
+        expected_value = getattr(expected, field)
+        if actual_value != expected_value:
+            raise ValueError(
+                f"{field} mismatch: {actual_value!r} != {expected_value!r}"
+            )
+
+    actual_semantics = {
+        "force_target_mode": snapshot.get("force_target_mode"),
+        "force_error_definition": snapshot.get("force_error_definition"),
+    }
+    if all(value is None for value in actual_semantics.values()):
+        if expected.force_target_mode != "component":
+            raise ValueError("checkpoint force target semantics mismatch")
+        return
+
+    for field, actual_value in actual_semantics.items():
         expected_value = getattr(expected, field)
         if actual_value != expected_value:
             raise ValueError(

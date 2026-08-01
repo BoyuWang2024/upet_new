@@ -30,6 +30,8 @@ def _identity(**overrides: str) -> TrainingIdentity:
         "cache_id": "cache-123",
         "binning_id": "binning-123",
         "model_loss_id": "model-loss-123",
+        "force_target_mode": "atom_mean",
+        "force_error_definition": "abs_cartesian_component_mean_v1",
     }
     values.update(overrides)
     return TrainingIdentity(**values)
@@ -105,6 +107,8 @@ def test_public_state_dataclasses_have_the_exact_control_fields() -> None:
         "cache_id",
         "binning_id",
         "model_loss_id",
+        "force_target_mode",
+        "force_error_definition",
     ]
 
 
@@ -363,7 +367,11 @@ def test_snapshot_contains_complete_training_and_reproducibility_state() -> None
         "cache_id",
         "binning_id",
         "model_loss_id",
+        "force_target_mode",
+        "force_error_definition",
     }
+    assert snapshot["force_target_mode"] == "atom_mean"
+    assert snapshot["force_error_definition"] == "abs_cartesian_component_mean_v1"
     assert snapshot["schema_version"] == CHECKPOINT_SCHEMA_VERSION
     assert snapshot["epoch"] == 5
     assert snapshot["global_step"] == 19
@@ -444,6 +452,8 @@ def test_restore_is_exact_and_resumes_at_the_next_epoch() -> None:
 @pytest.mark.parametrize(
     ("field", "wrong"),
     [
+        ("force_target_mode", "component"),
+        ("force_error_definition", "abs_cartesian_component_v1"),
         ("config_id", "config-wrong"),
         ("cache_id", "cache-wrong"),
         ("binning_id", "binning-wrong"),
@@ -475,6 +485,49 @@ def test_resume_rejects_each_upstream_identity_mismatch(
             optimizer=optimizer,
             scheduler=scheduler,
             expected_identity=_identity(**{field: wrong}),
+            sampler_generator=sampler,
+        )
+
+
+def test_legacy_checkpoint_without_force_semantics_is_component_only() -> None:
+    model, optimizer, scheduler = _model_optimizer_scheduler()
+    sampler = torch.Generator().manual_seed(1)
+    component_identity = _identity(
+        force_target_mode="component",
+        force_error_definition="abs_cartesian_component_v1",
+    )
+    snapshot = capture_training_snapshot(
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        epoch=0,
+        global_step=0,
+        control_state=EarlyStoppingState(),
+        best_step=None,
+        identity=component_identity,
+        sampler_generator=sampler,
+    )
+    snapshot.pop("force_target_mode")
+    snapshot.pop("force_error_definition")
+
+    restored = restore_training_snapshot(
+        snapshot=snapshot,
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        expected_identity=component_identity,
+        sampler_generator=sampler,
+    )
+    assert restored.next_epoch == 1
+
+    atom_mean_identity = _identity()
+    with pytest.raises(ValueError, match="force target semantics"):
+        restore_training_snapshot(
+            snapshot=snapshot,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            expected_identity=atom_mean_identity,
             sampler_generator=sampler,
         )
 

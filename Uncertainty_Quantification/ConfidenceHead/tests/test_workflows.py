@@ -344,6 +344,34 @@ def test_config_entrypoints_reject_run_name_collisions_before_writing(
         assert not (run_dir / "evaluation").exists()
 
 
+def test_training_persists_atom_mean_force_semantics(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+) -> None:
+    run_dir = train_run(
+        config,
+        cache_manifest_path=complete_cache,
+        run_name="atom-mean-training-metadata",
+    )
+
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    snapshot = torch.load(
+        run_dir / "checkpoints" / "best.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+    assert manifest["force_target_mode"] == "atom_mean"
+    assert manifest["force_error_definition"] == ("abs_cartesian_component_mean_v1")
+    assert snapshot["force_target_mode"] == "atom_mean"
+    assert snapshot["force_error_definition"] == ("abs_cartesian_component_mean_v1")
+    records = [
+        json.loads(line)
+        for line in (run_dir / "logs/metrics.jsonl").read_text().splitlines()
+    ]
+    assert records
+    assert all("val/total_loss_ema" in record for record in records)
+
+
 def test_train_evaluate_and_verify_synthetic_complete_cache(
     tmp_path: Path,
     config: ConfidenceConfig,

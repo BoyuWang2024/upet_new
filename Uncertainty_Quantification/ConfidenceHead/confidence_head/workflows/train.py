@@ -28,7 +28,7 @@ from ..cache import CachedSplitDataset, collate_cached_structures
 from ..config import ConfidenceConfig, ForceTargetMode
 from ..errors import (
     energy_per_atom_error,
-    force_component_error,
+    force_error,
     force_error_definition,
 )
 from ..identity import binning_id, config_id, model_loss_id, run_id
@@ -367,6 +367,8 @@ def _identities(
         cache_id=str(cache_manifest["cache_id"]),
         binning_id=bin_identity,
         model_loss_id=model_identity,
+        force_target_mode=config.model.force.target_mode,
+        force_error_definition=force_error_definition(config.model.force.target_mode),
     )
     run_identity = run_id(
         {
@@ -410,8 +412,10 @@ def _batch_loss(
     energy_spec: BinningSpec,
     config: ConfidenceConfig,
 ) -> LossOutput:
-    force_observed = force_component_error(
-        batch["force_prediction"], batch["force_reference"]
+    force_observed = force_error(
+        batch["force_prediction"],
+        batch["force_reference"],
+        config.model.force.target_mode,
     )
     energy_observed = energy_per_atom_error(
         batch["energy_prediction"],
@@ -431,6 +435,7 @@ def _batch_loss(
         output.energy_logits,
         energy_labels,
         force_weight=config.loss.force_coefficient,
+        force_target_mode=config.model.force.target_mode,
         energy_weight=config.loss.energy_coefficient,
     )
 
@@ -690,6 +695,8 @@ def _train_run_locked(
         "binning_id": identity.binning_id,
         "model_loss_id": identity.model_loss_id,
         "profile": config.profile,
+        "force_target_mode": identity.force_target_mode,
+        "force_error_definition": identity.force_error_definition,
         "cache_manifest": str(cache_path),
         "readouts": resolved["readouts"],
         "execution": resolved["run"],
@@ -813,6 +820,7 @@ def _train_run_locked(
         energy_num_bins=config.model.energy.num_bins,
         cumulant_order=config.model.energy.cumulant_order,
         signed_root=config.model.energy.signed_root,
+        force_target_mode=config.model.force.target_mode,
     ).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
