@@ -14,6 +14,7 @@ from yaml.resolver import BaseResolver
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 Profile = Literal["smoke", "production"]
+ForceTargetMode = Literal["atom_mean", "component"]
 
 
 class UniqueKeySafeLoader(yaml.SafeLoader):
@@ -123,8 +124,12 @@ class EnergyModelConfig(BranchModelConfig):
     signed_root: bool = True
 
 
+class ForceModelConfig(BranchModelConfig):
+    target_mode: ForceTargetMode = "atom_mean"
+
+
 class ModelConfig(StrictModel):
-    force: BranchModelConfig = Field(default_factory=BranchModelConfig)
+    force: ForceModelConfig = Field(default_factory=ForceModelConfig)
     energy: EnergyModelConfig = Field(default_factory=EnergyModelConfig)
 
 

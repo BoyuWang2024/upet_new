@@ -3,6 +3,9 @@ from __future__ import annotations
 import pytest
 import torch
 
+from Uncertainty_Quantification.ConfidenceHead.confidence_head import (
+    errors as errors_module,
+)
 from Uncertainty_Quantification.ConfidenceHead.confidence_head.binning import (
     expected_error,
     fixed_linear_binning,
@@ -21,6 +24,39 @@ def test_force_component_error_preserves_components() -> None:
     error = force_component_error(prediction, reference)
 
     torch.testing.assert_close(error, torch.tensor([[1.0, 3.0, 2.0]]))
+
+
+def test_atom_mean_force_error_is_arithmetic_mean_of_absolute_components() -> None:
+    prediction = torch.tensor([[3.0, -4.0, 12.0], [1.0, 2.0, 3.0]])
+    reference = torch.tensor([[0.0, 0.0, 0.0], [2.0, 0.0, 6.0]])
+
+    result = errors_module.force_error(prediction, reference, "atom_mean")
+
+    torch.testing.assert_close(result, torch.tensor([19.0 / 3.0, 2.0]))
+    assert result.shape == (2,)
+
+
+def test_mode_aware_component_force_error_preserves_three_targets() -> None:
+    prediction = torch.tensor([[1.0, -2.0, 3.0]])
+    reference = torch.zeros_like(prediction)
+
+    result = errors_module.force_error(prediction, reference, "component")
+
+    torch.testing.assert_close(result, torch.tensor([[1.0, 2.0, 3.0]]))
+
+
+@pytest.mark.parametrize(
+    ("mode", "definition"),
+    [
+        ("atom_mean", "abs_cartesian_component_mean_v1"),
+        ("component", "abs_cartesian_component_v1"),
+    ],
+)
+def test_force_error_definition_is_bound_to_target_mode(
+    mode: str,
+    definition: str,
+) -> None:
+    assert errors_module.force_error_definition(mode) == definition
 
 
 def test_energy_error_is_normalized_per_atom() -> None:

@@ -6,6 +6,7 @@ import torch
 from torch import nn
 
 from .adapters import LocalToGlobalCumulantAdapter
+from .config import ForceTargetMode
 from .heads import ComponentConfidenceHead, ConfidenceHead
 
 
@@ -30,11 +31,18 @@ class ConfidenceModel(nn.Module):
         energy_num_bins: int,
         cumulant_order: int,
         signed_root: bool,
+        force_target_mode: ForceTargetMode,
     ) -> None:
         super().__init__()
         self.force_input_dim = force_input_dim
         self.energy_input_dim = energy_input_dim
-        self.force_head = ComponentConfidenceHead(
+        self.force_target_mode = force_target_mode
+        force_head_type = (
+            ConfidenceHead
+            if force_target_mode == "atom_mean"
+            else ComponentConfidenceHead
+        )
+        self.force_head = force_head_type(
             force_input_dim,
             force_hidden_dims,
             force_dropout,

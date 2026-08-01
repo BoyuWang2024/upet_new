@@ -3,8 +3,10 @@ from __future__ import annotations
 import torch
 from torch import Tensor
 
+from .config import ForceTargetMode
 
-def force_component_error(prediction: Tensor, reference: Tensor) -> Tensor:
+
+def _validate_force_tensors(prediction: Tensor, reference: Tensor) -> None:
     if (
         prediction.shape != reference.shape
         or prediction.ndim != 2
@@ -14,7 +16,31 @@ def force_component_error(prediction: Tensor, reference: Tensor) -> Tensor:
     if not torch.isfinite(prediction).all() or not torch.isfinite(reference).all():
         raise ValueError("force tensors must contain only finite values")
 
-    return torch.abs(prediction - reference)
+
+def force_error(
+    prediction: Tensor,
+    reference: Tensor,
+    target_mode: ForceTargetMode,
+) -> Tensor:
+    _validate_force_tensors(prediction, reference)
+    component_errors = torch.abs(prediction - reference)
+    if target_mode == "component":
+        return component_errors
+    if target_mode == "atom_mean":
+        return component_errors.mean(dim=-1)
+    raise ValueError(f"unsupported force target mode: {target_mode!r}")
+
+
+def force_error_definition(target_mode: ForceTargetMode) -> str:
+    if target_mode == "component":
+        return "abs_cartesian_component_v1"
+    if target_mode == "atom_mean":
+        return "abs_cartesian_component_mean_v1"
+    raise ValueError(f"unsupported force target mode: {target_mode!r}")
+
+
+def force_component_error(prediction: Tensor, reference: Tensor) -> Tensor:
+    return force_error(prediction, reference, "component")
 
 
 def energy_per_atom_error(

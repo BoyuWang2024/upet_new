@@ -94,6 +94,24 @@ def test_unknown_config_key_is_rejected(tmp_path: Path) -> None:
         ConfidenceConfig.model_validate(raw)
 
 
+def test_force_target_mode_defaults_to_atom_mean(tmp_path: Path) -> None:
+    config = ConfidenceConfig.model_validate(_valid_config(tmp_path))
+
+    assert config.model.force.target_mode == "atom_mean"
+
+
+@pytest.mark.parametrize("mode", ["norm", "rms", "mean"])
+def test_force_target_mode_rejects_unknown_values(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    raw = _valid_config(tmp_path)
+    raw["model"] = {"force": {"target_mode": mode}}
+
+    with pytest.raises(ValidationError, match="target_mode"):
+        ConfidenceConfig.model_validate(raw)
+
+
 def test_paths_resolve_from_repo_root_not_cwd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

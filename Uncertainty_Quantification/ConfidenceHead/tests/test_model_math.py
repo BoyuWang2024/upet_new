@@ -33,6 +33,7 @@ def test_model_uses_strictly_separate_force_and_energy_readouts() -> None:
         energy_num_bins=17,
         cumulant_order=1,
         signed_root=True,
+        force_target_mode="component",
     )
     assert model.force_head.heads[0].network[0].out_features == 7
     assert model.energy_head.network[0].out_features == 11
@@ -59,6 +60,41 @@ def test_model_uses_strictly_separate_force_and_energy_readouts() -> None:
         energy_head_inputs[0],
         torch.full((2, 2), 7.0),
     )
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_shape", "head_type"),
+    [
+        ("atom_mean", (3, 5), ConfidenceHead),
+        ("component", (3, 3, 5), ComponentConfidenceHead),
+    ],
+)
+def test_model_selects_force_head_from_explicit_mode(
+    mode: str,
+    expected_shape: tuple[int, ...],
+    head_type: type[torch.nn.Module],
+) -> None:
+    model = ConfidenceModel(
+        force_input_dim=2,
+        energy_input_dim=2,
+        force_hidden_dims=(4,),
+        energy_hidden_dims=(4,),
+        force_dropout=0.0,
+        energy_dropout=0.0,
+        force_num_bins=5,
+        energy_num_bins=7,
+        cumulant_order=1,
+        signed_root=True,
+        force_target_mode=mode,
+    )
+
+    assert isinstance(model.force_head, head_type)
+    output = model(
+        torch.zeros(3, 2),
+        torch.ones(3, 2),
+        torch.tensor([0, 3]),
+    )
+    assert output.force_logits.shape == expected_shape
 
 
 @pytest.mark.parametrize(
@@ -189,6 +225,7 @@ def test_model_rejects_invalid_readout_feature_shapes(
         energy_num_bins=5,
         cumulant_order=1,
         signed_root=True,
+        force_target_mode="component",
     )
 
     with pytest.raises(ValueError, match="features"):
@@ -211,6 +248,7 @@ def test_confidence_loss_flattens_force_components_and_weights_means() -> None:
         force_labels,
         energy_logits,
         energy_labels,
+        force_target_mode="component",
     )
 
     expected_force = F.cross_entropy(
@@ -228,6 +266,62 @@ def test_confidence_loss_flattens_force_components_and_weights_means() -> None:
     assert result.energy_count == energy_labels.numel()
 
 
+def test_atom_mean_loss_counts_atoms_and_keeps_supervised_total() -> None:
+    force_logits = torch.tensor([[2.0, 0.0], [0.0, 2.0]])
+    force_labels = torch.tensor([0, 1])
+    energy_logits = torch.tensor([[2.0, 0.0]])
+    energy_labels = torch.tensor([1])
+
+    result = confidence_loss(
+        force_logits,
+        force_labels,
+        energy_logits,
+        energy_labels,
+        force_target_mode="atom_mean",
+    )
+
+    expected_force = F.cross_entropy(force_logits, force_labels)
+    expected_energy = F.cross_entropy(energy_logits, energy_labels)
+    torch.testing.assert_close(result.force, expected_force)
+    torch.testing.assert_close(result.energy, expected_energy)
+    torch.testing.assert_close(
+        result.total,
+        expected_force + 1.5 * expected_energy,
+    )
+    assert result.force_count == 2
+    assert result.energy_count == 1
+
+
+@pytest.mark.parametrize(
+    ("mode", "force_logits", "force_labels"),
+    [
+        (
+            "atom_mean",
+            torch.zeros(2, 3, 4),
+            torch.zeros(2, 3, dtype=torch.long),
+        ),
+        (
+            "component",
+            torch.zeros(2, 4),
+            torch.zeros(2, dtype=torch.long),
+        ),
+    ],
+)
+def test_confidence_loss_rejects_force_shape_from_other_mode(
+    mode: str,
+    force_logits: torch.Tensor,
+    force_labels: torch.Tensor,
+) -> None:
+    with pytest.raises(ValueError, match="force"):
+        confidence_loss(
+            force_logits,
+            force_labels,
+            torch.zeros(1, 4),
+            torch.zeros(1, dtype=torch.long),
+            force_target_mode=mode,
+        )
+
+
 def test_confidence_loss_accepts_independent_branch_bin_counts() -> None:
     force_logits = torch.zeros(2, 3, 4)
     force_labels = torch.zeros(2, 3, dtype=torch.long)
@@ -239,6 +333,7 @@ def test_confidence_loss_accepts_independent_branch_bin_counts() -> None:
         force_labels,
         energy_logits,
         energy_labels,
+        force_target_mode="component",
     )
 
     assert result.force_count == force_labels.numel()
@@ -304,4 +399,5 @@ def test_confidence_loss_rejects_invalid_tensor_contracts(
             force_labels,
             energy_logits,
             energy_labels,
+            force_target_mode="component",
         )
