@@ -8,12 +8,14 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from Uncertainty_Quantification.ConfidenceHead.confidence_head.cache import (
     SCHEMA_VERSION,
 )
 from Uncertainty_Quantification.ConfidenceHead.confidence_head.config import (
     ConfidenceConfig,
+    load_config,
 )
 from Uncertainty_Quantification.ConfidenceHead.confidence_head.identity import cache_id
 from Uncertainty_Quantification.ConfidenceHead.confidence_head.run_naming import (
@@ -22,7 +24,27 @@ from Uncertainty_Quantification.ConfidenceHead.confidence_head.run_naming import
 from Uncertainty_Quantification.ConfidenceHead.confidence_head.workflows import commands
 
 
+CONFIGS = Path(__file__).resolve().parents[1] / "configs"
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["n20_local_cpu.yaml", "n20_cpu.yaml", "full_gpu.yaml"],
+)
+def test_shipped_configs_explicitly_select_atom_mean(name: str) -> None:
+    path = CONFIGS / name
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    assert raw["model"]["force"]["target_mode"] == "atom_mean"
+    config = load_config(path)
+    assert config.model.force.target_mode == "atom_mean"
+    assert config.binning.force_max_error == 0.5
+    assert config.binning.energy_max_error == 0.3
+    assert config.loss.force_coefficient == 1.0
+    assert config.loss.energy_coefficient == 1.5
+    assert config.scheduler.monitor == "val/total_loss_ema"
+    assert config.trainer.monitor == "val/total_loss_ema"
 
 
 def _load_script(name: str):

@@ -25,6 +25,7 @@ binning:
 model:
   force:
     enabled: true
+    target_mode: atom_mean
     hidden_dims: [16]
     dropout: 0.0
     num_bins: 50

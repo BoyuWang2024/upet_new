@@ -50,4 +50,40 @@ trainer:
 
 恢复路径必须位于该配置派生的 run 目录内，否则训练会拒绝执行，以免串用其他实验的检查点。
 
-Task 5 实现阶段未执行动态 n20/W&B 任务；Task 6 将在本地、Task 7 将在远端实际执行 n20 CPU 与 W&B offline 的全链路冒烟验证。仍不执行 full GPU 训练或绘图步骤；请使用 JSONL、评估输出或 W&B 记录进行后续分析。
+本地只执行静态与单元验证；n20 CPU 全链路在远端执行。当前流程不执行 full GPU 训练或绘图步骤；后续分析使用 JSONL、评估输出或 W&B 记录。
+
+## 力与能量的监督目标
+
+三套发布配置都明确使用逐原子力均值模式：
+
+~~~yaml
+model:
+  force:
+    target_mode: atom_mean
+~~~
+
+`atom_mean` 对每个原子的三个笛卡尔分量误差先取绝对值，再取算术平均：
+
+~~~text
+force_error_i = mean(abs(force_prediction_i - force_reference_i), dim=-1)
+~~~
+
+它不是力矢量范数、RMS、最大分量或概率平均。对于 `N` 个原子和 `B` 个力分箱，力 logits、labels 和 observed errors 的形状分别是 `[N, B]`、`[N]` 和 `[N]`。评估清单中的 `force_components=3N` 始终表示原始缓存的笛卡尔分量数，`force_targets=N` 表示实际参与监督和指标计算的逐原子目标数。
+
+能量误差保持逐原子定义：
+
+~~~text
+energy_error_s = abs(energy_prediction_s - energy_reference_s) / num_atoms_s
+~~~
+
+UPET 的两条读出保持独立：力头只接收 `force_features`，能量头只接收 `energy_features`，不会互换或共享输入张量。
+
+如需复现实验兼容的逐分量目标，可显式设置 `target_mode: component`。此时力 logits/labels/errors 的形状是 `[N, 3, B]`、`[N, 3]`、`[N, 3]`，`force_targets=3N`。缺少力目标元数据的历史 checkpoint、预测文件或评估清单只会按 `component` 解释；它们不能作为 `atom_mean` 产物使用。`atom_mean` 运行名带有 `-ftarget-atommean`，显式 `component` 保留历史运行名格式。
+
+固定线性分箱仍通过 YAML 调整，当前发布配置默认力上限为 `0.5`、逐原子能量上限为 `0.3`，分箱数为 `50`。监督总损失默认保持：
+
+~~~text
+total_loss = 1.0 * force_loss + 1.5 * energy_loss
+~~~
+
+学习率调度、最佳 checkpoint、EMA 与 early stopping 都只监控 `val/total_loss_ema`。改变力目标模式不会改变这套 early-stopping 逻辑。
