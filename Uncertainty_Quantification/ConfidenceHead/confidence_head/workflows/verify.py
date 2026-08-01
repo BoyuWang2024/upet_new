@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import torch
 import yaml
@@ -71,7 +71,7 @@ def _verify_artifacts(root: Path, artifacts: Any, *, full: bool) -> dict[str, Pa
     return paths
 
 
-def _verify_identity(root: Path, manifest: Mapping[str, Any]) -> str:
+def _verify_identity(root: Path, manifest: Mapping[str, Any]) -> ForceTargetMode:
     resolved = _yaml_mapping(root / "resolved_config.yaml")
     bins = _mapping(root / "binning.json")
     expected_config_id = config_id(resolved)
@@ -99,9 +99,10 @@ def _verify_identity(root: Path, manifest: Mapping[str, Any]) -> str:
     force = model.get("force") if isinstance(model, Mapping) else None
     if not isinstance(force, Mapping):
         raise ValueError("resolved force model configuration is invalid")
-    mode = force.get("target_mode", "component")
-    if mode not in ("atom_mean", "component"):
+    raw_mode = force.get("target_mode", "component")
+    if raw_mode not in ("atom_mean", "component"):
         raise ValueError("resolved force target mode is invalid")
+    mode = cast(ForceTargetMode, raw_mode)
     _verify_force_semantics(manifest, mode, context="run manifest")
     return mode
 
