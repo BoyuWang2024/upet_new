@@ -134,10 +134,16 @@ class ModelConfig(StrictModel):
 
 
 class LossConfig(StrictModel):
-    force_coefficient: float = Field(default=1.0, gt=0, allow_inf_nan=False)
-    energy_coefficient: float = Field(default=1.5, gt=0, allow_inf_nan=False)
+    force_coefficient: float = Field(default=1.0, ge=0, allow_inf_nan=False)
+    energy_coefficient: float = Field(default=1.5, ge=0, allow_inf_nan=False)
     label_smoothing: Literal[0] = 0
     class_weights: None = None
+
+    @model_validator(mode="after")
+    def validate_nonzero_objective(self) -> "LossConfig":
+        if self.force_coefficient == 0 and self.energy_coefficient == 0:
+            raise ValueError("at least one loss coefficient must be positive")
+        return self
 
 
 class OptimizerConfig(StrictModel):

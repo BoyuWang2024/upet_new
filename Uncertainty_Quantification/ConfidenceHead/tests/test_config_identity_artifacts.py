@@ -314,6 +314,45 @@ def test_config_exposes_independent_heads_scheduler_batch_and_logging(
 
 
 @pytest.mark.parametrize(
+    ("force_coefficient", "energy_coefficient"),
+    [(1.0, 0.0), (0.0, 1.0)],
+)
+def test_config_accepts_single_branch_loss(
+    tmp_path: Path,
+    force_coefficient: float,
+    energy_coefficient: float,
+) -> None:
+    raw = _valid_config(tmp_path)
+    raw["loss"] = {
+        "force_coefficient": force_coefficient,
+        "energy_coefficient": energy_coefficient,
+    }
+
+    config = ConfidenceConfig.model_validate(raw)
+
+    assert config.loss.force_coefficient == force_coefficient
+    assert config.loss.energy_coefficient == energy_coefficient
+
+
+def test_config_rejects_all_zero_loss(tmp_path: Path) -> None:
+    raw = _valid_config(tmp_path)
+    raw["loss"] = {"force_coefficient": 0.0, "energy_coefficient": 0.0}
+
+    with pytest.raises(ValidationError, match="at least one loss coefficient"):
+        ConfidenceConfig.model_validate(raw)
+
+
+@pytest.mark.parametrize("field", ["force_coefficient", "energy_coefficient"])
+def test_config_rejects_negative_loss_coefficient(tmp_path: Path, field: str) -> None:
+    raw = _valid_config(tmp_path)
+    raw["loss"] = {"force_coefficient": 1.0, "energy_coefficient": 1.0}
+    raw["loss"][field] = -0.1
+
+    with pytest.raises(ValidationError, match=field):
+        ConfidenceConfig.model_validate(raw)
+
+
+@pytest.mark.parametrize(
     ("section", "value", "match"),
     [
         ("run", {"name_prefix": "../unsafe"}, "name_prefix"),
