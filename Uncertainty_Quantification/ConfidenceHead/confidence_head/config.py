@@ -106,7 +106,7 @@ class BinningConfig(StrictModel):
 
 
 class BranchModelConfig(StrictModel):
-    enabled: Literal[True] = True
+    enabled: bool = True
     hidden_dims: tuple[int, ...] = (256, 256, 256)
     dropout: float = Field(default=0.0, ge=0, lt=1, allow_inf_nan=False)
     num_bins: int = Field(default=50, ge=3)
@@ -165,6 +165,12 @@ class SchedulerConfig(StrictModel):
 
 class TrainerConfig(StrictModel):
     batch_size: int = Field(default=32, gt=0)
+    num_workers: int | None = Field(default=None, ge=0)
+    max_atoms_per_batch: int | None = Field(default=None, gt=0)
+    min_atoms_per_batch: int = Field(default=0, ge=0)
+    pin_memory: bool = True
+    persistent_workers: bool = True
+    grad_clip_norm: float | None = Field(default=1.0, gt=0, allow_inf_nan=False)
     max_epochs: int = Field(default=200, gt=0)
     ema_beta: float = Field(default=0.95, ge=0, lt=1, allow_inf_nan=False)
     early_stopping_patience: int = Field(default=15, gt=0)
@@ -172,6 +178,15 @@ class TrainerConfig(StrictModel):
     min_epochs: int = Field(default=3, gt=0)
     monitor: Literal["val/total_loss_ema"] = "val/total_loss_ema"
     resume_from: Path | None = None
+
+    @model_validator(mode="after")
+    def validate_atom_batch_bounds(self) -> "TrainerConfig":
+        if (
+            self.max_atoms_per_batch is not None
+            and self.min_atoms_per_batch > self.max_atoms_per_batch
+        ):
+            raise ValueError("min_atoms_per_batch must not exceed max_atoms_per_batch")
+        return self
 
 
 class RunConfig(StrictModel):
@@ -196,6 +211,7 @@ class LoggingConfig(StrictModel):
     wandb: bool = True
     wandb_mode: Literal["offline", "online"] = "offline"
     wandb_project: str = Field(default="upet-confidence-head", min_length=1)
+    log_interval_steps: int = Field(default=100, gt=0)
 
 
 class ConfidenceConfig(StrictModel):
@@ -230,6 +246,18 @@ class ConfidenceConfig(StrictModel):
         elif not identities_are_distinct and not self.allow_identical_splits:
             raise ValueError(
                 "identical smoke splits require allow_identical_splits=true"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_active_targets(self) -> "ConfidenceConfig":
+        if not self.model.force.enabled and self.loss.force_coefficient > 0:
+            raise ValueError(
+                "force target is disabled but force_coefficient is positive"
+            )
+        if not self.model.energy.enabled and self.loss.energy_coefficient > 0:
+            raise ValueError(
+                "energy target is disabled but energy_coefficient is positive"
             )
         return self
 

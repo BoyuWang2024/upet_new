@@ -101,6 +101,53 @@ def test_force_target_mode_defaults_to_atom_mean(tmp_path: Path) -> None:
     assert config.model.force.target_mode == "atom_mean"
 
 
+def test_memmap_runtime_options_have_metatrain_style_defaults(tmp_path: Path) -> None:
+    config = ConfidenceConfig.model_validate(_valid_config(tmp_path))
+
+    assert config.trainer.num_workers is None
+    assert config.trainer.max_atoms_per_batch is None
+    assert config.trainer.min_atoms_per_batch == 0
+    assert config.trainer.pin_memory is True
+    assert config.trainer.persistent_workers is True
+    assert config.trainer.grad_clip_norm == 1.0
+    assert config.logging.log_interval_steps == 100
+
+
+def test_atom_batch_minimum_cannot_exceed_maximum(tmp_path: Path) -> None:
+    raw = _valid_config(tmp_path)
+    raw["trainer"] = {
+        "max_atoms_per_batch": 10,
+        "min_atoms_per_batch": 11,
+    }
+
+    with pytest.raises(ValidationError, match="min_atoms_per_batch"):
+        ConfidenceConfig.model_validate(raw)
+
+
+@pytest.mark.parametrize(
+    ("branch", "force_coefficient", "energy_coefficient"),
+    [
+        ("force", 1.0, 0.0),
+        ("energy", 0.0, 1.0),
+    ],
+)
+def test_positive_loss_coefficient_rejects_disabled_branch(
+    tmp_path: Path,
+    branch: str,
+    force_coefficient: float,
+    energy_coefficient: float,
+) -> None:
+    raw = _valid_config(tmp_path)
+    raw["model"] = {branch: {"enabled": False}}
+    raw["loss"] = {
+        "force_coefficient": force_coefficient,
+        "energy_coefficient": energy_coefficient,
+    }
+
+    with pytest.raises(ValidationError, match=f"{branch}.*disabled"):
+        ConfidenceConfig.model_validate(raw)
+
+
 @pytest.mark.parametrize("mode", ["norm", "rms", "mean"])
 def test_force_target_mode_rejects_unknown_values(
     tmp_path: Path,
