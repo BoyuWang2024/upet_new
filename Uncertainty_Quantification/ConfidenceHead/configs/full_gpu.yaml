@@ -59,6 +59,11 @@ scheduler:
 trainer:
   batch_size: 128
   num_workers: null
+  max_atoms_per_batch: null
+  min_atoms_per_batch: 0
+  pin_memory: true
+  persistent_workers: true
+  grad_clip_norm: 1.0
   max_epochs: 100
   ema_beta: 0.95
   early_stopping_patience: 20
@@ -77,3 +82,4 @@ logging:
   wandb: true
   wandb_mode: online
   wandb_project: upet-confidence-head
+  log_interval_steps: 100

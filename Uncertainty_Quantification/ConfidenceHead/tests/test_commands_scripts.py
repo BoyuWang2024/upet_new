@@ -41,6 +41,33 @@ def test_shipped_configs_explicitly_select_atom_mean(name: str) -> None:
     assert config.model.force.target_mode == "atom_mean"
     assert config.binning.force_max_error == 0.5
     assert config.binning.energy_max_error == 0.3
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["full_gpu.yaml", "n20_cpu.yaml", "n20_local_cpu.yaml"],
+)
+def test_shipped_config_uses_memmap_runtime_schema(name: str) -> None:
+    path = CONFIGS / name
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    assert "shard_max_atoms" not in raw["cache"]
+    assert "num_workers" not in raw["cache"]
+    assert "num_workers" in raw["trainer"]
+    assert raw["trainer"]["max_atoms_per_batch"] is None
+    assert raw["trainer"]["min_atoms_per_batch"] == 0
+    assert raw["trainer"]["grad_clip_norm"] == 1.0
+    assert "log_interval_steps" in raw["logging"]
+    if name == "full_gpu.yaml":
+        assert raw["trainer"]["pin_memory"] is True
+        assert raw["trainer"]["persistent_workers"] is True
+        assert raw["logging"]["log_interval_steps"] == 100
+    else:
+        assert raw["trainer"]["pin_memory"] is False
+        assert raw["trainer"]["persistent_workers"] is False
+        assert raw["logging"]["log_interval_steps"] == 1
+    config = load_config(path)
+
     assert config.loss.force_coefficient == 1.0
     assert config.loss.energy_coefficient == 1.5
     assert config.scheduler.monitor == "val/total_loss_ema"
