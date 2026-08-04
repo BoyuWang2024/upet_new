@@ -1,4 +1,4 @@
-"""Immutable, sharded raw readout cache for confidence-head training."""
+"""Immutable continuous memmap cache for confidence-head training."""
 
 from __future__ import annotations
 
@@ -6,19 +6,19 @@ import json
 import os
 import shutil
 import uuid
-from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 
-from .artifacts import atomic_torch_save, atomic_write_json, sha256_file
+from .artifacts import atomic_write_json, sha256_file
 from .identity import cache_id
 
 
-SCHEMA_VERSION = "upet_confidence_raw_cache_v1"
+SCHEMA_VERSION = "upet_confidence_raw_cache_v2"
 _ATOM_FIELDS = (
     "atomic_numbers",
     "force_prediction",
@@ -27,14 +27,17 @@ _ATOM_FIELDS = (
     "energy_features",
 )
 _ENERGY_FIELDS = ("energy_prediction", "energy_reference")
-_SHARD_FIELDS = {
-    "schema_version",
-    "split",
-    "structure_ids",
-    "num_atoms",
-    "atom_offsets",
-    *_ATOM_FIELDS,
-    *_ENERGY_FIELDS,
+_ARRAY_FIELDS = ("structure_offsets", "structure_ids", *_ATOM_FIELDS, *_ENERGY_FIELDS)
+_DTYPES = {
+    "structure_offsets": np.dtype("int64"),
+    "structure_ids": np.dtype("int64"),
+    "atomic_numbers": np.dtype("int64"),
+    "force_prediction": np.dtype("float32"),
+    "force_reference": np.dtype("float32"),
+    "force_features": np.dtype("float32"),
+    "energy_features": np.dtype("float32"),
+    "energy_prediction": np.dtype("float32"),
+    "energy_reference": np.dtype("float32"),
 }
 
 
@@ -90,431 +93,285 @@ def _validate_split_name(split: Any) -> str:
 
 def _discard_staging(staging: RawCacheStaging, output_root: Path) -> None:
     root = staging.root.resolve()
-    expected_parent = output_root.resolve()
-    if root.parent != expected_parent or not root.name.startswith(".staging-"):
+    parent = Path(output_root).resolve()
+    if root.parent != parent or not root.name.startswith(".staging-"):
         raise ValueError(f"refusing to remove unsafe staging path: {root}")
     if root.exists():
         shutil.rmtree(root)
 
 
-def _context(split: str, shard_index: int, structure_id: int, field: str) -> str:
-    return f"split {split} shard {shard_index} structure {structure_id}: field {field}"
+def _context(split: str, structure_id: int, field: str) -> str:
+    return f"split {split} structure {structure_id}: field {field}"
 
 
-def _require_tensor(
+def _float_tensor(
     value: Any,
     *,
     split: str,
-    shard_index: int,
-    structure_id: int,
-    field: str,
-) -> torch.Tensor:
-    if not isinstance(value, torch.Tensor):
-        raise ValueError(
-            f"{_context(split, shard_index, structure_id, field)} must be a Tensor"
-        )
-    return value
-
-
-def _finite_float_tensor(
-    value: Any,
-    *,
-    split: str,
-    shard_index: int,
     structure_id: int,
     field: str,
     shape: tuple[int, ...] | None = None,
     rows: int | None = None,
 ) -> torch.Tensor:
-    tensor = _require_tensor(
-        value,
-        split=split,
-        shard_index=shard_index,
-        structure_id=structure_id,
-        field=field,
-    )
-    context = _context(split, shard_index, structure_id, field)
-    if not tensor.is_floating_point():
-        raise ValueError(f"{context} must have a floating dtype")
-    if shape is not None and tuple(tensor.shape) != shape:
-        raise ValueError(
-            f"{context} must have shape {shape}, got {tuple(tensor.shape)}"
-        )
+    context = _context(split, structure_id, field)
+    if not isinstance(value, torch.Tensor) or not value.is_floating_point():
+        raise ValueError(f"{context} must be a floating Tensor")
+    if shape is not None and tuple(value.shape) != shape:
+        raise ValueError(f"{context} must have shape {shape}, got {tuple(value.shape)}")
     if rows is not None and (
-        tensor.ndim != 2 or tensor.shape[0] != rows or tensor.shape[1] <= 0
+        value.ndim != 2 or value.shape[0] != rows or value.shape[1] <= 0
     ):
         raise ValueError(
             f"{context} must have shape ({rows}, D) with positive D, "
-            f"got {tuple(tensor.shape)}"
+            f"got {tuple(value.shape)}"
         )
-    if not bool(torch.isfinite(tensor).all().item()):
+    if not bool(torch.isfinite(value).all().item()):
         raise ValueError(f"{context} must contain only finite values")
-    return tensor.detach().to(device="cpu", dtype=torch.float32).contiguous().clone()
+    return value.detach().to(device="cpu", dtype=torch.float32).contiguous().clone()
 
 
-def _finite_scalar(
+def _float_scalar(
     value: Any,
     *,
     split: str,
-    shard_index: int,
     structure_id: int,
     field: str,
 ) -> torch.Tensor:
-    context = _context(split, shard_index, structure_id, field)
+    context = _context(split, structure_id, field)
     if isinstance(value, torch.Tensor):
-        if value.ndim != 0:
-            raise ValueError(
-                f"{context} must be a scalar tensor or float, "
-                f"got shape {tuple(value.shape)}"
-            )
-        if not value.is_floating_point():
-            raise ValueError(f"{context} must have a floating dtype")
-        tensor = value.detach().to(device="cpu", dtype=torch.float32)
+        if value.ndim != 0 or not value.is_floating_point():
+            raise ValueError(f"{context} must be a floating scalar")
+        result = value.detach().to(device="cpu", dtype=torch.float32)
     elif isinstance(value, (int, float)) and not isinstance(value, bool):
-        tensor = torch.tensor(float(value), dtype=torch.float32)
+        result = torch.tensor(float(value), dtype=torch.float32)
     else:
         raise ValueError(f"{context} must be a scalar tensor or float")
-    if not bool(torch.isfinite(tensor).item()):
+    if not bool(torch.isfinite(result).item()):
         raise ValueError(f"{context} must contain only finite values")
-    return tensor.contiguous().clone()
+    return result.contiguous().clone()
 
 
-def _normalize_structure(
-    raw: RawStructure,
-    *,
-    split: str,
-    shard_index: int,
-) -> RawStructure:
+def _normalize_structure(raw: RawStructure, *, split: str) -> RawStructure:
     if not isinstance(raw, RawStructure):
-        raise ValueError(f"split {split} shard {shard_index}: expected RawStructure")
+        raise ValueError(f"split {split}: expected RawStructure")
     if isinstance(raw.structure_id, bool) or not isinstance(raw.structure_id, int):
-        raise ValueError(
-            f"split {split} shard {shard_index}: structure_id must be an integer"
-        )
+        raise ValueError(f"split {split}: structure_id must be an integer")
     structure_id = raw.structure_id
-    atomic_numbers = _require_tensor(
-        raw.atomic_numbers,
-        split=split,
-        shard_index=shard_index,
-        structure_id=structure_id,
-        field="atomic_numbers",
-    )
-    context = _context(split, shard_index, structure_id, "atomic_numbers")
-    if atomic_numbers.dtype != torch.int64:
+    atomic_numbers = raw.atomic_numbers
+    context = _context(split, structure_id, "atomic_numbers")
+    if (
+        not isinstance(atomic_numbers, torch.Tensor)
+        or atomic_numbers.dtype != torch.int64
+    ):
         raise ValueError(f"{context} must have dtype int64")
-    if atomic_numbers.ndim != 1 or atomic_numbers.numel() == 0:
-        raise ValueError(
-            f"{context} must have shape (N,) with positive N, "
-            f"got {tuple(atomic_numbers.shape)}"
-        )
+    if atomic_numbers.ndim != 1 or atomic_numbers.numel() <= 0:
+        raise ValueError(f"{context} must have shape (N,) with positive N")
     atomic_numbers = atomic_numbers.detach().to(device="cpu").contiguous().clone()
-    num_atoms = len(atomic_numbers)
-    force_prediction = _finite_float_tensor(
-        raw.force_prediction,
-        split=split,
-        shard_index=shard_index,
-        structure_id=structure_id,
-        field="force_prediction",
-        shape=(num_atoms, 3),
-    )
-    force_reference = _finite_float_tensor(
-        raw.force_reference,
-        split=split,
-        shard_index=shard_index,
-        structure_id=structure_id,
-        field="force_reference",
-        shape=(num_atoms, 3),
-    )
-    force_features = _finite_float_tensor(
-        raw.force_features,
-        split=split,
-        shard_index=shard_index,
-        structure_id=structure_id,
-        field="force_features",
-        rows=num_atoms,
-    )
-    energy_features = _finite_float_tensor(
-        raw.energy_features,
-        split=split,
-        shard_index=shard_index,
-        structure_id=structure_id,
-        field="energy_features",
-        rows=num_atoms,
-    )
-    energy_prediction = _finite_scalar(
-        raw.energy_prediction,
-        split=split,
-        shard_index=shard_index,
-        structure_id=structure_id,
-        field="energy_prediction",
-    )
-    energy_reference = _finite_scalar(
-        raw.energy_reference,
-        split=split,
-        shard_index=shard_index,
-        structure_id=structure_id,
-        field="energy_reference",
-    )
+    atoms = len(atomic_numbers)
     return RawStructure(
         structure_id=structure_id,
         atomic_numbers=atomic_numbers,
-        force_prediction=force_prediction,
-        force_reference=force_reference,
-        energy_prediction=energy_prediction,
-        energy_reference=energy_reference,
-        force_features=force_features,
-        energy_features=energy_features,
+        force_prediction=_float_tensor(
+            raw.force_prediction,
+            split=split,
+            structure_id=structure_id,
+            field="force_prediction",
+            shape=(atoms, 3),
+        ),
+        force_reference=_float_tensor(
+            raw.force_reference,
+            split=split,
+            structure_id=structure_id,
+            field="force_reference",
+            shape=(atoms, 3),
+        ),
+        energy_prediction=_float_scalar(
+            raw.energy_prediction,
+            split=split,
+            structure_id=structure_id,
+            field="energy_prediction",
+        ),
+        energy_reference=_float_scalar(
+            raw.energy_reference,
+            split=split,
+            structure_id=structure_id,
+            field="energy_reference",
+        ),
+        force_features=_float_tensor(
+            raw.force_features,
+            split=split,
+            structure_id=structure_id,
+            field="force_features",
+            rows=atoms,
+        ),
+        energy_features=_float_tensor(
+            raw.energy_features,
+            split=split,
+            structure_id=structure_id,
+            field="energy_features",
+            rows=atoms,
+        ),
     )
 
 
-def _shard_payload(split: str, structures: Sequence[RawStructure]) -> dict[str, Any]:
-    counts = torch.tensor(
-        [len(structure.atomic_numbers) for structure in structures],
-        dtype=torch.int64,
-    )
-    offsets = torch.zeros(len(counts) + 1, dtype=torch.int64)
-    offsets[1:] = torch.cumsum(counts, dim=0)
+def _confined_array_path(cache_root: Path, relative: Any) -> Path:
+    if not isinstance(relative, str):
+        raise ValueError("array path must be a relative string")
+    candidate = Path(relative)
+    if candidate.is_absolute():
+        raise ValueError(f"array path must be relative: {relative}")
+    root = cache_root.resolve()
+    path = (root / candidate).resolve()
+    if not path.is_relative_to(root):
+        raise ValueError(f"array path escapes cache root: {relative}")
+    return path
+
+
+def _write_binary(path: Path, array: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mapped = np.memmap(path, mode="w+", dtype=array.dtype, shape=array.shape)
+    mapped[...] = array
+    mapped.flush()
+    del mapped
+
+
+def _descriptor(cache_root: Path, path: Path, array: np.ndarray) -> dict[str, Any]:
     return {
-        "schema_version": SCHEMA_VERSION,
-        "split": split,
-        "structure_ids": torch.tensor(
-            [structure.structure_id for structure in structures],
-            dtype=torch.int64,
-        ),
-        "num_atoms": counts,
-        "atom_offsets": offsets,
-        "atomic_numbers": torch.cat(
-            [structure.atomic_numbers for structure in structures]
-        ),
-        "force_prediction": torch.cat(
-            [structure.force_prediction for structure in structures]
-        ),
-        "force_reference": torch.cat(
-            [structure.force_reference for structure in structures]
-        ),
-        "energy_prediction": torch.stack(
-            [
-                torch.as_tensor(structure.energy_prediction, dtype=torch.float32)
-                for structure in structures
-            ]
-        ),
-        "energy_reference": torch.stack(
-            [
-                torch.as_tensor(structure.energy_reference, dtype=torch.float32)
-                for structure in structures
-            ]
-        ),
-        "force_features": torch.cat(
-            [structure.force_features for structure in structures]
-        ).clone(),
-        "energy_features": torch.cat(
-            [structure.energy_features for structure in structures]
-        ).clone(),
-    }
-
-
-def _validate_shard(
-    payload: Any,
-    split: str,
-    shard_index: int,
-    entry: Mapping[str, Any] | None = None,
-) -> dict[str, int]:
-    context = f"split {split} shard {shard_index}"
-    if not isinstance(payload, dict) or set(payload) != _SHARD_FIELDS:
-        raise ValueError(f"{context}: shard schema fields mismatch")
-    if payload["schema_version"] != SCHEMA_VERSION or payload["split"] != split:
-        raise ValueError(f"{context}: schema or split mismatch")
-    for field in ("structure_ids", "num_atoms", "atom_offsets", "atomic_numbers"):
-        tensor = payload[field]
-        if not isinstance(tensor, torch.Tensor) or tensor.dtype != torch.int64:
-            raise ValueError(f"{context}: {field} must have dtype int64")
-    for field in (*_ATOM_FIELDS[1:], *_ENERGY_FIELDS):
-        tensor = payload[field]
-        if not isinstance(tensor, torch.Tensor) or tensor.dtype != torch.float32:
-            raise ValueError(f"{context}: {field} must have dtype float32")
-        if not bool(torch.isfinite(tensor).all().item()):
-            raise ValueError(f"{context}: {field} must contain only finite values")
-    ids = payload["structure_ids"]
-    counts = payload["num_atoms"]
-    offsets = payload["atom_offsets"]
-    if ids.ndim != 1 or counts.ndim != 1 or len(ids) == 0 or len(counts) != len(ids):
-        raise ValueError(f"{context}: structure_ids/num_atoms shape mismatch")
-    if len(set(ids.tolist())) != len(ids):
-        raise ValueError(f"{context}: duplicate structure IDs")
-    if bool((counts <= 0).any().item()):
-        raise ValueError(f"{context}: num_atoms must be positive")
-    if offsets.ndim != 1 or len(offsets) != len(ids) + 1:
-        raise ValueError(f"{context}: atom_offsets shape mismatch")
-    if int(offsets[0].item()) != 0 or not torch.equal(
-        offsets[1:] - offsets[:-1], counts
-    ):
-        raise ValueError(f"{context}: atom_offsets are inconsistent with num_atoms")
-    atoms = int(counts.sum().item())
-    if int(offsets[-1].item()) != atoms:
-        raise ValueError(f"{context}: atom_offsets do not cover all atoms")
-    expected_shapes = {
-        "atomic_numbers": (atoms,),
-        "force_prediction": (atoms, 3),
-        "force_reference": (atoms, 3),
-        "energy_prediction": (len(ids),),
-        "energy_reference": (len(ids),),
-    }
-    for field, shape in expected_shapes.items():
-        if tuple(payload[field].shape) != shape:
-            raise ValueError(f"{context}: {field} must have shape {shape}")
-    for field in ("force_features", "energy_features"):
-        tensor = payload[field]
-        if tensor.ndim != 2 or tensor.shape[0] != atoms or tensor.shape[1] <= 0:
-            raise ValueError(f"{context}: {field} has invalid shape")
-    if (
-        payload["force_features"].untyped_storage().data_ptr()
-        == payload["energy_features"].untyped_storage().data_ptr()
-    ):
-        raise ValueError(f"{context}: force_features and energy_features share storage")
-    metadata = {
-        "structures": len(ids),
-        "atoms": atoms,
-        "force_components": 3 * atoms,
-        "force_feature_dim": int(payload["force_features"].shape[1]),
-        "energy_feature_dim": int(payload["energy_features"].shape[1]),
-    }
-    if entry is not None:
-        for field, actual in metadata.items():
-            if entry.get(field) != actual:
-                raise ValueError(f"{context}: manifest {field} mismatch")
-    return metadata
-
-
-def _write_shard(
-    cache_root: Path,
-    split: str,
-    shard_index: int,
-    structures: Sequence[RawStructure],
-) -> dict[str, Any]:
-    payload = _shard_payload(split, structures)
-    metadata = _validate_shard(payload, split, shard_index)
-    relative_path = Path(split) / f"shard-{shard_index:06d}.pt"
-    path = _confined_shard_path(cache_root, relative_path.as_posix())
-    atomic_torch_save(path, payload)
-    written = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
-    metadata = _validate_shard(written, split, shard_index)
-    return {
-        "status": "complete",
-        "path": relative_path.as_posix(),
+        "path": path.relative_to(cache_root).as_posix(),
+        "dtype": array.dtype.name,
+        "shape": list(array.shape),
+        "bytes": path.stat().st_size,
         "sha256": sha256_file(path),
-        **metadata,
     }
 
 
-def _build_split(
+def _write_split(
     cache_root: Path,
     split: str,
     structures: Iterable[RawStructure],
-    shard_max_atoms: int,
+    identity_payload: Mapping[str, Any],
 ) -> dict[str, Any]:
-    shard_entries: list[dict[str, Any]] = []
-    structure_to_shard: list[int] = []
-    structure_to_index: list[int] = []
-    pending: list[RawStructure] = []
-    pending_atoms = 0
-    seen_ids: set[int] = set()
-    feature_dims: tuple[int, int] | None = None
-    totals = {"structures": 0, "atoms": 0, "force_components": 0}
-
-    def flush() -> None:
-        nonlocal pending, pending_atoms
-        if not pending:
-            return
-        shard_entries.append(
-            _write_shard(cache_root, split, len(shard_entries), pending)
-        )
-        pending = []
-        pending_atoms = 0
-
+    normalized: list[RawStructure] = []
+    seen: set[int] = set()
+    dimensions: tuple[int, int] | None = None
     for raw in structures:
-        proposed_atoms = (
-            len(raw.atomic_numbers)
-            if isinstance(raw.atomic_numbers, torch.Tensor)
-            else 0
-        )
-        destination = len(shard_entries)
-        if pending and pending_atoms + proposed_atoms > shard_max_atoms:
-            flush()
-            destination = len(shard_entries)
-        normalized = _normalize_structure(
-            raw,
-            split=split,
-            shard_index=destination,
-        )
-        if normalized.structure_id in seen_ids:
+        structure = _normalize_structure(raw, split=split)
+        if structure.structure_id in seen:
             raise ValueError(
-                f"split {split}: duplicate structure ID {normalized.structure_id}"
+                f"split {split}: duplicate structure ID {structure.structure_id}"
             )
-        seen_ids.add(normalized.structure_id)
-        dimensions = (
-            int(normalized.force_features.shape[1]),
-            int(normalized.energy_features.shape[1]),
+        seen.add(structure.structure_id)
+        current = (
+            int(structure.force_features.shape[1]),
+            int(structure.energy_features.shape[1]),
         )
-        if feature_dims is None:
-            feature_dims = dimensions
-        elif dimensions != feature_dims:
+        if dimensions is None:
+            dimensions = current
+        elif current != dimensions:
             raise ValueError(
-                f"split {split} shard {destination} structure "
-                f"{normalized.structure_id}: feature dimensions {dimensions} "
-                f"do not match {feature_dims}"
+                f"split {split} structure {structure.structure_id}: "
+                f"feature dimensions {current} do not match {dimensions}"
             )
-        structure_to_shard.append(destination)
-        structure_to_index.append(len(pending))
-        pending.append(normalized)
-        num_atoms = len(normalized.atomic_numbers)
-        pending_atoms += num_atoms
-        totals["structures"] += 1
-        totals["atoms"] += num_atoms
-        totals["force_components"] += 3 * num_atoms
-    flush()
-    if not shard_entries:
+        normalized.append(structure)
+    if not normalized or dimensions is None:
         raise ValueError(f"split {split}: must contain at least one structure")
-    return {
-        **totals,
-        "shards": shard_entries,
-        "structure_count": totals["structures"],
-        "atom_count": totals["atoms"],
-        "force_component_count": totals["force_components"],
-        "force_feature_dim": feature_dims[0] if feature_dims else 0,
-        "energy_feature_dim": feature_dims[1] if feature_dims else 0,
-        "feature_dtype": "float32",
-        "structure_to_shard": structure_to_shard,
-        "structure_to_index": structure_to_index,
+
+    counts = np.asarray(
+        [len(structure.atomic_numbers) for structure in normalized], dtype=np.int64
+    )
+    offsets = np.zeros(len(normalized) + 1, dtype=np.int64)
+    offsets[1:] = np.cumsum(counts)
+    arrays: dict[str, np.ndarray] = {
+        "structure_offsets": offsets,
+        "structure_ids": np.asarray(
+            [structure.structure_id for structure in normalized], dtype=np.int64
+        ),
+        "atomic_numbers": torch.cat(
+            [structure.atomic_numbers for structure in normalized]
+        ).numpy(),
+        "force_prediction": torch.cat(
+            [structure.force_prediction for structure in normalized]
+        ).numpy(),
+        "force_reference": torch.cat(
+            [structure.force_reference for structure in normalized]
+        ).numpy(),
+        "force_features": torch.cat(
+            [structure.force_features for structure in normalized]
+        ).numpy(),
+        "energy_features": torch.cat(
+            [structure.energy_features for structure in normalized]
+        ).numpy(),
+        "energy_prediction": torch.stack(
+            [torch.as_tensor(structure.energy_prediction) for structure in normalized]
+        ).numpy(),
+        "energy_reference": torch.stack(
+            [torch.as_tensor(structure.energy_reference) for structure in normalized]
+        ).numpy(),
     }
+    split_root = cache_root / split
+    split_root.mkdir(parents=True, exist_ok=True)
+    descriptors: dict[str, dict[str, Any]] = {}
+    for field, array in arrays.items():
+        expected_dtype = _DTYPES[field]
+        array = np.asarray(array, dtype=expected_dtype)
+        if field == "structure_offsets":
+            path = split_root / "structure_offsets.npy"
+            np.save(path, array, allow_pickle=False)
+        else:
+            path = split_root / f"{field}.bin"
+            _write_binary(path, array)
+        descriptors[field] = _descriptor(cache_root, path, array)
 
-
-def _verify_written_cache(cache_root: Path, splits: Mapping[str, Any]) -> None:
-    for split, split_manifest in splits.items():
-        for index, shard in enumerate(split_manifest["shards"]):
-            path = cache_root / shard["path"]
-            if not path.is_file():
-                raise ValueError(f"split {split} shard {index} is missing: {path}")
-            actual = sha256_file(path)
-            if actual != shard["sha256"]:
-                raise ValueError(
-                    f"split {split} shard {index} sha256 mismatch: "
-                    f"{actual} != {shard['sha256']}"
-                )
+    structures_count = len(normalized)
+    atom_count = int(offsets[-1])
+    declared_splits = identity_payload.get("splits")
+    declared = (
+        declared_splits.get(split) if isinstance(declared_splits, Mapping) else None
+    )
+    if not isinstance(declared, Mapping):
+        raise ValueError(f"split {split}: identity metadata must be a mapping")
+    expected_counts = {
+        "structure_count": structures_count,
+        "atom_count": atom_count,
+        "force_component_count": 3 * atom_count,
+    }
+    for field, actual in expected_counts.items():
+        if declared.get(field) != actual:
+            raise ValueError(f"split {split}: identity {field} mismatch")
+    outputs = identity_payload.get("outputs", identity_payload.get("readouts"))
+    if not isinstance(outputs, Mapping):
+        raise ValueError("identity_payload must contain output keys")
+    force_key = outputs.get("force_features")
+    energy_key = outputs.get("energy_features")
+    if (
+        not isinstance(force_key, str)
+        or not isinstance(energy_key, str)
+        or force_key == energy_key
+    ):
+        raise ValueError("force and energy feature output keys must be distinct")
+    return {
+        "structures": structures_count,
+        "atoms": atom_count,
+        "force_components": 3 * atom_count,
+        **expected_counts,
+        "force_feature_dim": dimensions[0],
+        "energy_feature_dim": dimensions[1],
+        "feature_dtype": "float32",
+        "force_feature_key": force_key,
+        "energy_feature_key": energy_key,
+        "arrays": descriptors,
+    }
 
 
 def build_raw_cache(
     output_root: Path,
     split_structures: Mapping[str, Iterable[RawStructure]],
     identity_payload: Mapping[str, Any],
-    shard_max_atoms: int,
+    shard_max_atoms: int | None = None,
     *,
     staging: RawCacheStaging | None = None,
 ) -> Path:
     """Build, fully verify, and atomically publish an identity-addressed cache."""
-    if not isinstance(shard_max_atoms, int) or isinstance(shard_max_atoms, bool):
-        raise ValueError("shard_max_atoms must be an integer")
-    if shard_max_atoms <= 0:
-        raise ValueError("shard_max_atoms must be positive")
     if not split_structures:
         raise ValueError("split_structures must not be empty")
     for split in split_structures:
@@ -539,7 +396,7 @@ def build_raw_cache(
     transaction = staging or prepare_raw_cache(output_root)
     if transaction.output_root.resolve() != output_root.resolve():
         raise ValueError("staging output_root mismatch")
-    incomplete: dict[str, Any] = {
+    incomplete = {
         "schema_version": SCHEMA_VERSION,
         "status": "incomplete",
         "identity": identity,
@@ -550,29 +407,15 @@ def build_raw_cache(
     atomic_write_json(transaction.manifest_path, incomplete)
     try:
         splits = {
-            split: _build_split(transaction.root, split, structures, shard_max_atoms)
+            split: _write_split(transaction.root, split, structures, identity_payload)
             for split, structures in split_structures.items()
         }
-        outputs = identity_payload.get("outputs")
-        if outputs is None:
-            outputs = identity_payload.get("readouts")
-        if not isinstance(outputs, Mapping):
-            raise ValueError("identity_payload must contain output keys")
-        force_feature_key = outputs.get("force_features")
-        energy_feature_key = outputs.get("energy_features")
-        if (
-            not isinstance(force_feature_key, str)
-            or not isinstance(energy_feature_key, str)
-            or force_feature_key == energy_feature_key
-        ):
-            raise ValueError("force and energy feature output keys must be distinct")
-        for split_manifest in splits.values():
-            split_manifest["force_feature_key"] = force_feature_key
-            split_manifest["energy_feature_key"] = energy_feature_key
         complete = {**incomplete, "status": "complete", "splits": splits}
         atomic_write_json(transaction.manifest_path, complete)
         _validate_complete_cache(
-            transaction.manifest_path, expected_identity=identity, load_shards=True
+            transaction.manifest_path,
+            expected_identity=identity,
+            load_shards=True,
         )
         output_root.mkdir(parents=True, exist_ok=True)
         os.replace(transaction.root, cache_root)
@@ -584,7 +427,7 @@ def build_raw_cache(
 
 def _load_manifest(path: Path) -> dict[str, Any]:
     try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
+        loaded = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"invalid cache manifest {path}: {error}") from error
     if not isinstance(loaded, dict):
@@ -592,32 +435,68 @@ def _load_manifest(path: Path) -> dict[str, Any]:
     return loaded
 
 
-def _confined_shard_path(cache_root: Path, relative: Any) -> Path:
-    if not isinstance(relative, str):
-        raise ValueError("shard path must be a relative string")
-    candidate = Path(relative)
-    if candidate.is_absolute():
-        raise ValueError(f"shard path must be relative: {relative}")
-    root = cache_root.resolve()
-    resolved = (root / candidate).resolve()
-    if not resolved.is_relative_to(root):
-        raise ValueError(f"shard path escapes cache root: {relative}")
-    return resolved
+def _validate_descriptor(
+    cache_root: Path,
+    split: str,
+    field: str,
+    descriptor: Any,
+    *,
+    full: bool,
+) -> tuple[Path, tuple[int, ...], np.dtype[Any]]:
+    context = f"split {split} array {field}"
+    if not isinstance(descriptor, Mapping):
+        raise ValueError(f"{context}: descriptor must be a mapping")
+    path = _confined_array_path(cache_root, descriptor.get("path"))
+    try:
+        dtype = np.dtype(descriptor.get("dtype"))
+    except TypeError as error:
+        raise ValueError(f"{context}: invalid dtype") from error
+    raw_shape = descriptor.get("shape")
+    if (
+        not isinstance(raw_shape, list)
+        or not raw_shape
+        or not all(isinstance(value, int) and value > 0 for value in raw_shape)
+    ):
+        raise ValueError(f"{context}: invalid shape")
+    shape = tuple(raw_shape)
+    declared_bytes = descriptor.get("bytes")
+    if not isinstance(declared_bytes, int) or declared_bytes <= 0:
+        raise ValueError(f"{context}: invalid size")
+    if not path.is_file() or path.stat().st_size != declared_bytes:
+        raise ValueError(f"{context}: file size mismatch")
+    if field == "structure_offsets":
+        try:
+            offsets = np.load(path, mmap_mode="r", allow_pickle=False)
+        except (OSError, ValueError) as error:
+            raise ValueError(f"{context}: invalid npy file") from error
+        if offsets.dtype != dtype or tuple(offsets.shape) != shape:
+            raise ValueError(f"{context}: dtype/shape mismatch")
+    elif declared_bytes != int(np.prod(shape, dtype=np.int64)) * dtype.itemsize:
+        raise ValueError(f"{context}: file size does not match dtype/shape")
+    digest = descriptor.get("sha256")
+    if not isinstance(digest, str) or len(digest) != 64:
+        raise ValueError(f"{context}: invalid sha256")
+    if full and sha256_file(path) != digest:
+        raise ValueError(f"{field} sha256 mismatch")
+    return path, shape, dtype
 
 
 def _validate_complete_cache(
-    manifest_path: Path, *, expected_identity: str | None, load_shards: bool
+    manifest_path: Path,
+    *,
+    expected_identity: str | None,
+    load_shards: bool,
 ) -> dict[str, Any]:
+    manifest_path = Path(manifest_path)
     manifest = _load_manifest(manifest_path)
-    if (
-        manifest.get("schema_version") != SCHEMA_VERSION
-        or manifest.get("status") != "complete"
-    ):
-        raise ValueError("cache manifest schema/status must be complete")
-    identity = manifest.get("identity")
+    if manifest.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError("cache manifest schema mismatch; rebuild the v2 cache")
+    if manifest.get("status") != "complete":
+        raise ValueError("cache manifest status must be complete")
     payload = manifest.get("identity_payload")
     if not isinstance(payload, dict):
         raise ValueError("cache manifest identity_payload must be a mapping")
+    identity = manifest.get("identity")
     derived = cache_id({"schema_version": SCHEMA_VERSION, "identity_payload": payload})
     if (
         identity != manifest.get("cache_id")
@@ -626,283 +505,179 @@ def _validate_complete_cache(
     ):
         raise ValueError("cache manifest identity mismatch")
     splits = manifest.get("splits")
+    payload_splits = payload.get("splits")
     if not isinstance(splits, dict) or not splits:
         raise ValueError("cache manifest splits must be non-empty")
-    payload_splits = payload.get("splits")
-    if not isinstance(payload_splits, dict):
-        raise ValueError("cache identity splits must be a mapping")
-    if set(payload_splits) != set(splits):
+    if not isinstance(payload_splits, dict) or set(payload_splits) != set(splits):
         raise ValueError("cache split set does not match identity payload")
-    root = manifest_path.parent
     for split, split_manifest in splits.items():
-        if not isinstance(split_manifest, dict):
+        if not isinstance(split_manifest, Mapping):
             raise ValueError(f"split {split}: manifest must be a mapping")
-        shards = split_manifest.get("shards")
-        if not isinstance(shards, list) or not shards:
-            raise ValueError(f"split {split}: shards must be non-empty")
-        totals = {"structures": 0, "atoms": 0, "force_components": 0}
-        pairs: list[tuple[int, int]] = []
-        seen: set[int] = set()
-        dimensions: tuple[int, int] | None = None
-        for index, entry in enumerate(shards):
-            if not isinstance(entry, dict):
-                raise ValueError(
-                    f"split {split} shard {index}: entry must be a mapping"
-                )
-            if entry.get("status") != "complete":
-                raise ValueError(
-                    f"split {split} shard {index}: status must be complete"
-                )
-            path = _confined_shard_path(root, entry.get("path"))
-            digest = entry.get("sha256")
-            if not isinstance(digest, str) or len(digest) != 64:
-                raise ValueError(f"split {split} shard {index}: invalid sha256")
-            for field in totals:
-                value = entry.get(field)
-                if not isinstance(value, int) or value <= 0:
-                    raise ValueError(f"split {split} shard {index}: invalid {field}")
-                totals[field] += value
-            force_dim = entry.get("force_feature_dim")
-            energy_dim = entry.get("energy_feature_dim")
-            if not isinstance(force_dim, int) or force_dim <= 0:
-                raise ValueError(
-                    f"split {split} shard {index}: invalid force_feature_dim"
-                )
-            if not isinstance(energy_dim, int) or energy_dim <= 0:
-                raise ValueError(
-                    f"split {split} shard {index}: invalid energy_feature_dim"
-                )
-            shard_dimensions = (force_dim, energy_dim)
-            if dimensions is None:
-                dimensions = shard_dimensions
-            elif dimensions != shard_dimensions:
-                raise ValueError(f"split {split}: feature dimensions disagree")
-            pairs.extend(
-                (index, local_index) for local_index in range(entry["structures"])
+        arrays = split_manifest.get("arrays")
+        if not isinstance(arrays, Mapping) or set(arrays) != set(_ARRAY_FIELDS):
+            raise ValueError(f"split {split}: array fields mismatch")
+        descriptors = {
+            field: _validate_descriptor(
+                manifest_path.parent,
+                split,
+                field,
+                arrays[field],
+                full=load_shards,
             )
-            if load_shards:
-                if not path.is_file():
-                    raise ValueError(f"split {split} shard {index} missing: {path}")
-                if sha256_file(path) != digest:
-                    raise ValueError(f"split {split} shard {index}: sha256 mismatch")
-                loaded = torch.load(
-                    path, map_location="cpu", weights_only=True, mmap=True
-                )
-                _validate_shard(loaded, split, index, entry)
-                for structure_id in loaded["structure_ids"].tolist():
-                    if structure_id in seen:
-                        raise ValueError(
-                            f"split {split}: duplicate structure ID {structure_id}"
-                        )
-                    seen.add(structure_id)
-        aliases = {
-            "structures": "structure_count",
-            "atoms": "atom_count",
-            "force_components": "force_component_count",
+            for field in _ARRAY_FIELDS
         }
-        for field, total in totals.items():
-            if (
-                split_manifest.get(field) != total
-                or split_manifest.get(aliases[field]) != total
-            ):
-                raise ValueError(f"split {split}: {field} total mismatch")
-        source_split = payload_splits[split]
-        if not isinstance(source_split, dict):
+        offsets = np.load(descriptors["structure_offsets"][0], mmap_mode="r")
+        structure_count = split_manifest.get("structure_count")
+        atom_count = split_manifest.get("atom_count")
+        if not isinstance(structure_count, int) or structure_count <= 0:
+            raise ValueError(f"split {split}: invalid structure_count")
+        if not isinstance(atom_count, int) or atom_count <= 0:
+            raise ValueError(f"split {split}: invalid atom_count")
+        if tuple(offsets.shape) != (structure_count + 1,):
+            raise ValueError(f"split {split}: offsets shape mismatch")
+        if offsets[0] != 0 or offsets[-1] != atom_count:
+            raise ValueError(f"split {split}: offsets do not cover all atoms")
+        if np.any(offsets[1:] <= offsets[:-1]):
+            raise ValueError(f"split {split}: offsets must be strictly increasing")
+        expected_first_dimensions = {
+            "structure_ids": structure_count,
+            "energy_prediction": structure_count,
+            "energy_reference": structure_count,
+            "atomic_numbers": atom_count,
+            "force_prediction": atom_count,
+            "force_reference": atom_count,
+            "force_features": atom_count,
+            "energy_features": atom_count,
+        }
+        for field, first_dimension in expected_first_dimensions.items():
+            if descriptors[field][1][0] != first_dimension:
+                raise ValueError(f"split {split}: {field} first dimension mismatch")
+        force_dim = descriptors["force_features"][1][1]
+        energy_dim = descriptors["energy_features"][1][1]
+        expected_metadata = {
+            "structures": structure_count,
+            "atoms": atom_count,
+            "structure_count": structure_count,
+            "atom_count": atom_count,
+            "force_components": 3 * atom_count,
+            "force_component_count": 3 * atom_count,
+            "force_feature_dim": force_dim,
+            "energy_feature_dim": energy_dim,
+            "feature_dtype": "float32",
+        }
+        for field, expected in expected_metadata.items():
+            if split_manifest.get(field) != expected:
+                raise ValueError(f"split {split}: {field} metadata mismatch")
+        declared = payload_splits[split]
+        if not isinstance(declared, Mapping):
             raise ValueError(f"split {split}: identity metadata must be a mapping")
-        source_fields = {
-            "structure_count": totals["structures"],
-            "atom_count": totals["atoms"],
-            "force_component_count": totals["force_components"],
-        }
-        for field, actual in source_fields.items():
-            if source_split.get(field) != actual:
+        for field in ("structure_count", "atom_count", "force_component_count"):
+            if declared.get(field) != expected_metadata[field]:
                 raise ValueError(f"split {split}: identity {field} mismatch")
-        if dimensions is None or (
-            split_manifest.get("force_feature_dim") != dimensions[0]
-            or split_manifest.get("energy_feature_dim") != dimensions[1]
-        ):
-            raise ValueError(f"split {split}: feature dimension metadata mismatch")
-        if split_manifest.get("feature_dtype") != "float32":
-            raise ValueError(f"split {split}: feature_dtype must be float32")
-        outputs = payload.get("outputs")
-        if outputs is None:
-            outputs = payload.get("readouts")
-        if not isinstance(outputs, dict):
-            raise ValueError("cache identity output keys must be a mapping")
-        if split_manifest.get("force_feature_key") != outputs.get(
-            "force_features"
-        ) or split_manifest.get("energy_feature_key") != outputs.get("energy_features"):
-            raise ValueError(f"split {split}: feature output key mismatch")
-        payload_features = payload.get("features")
-        if isinstance(payload_features, dict) and (
-            payload_features.get("force_dim") != dimensions[0]
-            or payload_features.get("energy_dim") != dimensions[1]
-            or payload_features.get("dtype") != "float32"
-        ):
-            raise ValueError(f"split {split}: identity feature metadata mismatch")
-        shard_map = split_manifest.get("structure_to_shard")
-        index_map = split_manifest.get("structure_to_index")
-        if (
-            not isinstance(shard_map, list)
-            or len(shard_map) != totals["structures"]
-            or shard_map != [pair[0] for pair in pairs]
-        ):
-            raise ValueError("structure_to_shard is inconsistent with shard counts")
-        if (
-            not isinstance(index_map, list)
-            or len(index_map) != totals["structures"]
-            or index_map != [pair[1] for pair in pairs]
-        ):
-            raise ValueError("structure_to_index is inconsistent with shard counts")
     return manifest
 
 
 class CachedSplitDataset:
-    """Map-style, mmap-backed access to one split with a bounded shard LRU."""
+    """Random-access dataset backed by persistent continuous memory maps."""
 
-    def __init__(
-        self,
-        manifest_path: Path,
-        split: str,
-        expected_identity: str,
-        max_cached_shards: int = 1,
-    ) -> None:
-        if max_cached_shards <= 0:
-            raise ValueError("max_cached_shards must be positive")
+    def __init__(self, manifest_path: Path, split: str, expected_identity: str) -> None:
         self.manifest_path = Path(manifest_path)
         manifest = _validate_complete_cache(
-            self.manifest_path, expected_identity=expected_identity, load_shards=False
+            self.manifest_path,
+            expected_identity=expected_identity,
+            load_shards=False,
         )
-        if manifest.get("status") != "complete":
-            raise ValueError("cache manifest status must be complete")
-        if manifest.get("identity") != expected_identity:
-            raise ValueError(
-                "cache manifest identity mismatch: "
-                f"{manifest.get('identity')!r} != {expected_identity!r}"
-            )
-        if manifest.get("schema_version") != SCHEMA_VERSION:
-            raise ValueError("cache manifest schema_version mismatch")
-        splits = manifest.get("splits")
-        if not isinstance(splits, dict) or split not in splits:
+        splits = manifest["splits"]
+        if split not in splits:
             raise ValueError(f"cache manifest is missing split {split!r}")
-        split_manifest = splits[split]
-        if not isinstance(split_manifest, dict):
-            raise ValueError(f"cache split {split!r} must be a mapping")
         self.split = split
         self._cache_root = self.manifest_path.parent
-        self._max_cached_shards = max_cached_shards
-        self._shards = self._validate_mapping(split_manifest)
-        self._structure_to_shard = split_manifest["structure_to_shard"]
-        self._structure_to_index = split_manifest["structure_to_index"]
-        self._loaded: OrderedDict[int, dict[str, Any]] = OrderedDict()
+        self._descriptors = dict(splits[split]["arrays"])
+        self._length = int(splits[split]["structure_count"])
+        self._arrays: dict[str, np.ndarray] = {}
 
-    def _validate_mapping(self, split_manifest: dict[str, Any]) -> list[dict[str, Any]]:
-        structure_count = split_manifest.get("structures")
-        shards = split_manifest.get("shards")
-        shard_mapping = split_manifest.get("structure_to_shard")
-        index_mapping = split_manifest.get("structure_to_index")
-        if not isinstance(structure_count, int) or structure_count < 0:
-            raise ValueError("split structures must be a non-negative integer")
-        if not isinstance(shards, list) or not all(
-            isinstance(entry, dict) for entry in shards
-        ):
-            raise ValueError("split shards must be a list of mappings")
-        if not isinstance(shard_mapping, list) or len(shard_mapping) != structure_count:
-            raise ValueError("structure_to_shard must map every structure")
-        if not isinstance(index_mapping, list) or len(index_mapping) != structure_count:
-            raise ValueError("structure_to_index must map every structure")
-        expected_pairs = [
-            (shard_index, local_index)
-            for shard_index, entry in enumerate(shards)
-            for local_index in range(entry.get("structures", -1))
-        ]
-        if list(zip(shard_mapping, index_mapping, strict=True)) != expected_pairs:
-            if shard_mapping != [pair[0] for pair in expected_pairs]:
-                raise ValueError("structure_to_shard is inconsistent with shard counts")
-            raise ValueError("structure_to_index is inconsistent with shard counts")
-        for entry in shards:
-            _confined_shard_path(self._cache_root, entry.get("path"))
-            digest = entry.get("sha256")
-            if not isinstance(digest, str) or len(digest) != 64:
-                raise ValueError("shard sha256 must be a 64-character string")
-        return shards
+    def __getstate__(self) -> dict[str, Any]:
+        state = self.__dict__.copy()
+        state["_arrays"] = {}
+        return state
 
     def __len__(self) -> int:
-        return len(self._structure_to_shard)
+        return self._length
 
-    def _load_shard(self, shard_index: int) -> dict[str, Any]:
-        if shard_index in self._loaded:
-            loaded = self._loaded.pop(shard_index)
-            self._loaded[shard_index] = loaded
-            return loaded
-        entry = self._shards[shard_index]
-        path = _confined_shard_path(self._cache_root, entry["path"])
-        if not path.is_file():
-            raise ValueError(f"shard {shard_index} missing: {path}")
-        actual_sha256 = sha256_file(path)
-        if actual_sha256 != entry["sha256"]:
-            raise ValueError(
-                f"shard {shard_index} sha256 mismatch: "
-                f"{actual_sha256} != {entry['sha256']}"
-            )
-        loaded = torch.load(
-            path,
-            map_location="cpu",
-            weights_only=True,
-            mmap=True,
-        )
-        _validate_shard(loaded, self.split, shard_index, entry)
-        self._loaded[shard_index] = loaded
-        while len(self._loaded) > self._max_cached_shards:
-            self._loaded.popitem(last=False)
-        return loaded
+    def _array(self, field: str) -> np.ndarray:
+        if field not in self._arrays:
+            descriptor = self._descriptors[field]
+            path = _confined_array_path(self._cache_root, descriptor["path"])
+            shape = tuple(descriptor["shape"])
+            dtype = np.dtype(descriptor["dtype"])
+            if field == "structure_offsets":
+                array = np.load(path, mmap_mode="c", allow_pickle=False)
+            else:
+                array = np.memmap(path, mode="c", dtype=dtype, shape=shape)
+            self._arrays[field] = array
+        return self._arrays[field]
 
-    def __getitem__(self, index: int) -> dict[str, Any]:
+    def _normalize_index(self, index: int) -> int:
         if index < 0:
             index += len(self)
         if index < 0 or index >= len(self):
             raise IndexError(index)
-        shard_index = self._structure_to_shard[index]
-        local_index = self._structure_to_index[index]
-        shard = self._load_shard(shard_index)
-        start = int(shard["atom_offsets"][local_index].item())
-        stop = int(shard["atom_offsets"][local_index + 1].item())
-        item = {field: shard[field][start:stop] for field in _ATOM_FIELDS}
-        item.update({field: shard[field][local_index] for field in _ENERGY_FIELDS})
-        item["structure_id"] = int(shard["structure_ids"][local_index].item())
+        return index
+
+    def num_atoms(self, index: int) -> int:
+        index = self._normalize_index(index)
+        offsets = self._array("structure_offsets")
+        return int(offsets[index + 1] - offsets[index])
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        index = self._normalize_index(index)
+        offsets = self._array("structure_offsets")
+        start = int(offsets[index])
+        stop = int(offsets[index + 1])
+        item = {
+            field: torch.from_numpy(np.asarray(self._array(field)[start:stop]))
+            for field in _ATOM_FIELDS
+        }
+        item.update(
+            {
+                field: torch.as_tensor(self._array(field)[index], dtype=torch.float32)
+                for field in _ENERGY_FIELDS
+            }
+        )
+        item["structure_id"] = int(self._array("structure_ids")[index])
         item["num_atoms"] = stop - start
         return item
 
 
 def collate_cached_structures(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Collate cached structure slices and rebuild batch-local atom offsets."""
+    """Copy memmap views into one contiguous batch and rebuild local offsets."""
     if not items:
         raise ValueError("cannot collate an empty cached batch")
     structure_ids = torch.tensor(
-        [int(item["structure_id"]) for item in items],
-        dtype=torch.int64,
+        [int(item["structure_id"]) for item in items], dtype=torch.int64
     )
-    num_atoms = torch.tensor(
-        [int(item["num_atoms"]) for item in items],
-        dtype=torch.int64,
+    atom_counts = torch.tensor(
+        [int(item["num_atoms"]) for item in items], dtype=torch.int64
     )
     offsets = torch.zeros(len(items) + 1, dtype=torch.int64)
-    offsets[1:] = torch.cumsum(num_atoms, dim=0)
+    offsets[1:] = torch.cumsum(atom_counts, dim=0)
     batch = {
-        field: torch.cat([item[field] for item in items]) for field in _ATOM_FIELDS
+        field: torch.cat([torch.as_tensor(item[field]) for item in items]).contiguous()
+        for field in _ATOM_FIELDS
     }
     batch.update(
         {
             field: torch.stack(
                 [torch.as_tensor(item[field], dtype=torch.float32) for item in items]
-            )
+            ).contiguous()
             for field in _ENERGY_FIELDS
         }
     )
     batch.update(
         {
             "structure_ids": structure_ids,
-            "num_atoms": num_atoms,
+            "atom_counts": atom_counts,
+            "num_atoms": atom_counts,
             "atom_offsets": offsets,
         }
     )
