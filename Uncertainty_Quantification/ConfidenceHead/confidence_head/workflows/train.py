@@ -9,6 +9,7 @@ import random
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
@@ -370,6 +371,21 @@ def _identities(
         model_loss_id=model_identity,
         force_target_mode=config.model.force.target_mode,
         force_error_definition=force_error_definition(config.model.force.target_mode),
+        active_targets=tuple(
+            target
+            for target, active in (
+                (
+                    "force",
+                    config.model.force.enabled and config.loss.force_coefficient > 0,
+                ),
+                (
+                    "energy",
+                    config.model.energy.enabled and config.loss.energy_coefficient > 0,
+                ),
+            )
+            if active
+        ),
+        sampler_seed=config.run.seed,
     )
     run_identity = run_id(
         {
@@ -522,6 +538,8 @@ def _epoch(
     force_spec: BinningSpec,
     energy_spec: BinningSpec,
     config: ConfidenceConfig,
+    tracker: Tracker | None = None,
+    start_global_step: int = 0,
 ) -> tuple[float, float, float, int]:
     training = optimizer is not None
     model.train(training)
@@ -529,8 +547,16 @@ def _epoch(
     steps = 0
     amp_enabled = config.run.amp
     grad_context = nullcontext() if training else torch.inference_mode()
+    iterator = iter(loader)
     with grad_context:
-        for raw_batch in loader:
+        while True:
+            wait_started = time.perf_counter()
+            try:
+                raw_batch = next(iterator)
+            except StopIteration:
+                break
+            data_wait_seconds = time.perf_counter() - wait_started
+            step_started = wait_started
             batch = _to_device(raw_batch, device)
             if optimizer is not None:
                 optimizer.zero_grad(set_to_none=True)
@@ -543,9 +569,39 @@ def _epoch(
                 loss = _batch_loss(model, batch, force_spec, energy_spec, config)
             if optimizer is not None:
                 loss.total.backward()
+                if config.trainer.grad_clip_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(),
+                        config.trainer.grad_clip_norm,
+                    )
                 optimizer.step()
             _accumulate(accumulator, loss)
             steps += 1
+            global_step = start_global_step + steps
+            should_log = (
+                training
+                and tracker is not None
+                and global_step % config.logging.log_interval_steps == 0
+            )
+            if should_log:
+                if device.type == "cuda":
+                    torch.cuda.synchronize(device)
+                elapsed = max(time.perf_counter() - step_started, 1e-12)
+                samples = int(batch["num_atoms"].numel())
+                atoms = int(batch["num_atoms"].sum())
+                metrics: dict[str, int | float] = {
+                    "global_step": global_step,
+                    "learning_rate": float(optimizer.param_groups[0]["lr"]),
+                    "train/total_loss": float(loss.total.detach()),
+                    "performance/samples_per_second": samples / elapsed,
+                    "performance/atoms_per_second": atoms / elapsed,
+                    "performance/data_wait_seconds": data_wait_seconds,
+                }
+                if loss.force is not None:
+                    metrics["train/force_loss"] = float(loss.force.detach())
+                if loss.energy is not None:
+                    metrics["train/energy_loss"] = float(loss.energy.detach())
+                tracker.log(metrics)
     force, energy, total = accumulator.result(
         config.loss.force_coefficient,
         config.loss.energy_coefficient,
@@ -1028,6 +1084,8 @@ def _train_run_locked(
             optimizer=optimizer,
             device=device,
             force_spec=force_spec,
+            tracker=tracker,
+            start_global_step=global_step,
             energy_spec=energy_spec,
             config=config,
         )
@@ -1086,14 +1144,16 @@ def _train_run_locked(
             "epoch": epoch,
             "global_step": global_step,
             "learning_rate": float(optimizer.param_groups[0]["lr"]),
-            "train/force_loss": train_force,
-            "train/energy_loss": train_energy,
             "train/total_loss": train_total,
-            "val/force_loss": val_force,
-            "val/energy_loss": val_energy,
             "val/total_loss": val_total,
             "val/total_loss_ema": control.ema,
         }
+        if "force" in identity.active_targets:
+            record["train/force_loss"] = train_force
+            record["val/force_loss"] = val_force
+        if "energy" in identity.active_targets:
+            record["train/energy_loss"] = train_energy
+            record["val/energy_loss"] = val_energy
         metric_records.append(record)
         _assert_run_directory_identity(
             run_dir, config.run.output_root, run_directory_identity

@@ -109,6 +109,8 @@ def test_public_state_dataclasses_have_the_exact_control_fields() -> None:
         "model_loss_id",
         "force_target_mode",
         "force_error_definition",
+        "active_targets",
+        "sampler_seed",
     ]
 
 
@@ -369,7 +371,11 @@ def test_snapshot_contains_complete_training_and_reproducibility_state() -> None
         "model_loss_id",
         "force_target_mode",
         "force_error_definition",
+        "active_targets",
+        "sampler_seed",
     }
+    assert snapshot["active_targets"] == ["force", "energy"]
+    assert snapshot["sampler_seed"] == 0
     assert snapshot["force_target_mode"] == "atom_mean"
     assert snapshot["force_error_definition"] == "abs_cartesian_component_mean_v1"
     assert snapshot["schema_version"] == CHECKPOINT_SCHEMA_VERSION

@@ -17,7 +17,7 @@ import torch
 from .artifacts import atomic_torch_save
 
 
-CHECKPOINT_SCHEMA_VERSION = "upet_confidence_trainer_checkpoint_v1"
+CHECKPOINT_SCHEMA_VERSION = "upet_confidence_trainer_checkpoint_v2"
 _EXTERNAL_STOP_REASON = "external_stop_after_epoch"
 
 
@@ -53,6 +53,8 @@ class TrainingIdentity:
     model_loss_id: str
     force_target_mode: str
     force_error_definition: str
+    active_targets: tuple[str, ...] = ("force", "energy")
+    sampler_seed: int = 0
 
 
 @dataclass(frozen=True)
@@ -272,6 +274,8 @@ def capture_training_snapshot(
         ]
         if torch.cuda.is_available()
         else [],
+        "active_targets": list(identity.active_targets),
+        "sampler_seed": identity.sampler_seed,
         "sampler_rng_state": sampler_generator.get_state().clone(),
         "config_id": identity.config_id,
         "cache_id": identity.cache_id,
@@ -298,6 +302,22 @@ def _require_snapshot_identity(
             raise ValueError(
                 f"{field} mismatch: {actual_value!r} != {expected_value!r}"
             )
+
+    active_targets = snapshot.get("active_targets")
+    if active_targets != list(expected.active_targets):
+        raise ValueError(
+            "active_targets mismatch: "
+            f"{active_targets!r} != {list(expected.active_targets)!r}"
+        )
+    sampler_seed = snapshot.get("sampler_seed")
+    if (
+        isinstance(sampler_seed, bool)
+        or not isinstance(sampler_seed, int)
+        or sampler_seed != expected.sampler_seed
+    ):
+        raise ValueError(
+            f"sampler_seed mismatch: {sampler_seed!r} != {expected.sampler_seed!r}"
+        )
 
     actual_semantics = {
         "force_target_mode": snapshot.get("force_target_mode"),
