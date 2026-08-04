@@ -34,6 +34,7 @@ from ..errors import (
 from ..identity import binning_id, config_id, model_loss_id, run_id
 from ..losses import LossOutput, confidence_loss
 from ..model import ConfidenceModel
+from ..sampler import EpochRandomSampler, MaxAtomBatchSampler
 from ..tracking import Tracker, TrackerFactory, WandbTracker
 from ..trainer import (
     CHECKPOINT_SCHEMA_VERSION,
@@ -381,6 +382,22 @@ def _identities(
     return training, run_identity, resolved
 
 
+def _resolve_num_workers(configured: int | None) -> int:
+    if configured is not None:
+        return configured
+    try:
+        available = len(os.sched_getaffinity(0))
+    except AttributeError:
+        available = os.cpu_count() or 1
+    slurm = os.environ.get("SLURM_CPUS_PER_TASK")
+    if slurm is not None:
+        try:
+            available = min(available, max(1, int(slurm)))
+        except ValueError:
+            pass
+    return max(0, available)
+
+
 def _loader(
     dataset: CachedSplitDataset,
     config: ConfidenceConfig,
@@ -388,19 +405,52 @@ def _loader(
     shuffle: bool,
     generator: torch.Generator,
 ) -> DataLoader[dict[str, Any]]:
+    workers = _resolve_num_workers(config.trainer.num_workers)
+    pin_memory = (
+        config.trainer.pin_memory and torch.device(config.run.device).type == "cuda"
+    )
+    common = {
+        "num_workers": workers,
+        "collate_fn": collate_cached_structures,
+        "generator": generator,
+        "pin_memory": pin_memory,
+        "persistent_workers": config.trainer.persistent_workers and workers > 0,
+    }
+    if config.trainer.max_atoms_per_batch is not None:
+        batch_sampler = MaxAtomBatchSampler(
+            dataset,
+            max_atoms=config.trainer.max_atoms_per_batch,
+            min_atoms=config.trainer.min_atoms_per_batch,
+            seed=config.run.seed,
+            shuffle=shuffle,
+            drop_last=False,
+        )
+        return DataLoader(dataset, batch_sampler=batch_sampler, **common)
+    sampler = EpochRandomSampler(dataset, seed=config.run.seed, shuffle=shuffle)
     return DataLoader(
         dataset,
         batch_size=config.trainer.batch_size,
-        shuffle=shuffle,
-        num_workers=config.trainer.num_workers or 0,
-        collate_fn=collate_cached_structures,
-        generator=generator,
+        sampler=sampler,
+        shuffle=False,
+        **common,
     )
+
+
+def _set_loader_epoch(loader: DataLoader[dict[str, Any]], epoch: int) -> None:
+    sampler = loader.batch_sampler
+    if not isinstance(sampler, MaxAtomBatchSampler):
+        sampler = loader.sampler
+    if hasattr(sampler, "set_epoch"):
+        sampler.set_epoch(epoch)
 
 
 def _to_device(batch: Mapping[str, Any], device: torch.device) -> dict[str, Any]:
     return {
-        key: value.to(device) if isinstance(value, torch.Tensor) else value
+        key: (
+            value.to(device, non_blocking=device.type == "cuda")
+            if isinstance(value, torch.Tensor)
+            else value
+        )
         for key, value in batch.items()
     }
 
@@ -953,6 +1003,8 @@ def _train_run_locked(
 
     externally_stopped = False
     for epoch in range(start_epoch, config.trainer.max_epochs):
+        _set_loader_epoch(train_loader, epoch)
+        _set_loader_epoch(validation_loader, epoch)
         train_force, train_energy, train_total, steps = _epoch(
             model=model,
             loader=train_loader,

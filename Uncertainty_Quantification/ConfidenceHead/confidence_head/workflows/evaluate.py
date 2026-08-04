@@ -13,7 +13,6 @@ from typing import Any
 
 import torch
 import yaml
-from torch.utils.data import DataLoader
 
 from ..artifacts import (
     atomic_torch_save,
@@ -28,7 +27,7 @@ from ..binning import (
     labels_from_thresholds,
 )
 from ..cache import SCHEMA_VERSION as CACHE_SCHEMA_VERSION
-from ..cache import CachedSplitDataset, collate_cached_structures
+from ..cache import CachedSplitDataset
 from ..config import ConfidenceConfig, ForceTargetMode
 from ..errors import energy_per_atom_error, force_error, force_error_definition
 from ..identity import cache_id
@@ -41,8 +40,10 @@ from .train import (
     _bin_payload,
     _exclusive_run_lock,
     _identities,
+    _loader,
     _run_directory_identity,
     _safe_run_dir,
+    _to_device,
 )
 
 
@@ -340,14 +341,7 @@ def _evaluate_run_locked(
     model.to(device).eval()
     generator = torch.Generator(device="cpu")
     generator.manual_seed(config.run.seed)
-    loader = DataLoader(
-        dataset,
-        batch_size=config.trainer.batch_size,
-        shuffle=False,
-        num_workers=config.trainer.num_workers or 0,
-        collate_fn=collate_cached_structures,
-        generator=generator,
-    )
+    loader = _loader(dataset, config, shuffle=False, generator=generator)
 
     collected: dict[str, list[torch.Tensor]] = {
         name: []
@@ -366,10 +360,7 @@ def _evaluate_run_locked(
     atom_counts: list[torch.Tensor] = []
     with torch.inference_mode():
         for raw_batch in loader:
-            batch = {
-                key: value.to(device) if isinstance(value, torch.Tensor) else value
-                for key, value in raw_batch.items()
-            }
+            batch = _to_device(raw_batch, device)
             output = model(
                 batch["force_features"],
                 batch["energy_features"],

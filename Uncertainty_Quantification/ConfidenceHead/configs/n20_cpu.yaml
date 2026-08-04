@@ -54,6 +54,7 @@ scheduler:
   min_lr: 0.000001
 trainer:
   batch_size: 2
+  num_workers: 0
   max_epochs: 1
   ema_beta: 0.95
   early_stopping_patience: 1

@@ -27,6 +27,10 @@ from Uncertainty_Quantification.ConfidenceHead.confidence_head.config import (
 from Uncertainty_Quantification.ConfidenceHead.confidence_head.metrics import (
     classification_metrics,
 )
+from Uncertainty_Quantification.ConfidenceHead.confidence_head.sampler import (
+    EpochRandomSampler,
+    MaxAtomBatchSampler,
+)
 
 
 _WORKFLOWS = "Uncertainty_Quantification.ConfidenceHead.confidence_head.workflows"
@@ -175,6 +179,7 @@ def config(tmp_path: Path) -> ConfidenceConfig:
             },
             "trainer": {
                 "batch_size": 2,
+                "num_workers": 0,
                 "max_epochs": 2,
                 "ema_beta": 0.95,
                 "early_stopping_patience": 15,
@@ -257,6 +262,61 @@ def test_training_and_validation_loaders_use_trainer_batch_size(
 
     assert train_loader.batch_size == 7
     assert validation_loader.batch_size == 7
+
+
+class _AtomCountDataset:
+    def __init__(self, counts: tuple[int, ...]) -> None:
+        self.counts = counts
+
+    def __len__(self) -> int:
+        return len(self.counts)
+
+    def __getitem__(self, index: int) -> dict[str, int]:
+        return {"index": index}
+
+    def num_atoms(self, index: int) -> int:
+        return self.counts[index]
+
+
+def test_fixed_batch_loader_uses_epoch_sampler_and_cpu_safe_options(
+    config: ConfidenceConfig,
+) -> None:
+    configured = _config_copy(
+        config,
+        trainer={"batch_size": 2, "num_workers": 0, "pin_memory": True},
+    )
+    generator = torch.Generator().manual_seed(3)
+
+    loader = train_module._loader(
+        _AtomCountDataset((1, 2, 3)), configured, shuffle=True, generator=generator
+    )
+
+    assert isinstance(loader.sampler, EpochRandomSampler)
+    assert loader.pin_memory is False
+    assert loader.persistent_workers is False
+
+
+def test_atom_count_loader_uses_batch_sampler_and_covers_validation_residual(
+    config: ConfidenceConfig,
+) -> None:
+    configured = _config_copy(
+        config,
+        trainer={
+            "batch_size": 99,
+            "max_atoms_per_batch": 5,
+            "min_atoms_per_batch": 0,
+            "num_workers": 0,
+        },
+    )
+    generator = torch.Generator().manual_seed(3)
+    dataset = _AtomCountDataset((2, 3, 1, 4))
+
+    loader = train_module._loader(
+        dataset, configured, shuffle=False, generator=generator
+    )
+
+    assert isinstance(loader.batch_sampler, MaxAtomBatchSampler)
+    assert list(loader.batch_sampler) == [[0, 1], [2, 3]]
 
 
 def _pearson(left: torch.Tensor, right: torch.Tensor) -> float:
