@@ -135,7 +135,6 @@ def complete_cache(tmp_path: Path) -> Path:
         output_root=tmp_path / "caches",
         split_structures=split_structures,
         identity_payload=identity_payload,
-        shard_max_atoms=2,
     )
 
 

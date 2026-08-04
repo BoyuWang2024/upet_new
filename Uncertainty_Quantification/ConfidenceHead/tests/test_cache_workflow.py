@@ -169,6 +169,7 @@ def test_identity_records_outputs_execution_versions_and_feature_dims(
         "dtype": "float32",
     }
     assert payload["execution"] == execution
+    assert payload["cache"] == {"batch_size": config.cache.batch_size}
     assert set(payload["versions"]) == {
         "python",
         "torch",

@@ -95,8 +95,6 @@ class ReadoutConfig(StrictModel):
 
 class CacheConfig(StrictModel):
     batch_size: int = Field(default=2, gt=0)
-    num_workers: int = Field(default=0, ge=0)
-    shard_max_atoms: int = Field(default=100_000, gt=0)
 
 
 class BinningConfig(StrictModel):

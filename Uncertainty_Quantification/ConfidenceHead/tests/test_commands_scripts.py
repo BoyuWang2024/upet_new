@@ -107,10 +107,7 @@ def _manifest(config: ConfidenceConfig) -> dict[str, object]:
         },
         "outputs": config.readouts.model_dump(),
         "features": {"force_dim": 2, "energy_dim": 3, "dtype": "float32"},
-        "cache": {
-            "batch_size": config.cache.batch_size,
-            "shard_max_atoms": config.cache.shard_max_atoms,
-        },
+        "cache": {"batch_size": config.cache.batch_size},
         "execution": {
             "device": config.run.device,
             "model_dtype": "float32",

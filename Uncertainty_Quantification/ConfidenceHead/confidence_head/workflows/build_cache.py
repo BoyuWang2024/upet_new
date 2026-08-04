@@ -214,10 +214,7 @@ def _identity_payload(
             "energy_dim": feature_dims[1],
             "dtype": "float32",
         },
-        "cache": {
-            "batch_size": config.cache.batch_size,
-            "shard_max_atoms": config.cache.shard_max_atoms,
-        },
+        "cache": {"batch_size": config.cache.batch_size},
         "execution": execution,
         "versions": {
             "python": platform.python_version(),
@@ -282,6 +279,5 @@ def build_cache(config: ConfidenceConfig) -> Path:
             for split, stream in streams.items()
         },
         identity_payload=identity_payload,
-        shard_max_atoms=config.cache.shard_max_atoms,
         staging=staging,
     )

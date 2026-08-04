@@ -135,6 +135,23 @@ def test_build_writes_v2_continuous_array_manifest(
         assert len(descriptor["sha256"]) == 64
 
 
+def test_writer_streams_into_preallocated_arrays_without_tensor_concatenation(
+    tmp_path: Path,
+    raw_structures: list[RawStructure],
+    identity_payload: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden_cat(*args: Any, **kwargs: Any) -> torch.Tensor:
+        del args, kwargs
+        raise AssertionError("cache writer must not materialize a split with torch.cat")
+
+    monkeypatch.setattr(torch, "cat", forbidden_cat)
+    manifest_path, manifest = _build(tmp_path, raw_structures, identity_payload)
+
+    assert manifest_path.is_file()
+    assert manifest["splits"]["train"]["atom_count"] == 6
+
+
 def test_dataset_random_slices_and_collate_are_exact(
     tmp_path: Path,
     raw_structures: list[RawStructure],

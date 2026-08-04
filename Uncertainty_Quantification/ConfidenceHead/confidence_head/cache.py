@@ -16,6 +16,7 @@ import torch
 
 from .artifacts import atomic_write_json, sha256_file
 from .identity import cache_id
+from .memmap_writer import write_preallocated_split
 
 
 SCHEMA_VERSION = "upet_confidence_raw_cache_v2"
@@ -245,7 +246,7 @@ def _descriptor(cache_root: Path, path: Path, array: np.ndarray) -> dict[str, An
     }
 
 
-def _write_split(
+def _write_split_materialized(
     cache_root: Path,
     split: str,
     structures: Iterable[RawStructure],
@@ -363,11 +364,26 @@ def _write_split(
     }
 
 
+def _write_split(
+    cache_root: Path,
+    split: str,
+    structures: Iterable[RawStructure],
+    identity_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    return write_preallocated_split(
+        cache_root,
+        split,
+        structures,
+        identity_payload,
+        normalize=_normalize_structure,
+        sha256=sha256_file,
+    )
+
+
 def build_raw_cache(
     output_root: Path,
     split_structures: Mapping[str, Iterable[RawStructure]],
     identity_payload: Mapping[str, Any],
-    shard_max_atoms: int | None = None,
     *,
     staging: RawCacheStaging | None = None,
 ) -> Path:

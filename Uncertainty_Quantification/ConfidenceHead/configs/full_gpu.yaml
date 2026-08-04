@@ -20,8 +20,6 @@ readouts:
   force_features: mtt::aux::non_conservative_forces_last_layer_features
 cache:
   batch_size: 2
-  num_workers: 0
-  shard_max_atoms: 100000
 binning:
   algorithm: fixed_linear_v1
   force_max_error: 0.5

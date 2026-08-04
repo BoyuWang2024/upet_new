@@ -95,6 +95,15 @@ def test_unknown_config_key_is_rejected(tmp_path: Path) -> None:
         ConfidenceConfig.model_validate(raw)
 
 
+@pytest.mark.parametrize("field", ["num_workers", "shard_max_atoms"])
+def test_legacy_shard_cache_options_are_rejected(tmp_path: Path, field: str) -> None:
+    raw = _valid_config(tmp_path)
+    raw["cache"] = {field: 2}
+
+    with pytest.raises(ValidationError, match=field):
+        ConfidenceConfig.model_validate(raw)
+
+
 def test_force_target_mode_defaults_to_atom_mean(tmp_path: Path) -> None:
     config = ConfidenceConfig.model_validate(_valid_config(tmp_path))
 

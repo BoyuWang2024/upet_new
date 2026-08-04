@@ -392,7 +392,7 @@ def _loader(
         dataset,
         batch_size=config.trainer.batch_size,
         shuffle=shuffle,
-        num_workers=config.cache.num_workers,
+        num_workers=config.trainer.num_workers or 0,
         collate_fn=collate_cached_structures,
         generator=generator,
     )

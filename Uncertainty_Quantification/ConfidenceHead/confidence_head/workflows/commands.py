@@ -29,10 +29,7 @@ def _expected_cache_identity(config: ConfidenceConfig) -> dict[str, object]:
             for split in ("train", "validation", "test")
         },
         "outputs": config.readouts.model_dump(),
-        "cache": {
-            "batch_size": config.cache.batch_size,
-            "shard_max_atoms": config.cache.shard_max_atoms,
-        },
+        "cache": {"batch_size": config.cache.batch_size},
         "execution": {
             "device": str(torch.device(config.run.device)),
             "model_dtype": "float32",
