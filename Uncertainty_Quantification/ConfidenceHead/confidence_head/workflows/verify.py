@@ -15,6 +15,7 @@ from ..cache import SCHEMA_VERSION as CACHE_SCHEMA_VERSION
 from ..config import ForceTargetMode
 from ..errors import force_error_definition
 from ..identity import binning_id, config_id, model_loss_id, run_id
+from ..single_target_verification import verify_single_target_predictions
 from ..trainer import CHECKPOINT_SCHEMA_VERSION
 from .evaluate import EVALUATION_SCHEMA_VERSION
 from .train import RUN_SCHEMA_VERSION
@@ -400,9 +401,11 @@ def verify_run(run_dir: Path, *, full: bool = True) -> dict[str, Any]:
             or evaluation_manifest.get("cache_id") != manifest.get("cache_id")
         ):
             raise ValueError("evaluation manifest identity/status mismatch")
-        _verify_force_semantics(
-            evaluation_manifest, force_mode, context="evaluation manifest"
-        )
+        active_targets = evaluation_manifest.get("active_targets")
+        if active_targets != ["energy"]:
+            _verify_force_semantics(
+                evaluation_manifest, force_mode, context="evaluation manifest"
+            )
         checkpoint = evaluation_manifest.get("checkpoint")
         if not isinstance(checkpoint, Mapping):
             raise ValueError("evaluation checkpoint declaration is missing")
@@ -436,12 +439,20 @@ def verify_run(run_dir: Path, *, full: bool = True) -> dict[str, Any]:
             raise ValueError("evaluation test counts are missing")
         _verify_cache(manifest, counts)
         bins = _mapping(root / "binning.json")
-        _verify_predictions(
-            paths["evaluation/test_predictions.pt"],
-            evaluation_manifest,
-            bins,
-            force_mode,
-        )
+        if active_targets in (["force"], ["energy"]):
+            verify_single_target_predictions(
+                paths["evaluation/test_predictions.pt"],
+                evaluation_manifest,
+                bins,
+                force_mode,
+            )
+        else:
+            _verify_predictions(
+                paths["evaluation/test_predictions.pt"],
+                evaluation_manifest,
+                bins,
+                force_mode,
+            )
     return {
         "status": "complete",
         "run_id": manifest["run_id"],

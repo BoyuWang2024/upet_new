@@ -62,6 +62,119 @@ def test_model_uses_strictly_separate_force_and_energy_readouts() -> None:
     )
 
 
+def _model_kwargs() -> dict[str, object]:
+    return {
+        "force_input_dim": 2,
+        "energy_input_dim": 3,
+        "force_hidden_dims": (4,),
+        "energy_hidden_dims": (5,),
+        "force_dropout": 0.0,
+        "energy_dropout": 0.0,
+        "force_num_bins": 7,
+        "energy_num_bins": 11,
+        "cumulant_order": 2,
+        "signed_root": True,
+        "force_target_mode": "atom_mean",
+    }
+
+
+def test_force_only_model_has_no_energy_modules_or_parameters() -> None:
+    model = ConfidenceModel(
+        **_model_kwargs(),
+        force_active=True,
+        energy_active=False,
+    )
+
+    assert model.force_head is not None
+    assert model.energy_adapter is None
+    assert model.energy_head is None
+    assert all("energy_" not in name for name, _ in model.named_parameters())
+    output = model(
+        force_features=torch.randn(5, 2),
+        energy_features=None,
+        offsets=None,
+    )
+    assert output.force_logits is not None
+    assert output.energy_logits is None
+
+
+def test_energy_only_model_has_no_force_modules_or_parameters() -> None:
+    model = ConfidenceModel(
+        **_model_kwargs(),
+        force_active=False,
+        energy_active=True,
+    )
+
+    assert model.force_head is None
+    assert model.energy_adapter is not None
+    assert model.energy_head is not None
+    assert all("force_head" not in name for name, _ in model.named_parameters())
+    output = model(
+        force_features=None,
+        energy_features=torch.randn(5, 3),
+        offsets=torch.tensor([0, 2, 5]),
+    )
+    assert output.force_logits is None
+    assert output.energy_logits is not None
+    assert output.energy_logits.shape == (2, 11)
+
+
+def test_model_rejects_disabling_both_targets() -> None:
+    with pytest.raises(ValueError, match="at least one"):
+        ConfidenceModel(
+            **_model_kwargs(),
+            force_active=False,
+            energy_active=False,
+        )
+
+
+def test_force_only_loss_is_supervised_weighted_total() -> None:
+    logits = torch.tensor([[2.0, 0.0], [0.0, 2.0]])
+    labels = torch.tensor([0, 1])
+
+    result = confidence_loss(
+        logits,
+        labels,
+        None,
+        None,
+        force_target_mode="atom_mean",
+        force_weight=0.5,
+        energy_weight=0.0,
+    )
+
+    expected = F.cross_entropy(logits, labels)
+    torch.testing.assert_close(result.total, 0.5 * expected)
+    torch.testing.assert_close(result.force, expected)
+    assert result.energy is None
+    assert result.force_count == 2
+    assert result.energy_count == 0
+
+
+def test_energy_only_loss_is_supervised_weighted_total() -> None:
+    logits = torch.tensor([[2.0, 0.0], [0.0, 2.0]])
+    labels = torch.tensor([0, 1])
+
+    result = confidence_loss(
+        None,
+        None,
+        logits,
+        labels,
+        force_target_mode="atom_mean",
+        force_weight=0.0,
+        energy_weight=0.3,
+    )
+
+    expected = F.cross_entropy(logits, labels)
+    torch.testing.assert_close(result.total, 0.3 * expected)
+    assert result.force is None
+    torch.testing.assert_close(
+        result.energy,
+        expected,
+    )
+    assert result.force_count == 0
+    assert result.energy_count == 2
+
+
 @pytest.mark.parametrize(
     ("mode", "expected_shape", "head_type"),
     [

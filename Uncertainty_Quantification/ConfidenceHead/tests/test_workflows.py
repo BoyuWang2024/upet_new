@@ -319,6 +319,52 @@ def test_atom_count_loader_uses_batch_sampler_and_covers_validation_residual(
     assert list(loader.batch_sampler) == [[0, 1], [2, 3]]
 
 
+@pytest.mark.parametrize(
+    ("force_coefficient", "energy_coefficient", "absent_prefix"),
+    [
+        (1.0, 0.0, "energy_"),
+        (0.0, 1.0, "force_head."),
+    ],
+)
+def test_single_target_training_elides_inactive_parameters(
+    config: ConfidenceConfig,
+    complete_cache: Path,
+    force_coefficient: float,
+    energy_coefficient: float,
+    absent_prefix: str,
+) -> None:
+    configured = _config_copy(
+        config,
+        loss={
+            "force_coefficient": force_coefficient,
+            "energy_coefficient": energy_coefficient,
+        },
+        trainer={"max_epochs": 1, "num_workers": 0},
+    )
+
+    run_dir = train_run(
+        configured,
+        cache_manifest_path=complete_cache,
+        run_name=f"single-target-{force_coefficient}-{energy_coefficient}",
+    )
+    snapshot = torch.load(
+        run_dir / "checkpoints" / "best.pt", map_location="cpu", weights_only=False
+    )
+
+    assert all(not name.startswith(absent_prefix) for name in snapshot["model"])
+
+    evaluation_dir = evaluate_run(
+        run_dir,
+        cache_manifest_path=complete_cache,
+    )
+    predictions = torch.load(
+        evaluation_dir / "test_predictions.pt", map_location="cpu", weights_only=True
+    )
+    inactive_field = "energy_logits" if energy_coefficient == 0 else "force_logits"
+    assert inactive_field not in predictions
+    verify_run(run_dir, full=True)
+
+
 def _pearson(left: torch.Tensor, right: torch.Tensor) -> float:
     left_centered = left - left.mean()
     right_centered = right - right.mean()

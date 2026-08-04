@@ -100,14 +100,14 @@ class LossAccumulator:
         force_coefficient: float,
         energy_coefficient: float,
     ) -> tuple[float, float, float]:
-        if self.force_count <= 0:
-            raise ValueError("force loss has no samples")
-        if self.energy_count <= 0:
-            raise ValueError("energy loss has no samples")
         _require_finite("force_coefficient", force_coefficient)
         _require_finite("energy_coefficient", energy_coefficient)
-        force = self.force_sum / self.force_count
-        energy = self.energy_sum / self.energy_count
+        if force_coefficient > 0 and self.force_count <= 0:
+            raise ValueError("force loss has no samples")
+        if energy_coefficient > 0 and self.energy_count <= 0:
+            raise ValueError("energy loss has no samples")
+        force = self.force_sum / self.force_count if self.force_count else 0.0
+        energy = self.energy_sum / self.energy_count if self.energy_count else 0.0
         total = force_coefficient * force + energy_coefficient * energy
         _require_finite("total epoch loss", total)
         return force, energy, total

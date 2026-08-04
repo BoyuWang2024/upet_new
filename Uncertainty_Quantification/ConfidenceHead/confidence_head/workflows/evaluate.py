@@ -33,6 +33,7 @@ from ..errors import energy_per_atom_error, force_error, force_error_definition
 from ..identity import cache_id
 from ..metrics import classification_metrics
 from ..model import ConfidenceModel
+from ..single_target_evaluation import evaluate_single_target
 from ..trainer import CHECKPOINT_SCHEMA_VERSION
 from .train import (
     RUN_SCHEMA_VERSION,
@@ -335,6 +336,9 @@ def _evaluate_run_locked(
         cumulant_order=config.model.energy.cumulant_order,
         signed_root=config.model.energy.signed_root,
         force_target_mode=config.model.force.target_mode,
+        force_active=config.model.force.enabled and config.loss.force_coefficient > 0,
+        energy_active=config.model.energy.enabled
+        and config.loss.energy_coefficient > 0,
     )
     model.load_state_dict(snapshot["model"])
     device = torch.device(config.run.device)
@@ -342,6 +346,39 @@ def _evaluate_run_locked(
     generator = torch.Generator(device="cpu")
     generator.manual_seed(config.run.seed)
     loader = _loader(dataset, config, shuffle=False, generator=generator)
+
+    if model.force_active != model.energy_active:
+
+        def assert_write() -> None:
+            _assert_evaluation_write_target(
+                run_dir=run_dir,
+                output_root=output_root,
+                run_identity=run_identity,
+                evaluation_dir=evaluation_dir,
+                evaluation_identity=evaluation_identity,
+            )
+
+        return evaluate_single_target(
+            model=model,
+            loader=loader,
+            device=device,
+            config=config,
+            force_spec=force_spec,
+            energy_spec=energy_spec,
+            evaluation_dir=evaluation_dir,
+            run_dir=run_dir,
+            manifest=manifest,
+            manifest_path=manifest_path,
+            cache_identity=cache_identity,
+            checkpoint_relative=checkpoint_relative,
+            checkpoint_sha=checkpoint_sha,
+            started_at=started_at,
+            evaluation_schema_version=EVALUATION_SCHEMA_VERSION,
+            to_device=_to_device,
+            offsets=_offsets,
+            write_csv=_write_csv,
+            assert_write=assert_write,
+        )
 
     collected: dict[str, list[torch.Tensor]] = {
         name: []

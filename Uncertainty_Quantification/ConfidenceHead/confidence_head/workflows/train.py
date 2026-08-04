@@ -462,22 +462,28 @@ def _batch_loss(
     energy_spec: BinningSpec,
     config: ConfidenceConfig,
 ) -> LossOutput:
-    force_observed = force_error(
-        batch["force_prediction"],
-        batch["force_reference"],
-        config.model.force.target_mode,
-    )
-    energy_observed = energy_per_atom_error(
-        batch["energy_prediction"],
-        batch["energy_reference"],
-        batch["num_atoms"],
-    )
-    force_labels = labels_from_thresholds(force_observed, force_spec.thresholds)
-    energy_labels = labels_from_thresholds(energy_observed, energy_spec.thresholds)
+    force_active = config.model.force.enabled and config.loss.force_coefficient > 0
+    energy_active = config.model.energy.enabled and config.loss.energy_coefficient > 0
+    force_labels: torch.Tensor | None = None
+    if force_active:
+        force_observed = force_error(
+            batch["force_prediction"],
+            batch["force_reference"],
+            config.model.force.target_mode,
+        )
+        force_labels = labels_from_thresholds(force_observed, force_spec.thresholds)
+    energy_labels: torch.Tensor | None = None
+    if energy_active:
+        energy_observed = energy_per_atom_error(
+            batch["energy_prediction"],
+            batch["energy_reference"],
+            batch["num_atoms"],
+        )
+        energy_labels = labels_from_thresholds(energy_observed, energy_spec.thresholds)
     output = model(
-        batch["force_features"],
-        batch["energy_features"],
-        batch["atom_offsets"],
+        batch["force_features"] if force_active else None,
+        batch["energy_features"] if energy_active else None,
+        batch["atom_offsets"] if energy_active else None,
     )
     return confidence_loss(
         output.force_logits,
@@ -492,9 +498,17 @@ def _batch_loss(
 
 def _accumulate(accumulator: LossAccumulator, loss: LossOutput) -> None:
     accumulator.update(
-        force_loss_sum=float(loss.force.detach()) * loss.force_count,
+        force_loss_sum=(
+            float(loss.force.detach()) * loss.force_count
+            if loss.force is not None
+            else 0.0
+        ),
         force_count=loss.force_count,
-        energy_loss_sum=float(loss.energy.detach()) * loss.energy_count,
+        energy_loss_sum=(
+            float(loss.energy.detach()) * loss.energy_count
+            if loss.energy is not None
+            else 0.0
+        ),
         energy_count=loss.energy_count,
     )
 
@@ -871,6 +885,9 @@ def _train_run_locked(
         cumulant_order=config.model.energy.cumulant_order,
         signed_root=config.model.energy.signed_root,
         force_target_mode=config.model.force.target_mode,
+        force_active=config.model.force.enabled and config.loss.force_coefficient > 0,
+        energy_active=config.model.energy.enabled
+        and config.loss.energy_coefficient > 0,
     ).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
