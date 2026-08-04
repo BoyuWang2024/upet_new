@@ -401,7 +401,7 @@ def _evaluate_run_locked(
             output = model(
                 batch["force_features"],
                 batch["energy_features"],
-                batch["atom_offsets"],
+                batch["num_atoms"],
             )
             force_observed = force_error(
                 batch["force_prediction"],

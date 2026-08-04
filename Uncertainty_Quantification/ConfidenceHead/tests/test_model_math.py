@@ -39,7 +39,7 @@ def test_model_uses_strictly_separate_force_and_energy_readouts() -> None:
     assert model.energy_head.network[0].out_features == 11
     force_features = torch.zeros(3, 2)
     energy_features = torch.full((3, 2), 7.0)
-    offsets = torch.tensor([0, 1, 3])
+    atom_counts = torch.tensor([1, 2])
     energy_head_inputs: list[torch.Tensor] = []
 
     def capture_energy_input(
@@ -49,7 +49,7 @@ def test_model_uses_strictly_separate_force_and_energy_readouts() -> None:
 
     handle = model.energy_head.register_forward_pre_hook(capture_energy_input)
     try:
-        output = model(force_features, energy_features, offsets)
+        output = model(force_features, energy_features, atom_counts)
     finally:
         handle.remove()
 
@@ -92,7 +92,7 @@ def test_force_only_model_has_no_energy_modules_or_parameters() -> None:
     output = model(
         force_features=torch.randn(5, 2),
         energy_features=None,
-        offsets=None,
+        atom_counts=None,
     )
     assert output.force_logits is not None
     assert output.energy_logits is None
@@ -112,7 +112,7 @@ def test_energy_only_model_has_no_force_modules_or_parameters() -> None:
     output = model(
         force_features=None,
         energy_features=torch.randn(5, 3),
-        offsets=torch.tensor([0, 2, 5]),
+        atom_counts=torch.tensor([2, 3]),
     )
     assert output.force_logits is None
     assert output.energy_logits is not None
@@ -205,7 +205,7 @@ def test_model_selects_force_head_from_explicit_mode(
     output = model(
         torch.zeros(3, 2),
         torch.ones(3, 2),
-        torch.tensor([0, 3]),
+        torch.tensor([3]),
     )
     assert output.force_logits.shape == expected_shape
 
@@ -228,9 +228,9 @@ def test_cumulant_adapter_matches_hand_calculation(
         signed_root=True,
     )
     features = torch.tensor([[1.0], [2.0], [3.0]])
-    offsets = torch.tensor([0, 2, 3])
+    atom_counts = torch.tensor([2, 1])
 
-    result = adapter(features, offsets)
+    result = adapter(features, atom_counts)
 
     expected = torch.tensor(
         [
@@ -252,7 +252,7 @@ def test_cumulant_adapter_rejects_orders_outside_one_to_eight(order: int) -> Non
 
 
 @pytest.mark.parametrize(
-    "offsets",
+    "atom_counts",
     [
         torch.tensor([[0, 2]]),
         torch.tensor([0.0, 2.0]),
@@ -262,11 +262,13 @@ def test_cumulant_adapter_rejects_orders_outside_one_to_eight(order: int) -> Non
         torch.tensor([0]),
     ],
 )
-def test_cumulant_adapter_rejects_invalid_offsets(offsets: torch.Tensor) -> None:
+def test_cumulant_adapter_rejects_invalid_atom_counts(
+    atom_counts: torch.Tensor,
+) -> None:
     adapter = LocalToGlobalCumulantAdapter(1, 2, signed_root=False)
 
-    with pytest.raises(ValueError, match="offsets"):
-        adapter(torch.tensor([[1.0], [2.0]]), offsets)
+    with pytest.raises(ValueError, match="atom_counts"):
+        adapter(torch.tensor([[1.0], [2.0]]), atom_counts)
 
 
 def test_component_head_has_three_independent_parameter_sets() -> None:
@@ -315,17 +317,17 @@ def test_component_head_rejects_non_matrix_features() -> None:
 
 
 @pytest.mark.parametrize(
-    ("force_features", "energy_features", "offsets"),
+    ("force_features", "energy_features", "atom_counts"),
     [
-        (torch.zeros(3, 1, 2), torch.ones(3, 2), torch.tensor([0, 3])),
-        (torch.zeros(3, 2), torch.ones(3, 1, 2), torch.tensor([0, 3])),
-        (torch.zeros(2, 2), torch.ones(3, 2), torch.tensor([0, 3])),
+        (torch.zeros(3, 1, 2), torch.ones(3, 2), torch.tensor([3])),
+        (torch.zeros(3, 2), torch.ones(3, 1, 2), torch.tensor([3])),
+        (torch.zeros(2, 2), torch.ones(3, 2), torch.tensor([3])),
     ],
 )
 def test_model_rejects_invalid_readout_feature_shapes(
     force_features: torch.Tensor,
     energy_features: torch.Tensor,
-    offsets: torch.Tensor,
+    atom_counts: torch.Tensor,
 ) -> None:
     model = ConfidenceModel(
         force_input_dim=2,
@@ -342,7 +344,7 @@ def test_model_rejects_invalid_readout_feature_shapes(
     )
 
     with pytest.raises(ValueError, match="features"):
-        model(force_features, energy_features, offsets)
+        model(force_features, energy_features, atom_counts)
 
 
 def test_confidence_loss_flattens_force_components_and_weights_means() -> None:

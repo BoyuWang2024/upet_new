@@ -70,7 +70,7 @@ def evaluate_single_target(
             output = model(
                 batch["force_features"] if force_active else None,
                 batch["energy_features"] if energy_active else None,
-                batch["atom_offsets"] if energy_active else None,
+                batch["num_atoms"] if energy_active else None,
             )
             values: dict[str, torch.Tensor] = {"structure_ids": batch["structure_ids"]}
             if force_active:

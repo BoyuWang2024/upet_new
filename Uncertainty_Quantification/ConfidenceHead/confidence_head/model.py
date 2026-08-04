@@ -81,7 +81,7 @@ class ConfidenceModel(nn.Module):
         self,
         force_features: torch.Tensor | None,
         energy_features: torch.Tensor | None,
-        offsets: torch.Tensor | None,
+        atom_counts: torch.Tensor | None,
     ) -> ConfidenceOutput:
         force_logits: torch.Tensor | None = None
         energy_logits: torch.Tensor | None = None
@@ -100,12 +100,12 @@ class ConfidenceModel(nn.Module):
         if self.energy_active:
             if (
                 energy_features is None
-                or offsets is None
+                or atom_counts is None
                 or self.energy_adapter is None
                 or self.energy_head is None
             ):
                 raise ValueError(
-                    "active energy target requires energy features and offsets"
+                    "active energy target requires energy features and atom_counts"
                 )
             if (
                 energy_features.ndim != 2
@@ -123,7 +123,7 @@ class ConfidenceModel(nn.Module):
                     raise ValueError(
                         "force and energy readout features must be distinct tensors"
                     )
-            global_features = self.energy_adapter(energy_features, offsets)
+            global_features = self.energy_adapter(energy_features, atom_counts)
             energy_logits = self.energy_head(global_features)
 
         return ConfidenceOutput(
