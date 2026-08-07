@@ -689,6 +689,36 @@ def _validate_comparable_energy(
     return tuple(correlations)
 
 
+def energy_series_by_order(
+    series: Sequence[PlotSeries],
+) -> Mapping[int, PlotSeries]:
+    """Index exactly eight energy series by their unique orders."""
+
+    by_order: dict[int, PlotSeries] = {}
+    for value in series:
+        if value.target != "energy" or value.order is None:
+            raise ValueError(f"expected an energy series, got {value.target}")
+        if value.order in by_order:
+            raise ValueError(f"duplicate energy order {value.order}")
+        by_order[value.order] = value
+    required = set(range(1, 9))
+    missing = sorted(required - set(by_order))
+    extra = sorted(set(by_order) - required)
+    if missing:
+        raise ValueError(f"missing energy orders: {missing}")
+    if extra:
+        raise ValueError(f"unexpected energy orders: {extra}")
+    return {order: by_order[order] for order in range(1, 9)}
+
+
+def validate_comparable_energy(
+    series_by_order: Mapping[int, PlotSeries],
+) -> tuple[CorrelationRow, ...]:
+    """Validate fair order comparisons and return checked correlations."""
+
+    return _validate_comparable_energy(series_by_order)
+
+
 def plot_completed_runs(
     runs: CompletedRuns,
     *,
@@ -698,7 +728,7 @@ def plot_completed_runs(
 
     if runs.force.target != "force" or runs.force.force_target_mode != _ATOM_MEAN:
         raise ValueError("completed force run must use atom_mean semantics")
-    correlations = _validate_comparable_energy(runs.energy_by_order)
+    correlations = validate_comparable_energy(runs.energy_by_order)
 
     artifacts: list[Path] = []
     for order in range(1, 9):

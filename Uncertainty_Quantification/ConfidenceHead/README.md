@@ -87,3 +87,48 @@ total_loss = 1.0 * force_loss + 1.5 * energy_loss
 ~~~
 
 学习率调度、最佳 checkpoint、EMA 与 early stopping 都只监控 `val/total_loss_ema`。改变力目标模式不会改变这套 early-stopping 逻辑。
+
+## 已完成任务绘图
+
+绘图只读取已经完成的 `evaluation/test_predictions.pt`、`evaluation/metrics.json`、`resolved_config.yaml` 和 `binning.json`。它会先执行完整产物校验，不会修改 checkpoint、配置、训练日志、manifest、预测文件，也不会向 W&B 上传数据。
+
+自动发现一个 force-only 任务和能量 order 1–8 八个 energy-only 任务，并生成全部图表：
+
+~~~bash
+python Uncertainty_Quantification/ConfidenceHead/scripts/plot_completed_runs.py \
+  --runs-root Uncertainty_Quantification/ConfidenceHead/outputs/runs \
+  --output-root Uncertainty_Quantification/ConfidenceHead/outputs
+~~~
+
+如果输出目录中保留了同一 order 的多个完整历史任务，自动发现会拒绝猜测。此时重复传入九次 `--run-dir`，显式指定一个力任务和能量 order 1–8：
+
+~~~bash
+python Uncertainty_Quantification/ConfidenceHead/scripts/plot_completed_runs.py \
+  --runs-root Uncertainty_Quantification/ConfidenceHead/outputs/runs \
+  --output-root Uncertainty_Quantification/ConfidenceHead/outputs \
+  --run-dir /absolute/path/to/force-run \
+  --run-dir /absolute/path/to/energy-order1 \
+  --run-dir /absolute/path/to/energy-order2 \
+  --run-dir /absolute/path/to/energy-order3 \
+  --run-dir /absolute/path/to/energy-order4 \
+  --run-dir /absolute/path/to/energy-order5 \
+  --run-dir /absolute/path/to/energy-order6 \
+  --run-dir /absolute/path/to/energy-order7 \
+  --run-dir /absolute/path/to/energy-order8
+~~~
+
+单个任务可以独立重绘：
+
+~~~bash
+python Uncertainty_Quantification/ConfidenceHead/scripts/plot_argmax_bin_boxplots.py \
+  --run-dir /absolute/path/to/completed-run
+~~~
+
+单任务结果写入 `<run>/plots/argmax_bin_boxplots/`，跨任务比较写入 `<output-root>/comparisons/energy_correlations/` 和 `<output-root>/comparisons/argmax_bin_boxplots/`。PNG 使用 300 DPI，PDF 保持矢量格式，统计 CSV 固定包含全部 50 个 bin；空 bin 保留并标记 `sample_count=0`。
+
+绘图严格沿用评估时的数据语义：
+
+- 能量使用已经计算好的逐原子能量绝对误差，绘图阶段不再除以原子数。
+- 力使用每个原子的三个笛卡尔分量绝对误差均值，即 `atom_mean`，不会展开成三个逐分量样本。
+- 能量 order 对比使用 expected error 与 observed error 的 Pearson/Spearman 相关系数，不绘制置信区间。
+- 重新计算的相关系数必须与 `evaluation/metrics.json` 一致，否则停止生成跨任务比较图。
