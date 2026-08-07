@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import math
-from collections.abc import Mapping
-from dataclasses import dataclass
+import os
+import tempfile
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
+import matplotlib
 import torch
 import yaml
+
+
+matplotlib.use("Agg", force=True)
+from matplotlib import pyplot as plt  # noqa: E402
 
 from .artifacts import load_verified_torch
 from .metrics import _correlation, _ranks
@@ -318,3 +327,269 @@ def energy_correlation(
         pearson=pearson,
         spearman=spearman,
     )
+
+
+@contextmanager
+def _atomic_output(path: Path) -> Iterator[Path]:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(
+        dir=target.parent,
+        prefix=f".{target.stem}.",
+        suffix=target.suffix,
+    )
+    os.close(descriptor)
+    temporary = Path(name)
+    try:
+        yield temporary
+        if not temporary.is_file() or temporary.stat().st_size == 0:
+            raise ValueError(f"plot output is empty: {target}")
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def write_bin_csv(path: Path, rows: Sequence[BinRow]) -> Path:
+    """Atomically write one row for every configured bin."""
+
+    if len(rows) != _EXPECTED_NUM_BINS:
+        raise ValueError("bin statistics CSV requires exactly 50 rows")
+    fieldnames = tuple(BinRow.__dataclass_fields__)
+    target = Path(path)
+    with _atomic_output(target) as temporary:
+        with temporary.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(asdict(row) for row in rows)
+            handle.flush()
+            os.fsync(handle.fileno())
+    return target
+
+
+def write_correlation_csv(
+    path: Path,
+    rows: Sequence[CorrelationRow],
+) -> Path:
+    """Atomically write order-sorted energy correlations."""
+
+    ordered = sorted(rows, key=lambda row: row.order)
+    if [row.order for row in ordered] != list(range(1, 9)):
+        raise ValueError("energy correlation rows must cover orders 1 through 8")
+    target = Path(path)
+    with _atomic_output(target) as temporary:
+        with temporary.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=tuple(CorrelationRow.__dataclass_fields__),
+            )
+            writer.writeheader()
+            writer.writerows(asdict(row) for row in ordered)
+            handle.flush()
+            os.fsync(handle.fileno())
+    return target
+
+
+def _target_ylabel(target: Target) -> str:
+    if target == "energy":
+        return "Absolute energy error per atom (eV/atom)"
+    return "Mean absolute force-component error per atom (eV/Å)"
+
+
+def _target_title(series: PlotSeries) -> str:
+    if series.target == "energy":
+        return f"Energy confidence (per atom), order {series.order}"
+    return "Force confidence (per-atom Cartesian-component mean)"
+
+
+def _draw_boxplot(
+    axis: Any,
+    series: PlotSeries,
+    *,
+    title: str,
+    tick_fontsize: float,
+) -> None:
+    rows = bin_rows(series)
+    predicted = series.logits.argmax(dim=-1)
+    positions: list[int] = []
+    distributions: list[torch.Tensor] = []
+    for row in rows:
+        values = series.observed[predicted == row.bin]
+        if values.numel():
+            positions.append(row.bin)
+            distributions.append(values)
+    boxes = axis.boxplot(
+        [values.numpy() for values in distributions],
+        positions=positions,
+        widths=0.65,
+        patch_artist=True,
+        showfliers=True,
+        medianprops={"color": "#b2182b", "linewidth": 1.2},
+        whiskerprops={"color": "#4d4d4d", "linewidth": 0.8},
+        capprops={"color": "#4d4d4d", "linewidth": 0.8},
+        flierprops={
+            "marker": ".",
+            "markersize": 1.5,
+            "markerfacecolor": "#777777",
+            "markeredgecolor": "#777777",
+            "alpha": 0.4,
+        },
+    )
+    for patch in boxes["boxes"]:
+        patch.set_facecolor("#80b1d3")
+        patch.set_edgecolor("#2b5c85")
+        patch.set_alpha(0.8)
+    axis.set_yscale("symlog", linthresh=1e-4)
+    axis.set_xlim(-0.75, _EXPECTED_NUM_BINS - 0.25)
+    axis.set_xticks(range(_EXPECTED_NUM_BINS))
+    axis.set_xticklabels(
+        [f"{row.bin}\nn={row.sample_count}" for row in rows],
+        rotation=90,
+        fontsize=tick_fontsize,
+    )
+    axis.set_xlabel("Predicted argmax bin")
+    axis.set_ylabel(_target_ylabel(series.target))
+    axis.set_title(title)
+    axis.grid(axis="y", which="both", alpha=0.25, linewidth=0.6)
+
+
+def _save_figure(figure: Any, path: Path, *, dpi: int | None = None) -> Path:
+    target = Path(path)
+    with _atomic_output(target) as temporary:
+        figure.savefig(
+            temporary,
+            format=target.suffix.removeprefix("."),
+            dpi=dpi,
+            bbox_inches="tight",
+        )
+    return target
+
+
+def plot_single_boxplot(
+    series: PlotSeries,
+    output_dir: Path,
+) -> tuple[Path, Path, Path]:
+    """Write one target's statistics plus PNG and vector PDF boxplots."""
+
+    root = Path(output_dir)
+    stem = f"test_{series.target}_argmax_bin"
+    csv_path = write_bin_csv(root / f"{stem}_statistics.csv", bin_rows(series))
+    figure, axis = plt.subplots(figsize=(20, 7))
+    try:
+        _draw_boxplot(
+            axis,
+            series,
+            title=_target_title(series),
+            tick_fontsize=6,
+        )
+        figure.tight_layout()
+        png_path = _save_figure(
+            figure,
+            root / f"{stem}_boxplot.png",
+            dpi=300,
+        )
+        pdf_path = _save_figure(figure, root / f"{stem}_boxplot.pdf")
+    finally:
+        plt.close(figure)
+    return csv_path, png_path, pdf_path
+
+
+def plot_combined_energy_boxplots(
+    series_by_order: Mapping[int, PlotSeries],
+    output_dir: Path,
+) -> Path:
+    """Write the order 1–8 energy comparison as a 4-by-2 PDF."""
+
+    if set(series_by_order) != set(range(1, 9)):
+        raise ValueError("combined energy plot requires orders 1 through 8")
+    figure, axes = plt.subplots(4, 2, figsize=(24, 26))
+    try:
+        for order, axis in zip(range(1, 9), axes.reshape(-1), strict=True):
+            series = series_by_order[order]
+            if series.target != "energy" or series.order != order:
+                raise ValueError(f"invalid energy series for order {order}")
+            _draw_boxplot(
+                axis,
+                series,
+                title=f"Energy confidence order {order}",
+                tick_fontsize=4,
+            )
+        figure.suptitle("UPET energy argmax-bin error distributions", fontsize=16)
+        figure.tight_layout(rect=(0, 0, 1, 0.985))
+        return _save_figure(
+            figure,
+            Path(output_dir) / "combined_energy_argmax_bin_boxplots.pdf",
+        )
+    finally:
+        plt.close(figure)
+
+
+def plot_combined_force_boxplot(series: PlotSeries, output_dir: Path) -> Path:
+    """Write the force-only per-atom comparison PDF."""
+
+    if series.target != "force" or series.force_target_mode != _ATOM_MEAN:
+        raise ValueError("combined force plot requires force atom_mean data")
+    figure, axis = plt.subplots(figsize=(20, 7))
+    try:
+        _draw_boxplot(
+            axis,
+            series,
+            title=_target_title(series),
+            tick_fontsize=6,
+        )
+        figure.tight_layout()
+        return _save_figure(
+            figure,
+            Path(output_dir) / "combined_force_argmax_bin_boxplots.pdf",
+        )
+    finally:
+        plt.close(figure)
+
+
+def plot_energy_correlations(
+    rows: Sequence[CorrelationRow],
+    output_dir: Path,
+) -> tuple[Path, Path, Path]:
+    """Write the no-CI order 1–8 Pearson/Spearman comparison."""
+
+    ordered = sorted(rows, key=lambda row: row.order)
+    if [row.order for row in ordered] != list(range(1, 9)):
+        raise ValueError("energy correlation plot requires orders 1 through 8")
+    values = [value for row in ordered for value in (row.pearson, row.spearman)]
+    if not all(math.isfinite(value) and -1.0 <= value <= 1.0 for value in values):
+        raise ValueError("correlations must be finite and within [-1, 1]")
+    root = Path(output_dir)
+    stem = "linear_order_correlations_no_ci"
+    csv_path = write_correlation_csv(root / f"{stem}.csv", ordered)
+    figure, axis = plt.subplots(figsize=(9, 6))
+    try:
+        orders = [row.order for row in ordered]
+        axis.plot(
+            orders,
+            [row.pearson for row in ordered],
+            marker="o",
+            linewidth=2,
+            label="Pearson",
+        )
+        axis.plot(
+            orders,
+            [row.spearman for row in ordered],
+            marker="s",
+            linewidth=2,
+            label="Spearman",
+        )
+        lower = min(0.0, min(values))
+        upper = max(0.0, max(values))
+        padding = max(0.03, 0.08 * (upper - lower))
+        axis.set_ylim(max(-1.0, lower - padding), min(1.0, upper + padding))
+        axis.set_xticks(orders)
+        axis.set_xlabel("Energy cumulant order")
+        axis.set_ylabel("Correlation of expected and observed error")
+        axis.set_title("UPET energy confidence correlations (no CI)")
+        axis.grid(alpha=0.3)
+        axis.legend()
+        figure.tight_layout()
+        png_path = _save_figure(figure, root / f"{stem}.png", dpi=300)
+        pdf_path = _save_figure(figure, root / f"{stem}.pdf")
+    finally:
+        plt.close(figure)
+    return csv_path, png_path, pdf_path
