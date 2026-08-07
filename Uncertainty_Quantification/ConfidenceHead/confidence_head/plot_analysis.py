@@ -593,3 +593,132 @@ def plot_energy_correlations(
     finally:
         plt.close(figure)
     return csv_path, png_path, pdf_path
+
+
+@dataclass(frozen=True)
+class CompletedRuns:
+    """The exact force-only and energy-order series required for comparison."""
+
+    force: PlotSeries
+    energy_by_order: Mapping[int, PlotSeries]
+
+
+def discover_completed_runs(
+    runs_root: Path,
+    *,
+    explicit_run_dirs: Sequence[Path] = (),
+) -> CompletedRuns:
+    """Find exactly one force run and one energy run for every order 1–8."""
+
+    root = Path(runs_root).resolve()
+    if explicit_run_dirs:
+        candidates = tuple(Path(path).resolve() for path in explicit_run_dirs)
+    else:
+        if not root.is_dir():
+            raise ValueError(f"runs root does not exist: {root}")
+        candidates = tuple(
+            child.resolve()
+            for child in sorted(root.iterdir())
+            if child.is_dir()
+            and (child / "manifest.json").is_file()
+            and (child / "evaluation" / "manifest.json").is_file()
+        )
+    if not candidates:
+        raise ValueError(f"no completed plot candidates found under {root}")
+
+    force_series: list[PlotSeries] = []
+    energy_by_order: dict[int, PlotSeries] = {}
+    for candidate in candidates:
+        series = load_plot_series(candidate)
+        if series.target == "force":
+            force_series.append(series)
+            continue
+        if series.order is None:
+            raise ValueError(f"energy run has no order: {candidate}")
+        if series.order in energy_by_order:
+            previous = energy_by_order[series.order].run_dir
+            raise ValueError(
+                f"duplicate energy order {series.order}: {previous}, {candidate}"
+            )
+        energy_by_order[series.order] = series
+
+    if len(force_series) != 1:
+        paths = ", ".join(str(series.run_dir) for series in force_series) or "<none>"
+        raise ValueError(f"expected exactly one force run, found: {paths}")
+    required_orders = set(range(1, 9))
+    missing = sorted(required_orders - set(energy_by_order))
+    extra = sorted(set(energy_by_order) - required_orders)
+    if missing:
+        raise ValueError(f"missing energy orders: {missing}")
+    if extra:
+        raise ValueError(f"unexpected energy orders: {extra}")
+    return CompletedRuns(
+        force=force_series[0],
+        energy_by_order={
+            order: energy_by_order[order] for order in sorted(required_orders)
+        },
+    )
+
+
+def _validate_comparable_energy(
+    series_by_order: Mapping[int, PlotSeries],
+) -> tuple[CorrelationRow, ...]:
+    if set(series_by_order) != set(range(1, 9)):
+        raise ValueError("energy comparison requires orders 1 through 8")
+    reference = series_by_order[1]
+    if reference.target != "energy" or reference.order != 1:
+        raise ValueError("order 1 reference must be an energy series")
+    correlations: list[CorrelationRow] = []
+    for order in range(1, 9):
+        series = series_by_order[order]
+        if series.target != "energy" or series.order != order:
+            raise ValueError(f"invalid energy series for order {order}")
+        if not torch.equal(series.structure_ids, reference.structure_ids):
+            raise ValueError(
+                f"energy structure_ids differ between orders 1 and {order}"
+            )
+        if not torch.equal(series.observed, reference.observed):
+            raise ValueError(
+                f"observed energy errors differ between orders 1 and {order}"
+            )
+        if not torch.equal(series.representatives, reference.representatives):
+            raise ValueError(
+                f"energy bin representatives differ between orders 1 and {order}"
+            )
+        correlations.append(energy_correlation(series))
+    return tuple(correlations)
+
+
+def plot_completed_runs(
+    runs: CompletedRuns,
+    *,
+    comparisons_dir: Path,
+) -> tuple[Path, ...]:
+    """Validate all nine series, then write single-run and comparison plots."""
+
+    if runs.force.target != "force" or runs.force.force_target_mode != _ATOM_MEAN:
+        raise ValueError("completed force run must use atom_mean semantics")
+    correlations = _validate_comparable_energy(runs.energy_by_order)
+
+    artifacts: list[Path] = []
+    for order in range(1, 9):
+        series = runs.energy_by_order[order]
+        artifacts.extend(
+            plot_single_boxplot(
+                series,
+                series.run_dir / "plots" / "argmax_bin_boxplots",
+            )
+        )
+    artifacts.extend(
+        plot_single_boxplot(
+            runs.force,
+            runs.force.run_dir / "plots" / "argmax_bin_boxplots",
+        )
+    )
+    comparison_root = Path(comparisons_dir)
+    boxplot_root = comparison_root / "argmax_bin_boxplots"
+    correlation_root = comparison_root / "energy_correlations"
+    artifacts.append(plot_combined_energy_boxplots(runs.energy_by_order, boxplot_root))
+    artifacts.append(plot_combined_force_boxplot(runs.force, boxplot_root))
+    artifacts.extend(plot_energy_correlations(correlations, correlation_root))
+    return tuple(artifacts)
