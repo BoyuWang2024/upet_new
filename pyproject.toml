@@ -103,6 +103,8 @@ markers = [
     "llpr_n20: runs the real checkpoint on the 20-structure smoke dataset",
     "llpr_legacy: reads the audited external legacy result tree",
     "confidence_head_n20: runs the real UPET checkpoint on the 20-structure smoke dataset",
+    "fge_n20: runs the real UPET FGE n20 CPU workflow",
+    "fge_legacy: reads the audited external legacy FGE result tree",
 ]
 # ignore" a bunch of internal warnings with Python 3.13 and PyTorch
 filterwarnings = [
