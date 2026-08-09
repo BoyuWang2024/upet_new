@@ -49,6 +49,17 @@ def test_global_mae_uses_all_scalar_elements() -> None:
     assert global_mae(prediction, reference) == pytest.approx(10.0 / 4.0)
 
 
+def test_global_mae_uses_float64_for_finite_float32_extremes() -> None:
+    maximum = torch.finfo(torch.float32).max
+    prediction = torch.tensor([maximum], dtype=torch.float32)
+    reference = torch.tensor([-maximum], dtype=torch.float32)
+
+    result = global_mae(prediction, reference)
+
+    assert math.isfinite(result)
+    assert result == pytest.approx(2.0 * float(maximum))
+
+
 def test_evaluation_builds_equal_weight_ensemble_legacy_uq_and_global_mae() -> None:
     result = evaluate_prediction(
         _payload(), coverages=[1.0, 0.5], constant_tolerance=1e-12
@@ -66,6 +77,12 @@ def test_evaluation_builds_equal_weight_ensemble_legacy_uq_and_global_mae() -> N
         "force_structure",
     }
     assert "stress" not in result.uncertainty
+    assert set(result.uncertainty["force_structure"]) == {"std"}
+    assert set(result.uncertainty["force_structure"]["std"]) == {
+        "mean",
+        "max",
+        "q95",
+    }
     torch.testing.assert_close(
         result.uncertainty["energy_total"]["std"],
         torch.tensor([1.0, 1.0, 2.0]),
@@ -95,6 +112,20 @@ def test_evaluation_builds_equal_weight_ensemble_legacy_uq_and_global_mae() -> N
     }
     assert result.report_inputs["formula_version"] == "legacy_upet_fge_v1"
     assert result.report_inputs["metric_schema_version"] == 4
+
+    assert set(result.metrics["correlations"]) == {
+        "energy_total_std",
+        "energy_total_gmd",
+        "energy_per_atom_std",
+        "energy_per_atom_gmd",
+        "force_component_std",
+        "force_component_gmd",
+        "force_atom_vector_std",
+        "force_atom_vector_gmd",
+        "force_structure_mean_std",
+        "force_structure_max_std",
+        "force_structure_q95_std",
+    }
 
 
 def test_correlations_use_average_tied_ranks_deterministically() -> None:
@@ -166,16 +197,41 @@ def test_evaluation_rejects_invalid_constant_tolerance(tolerance: float) -> None
         evaluate_prediction(_payload(), [1.0], tolerance)
 
 
-def test_evaluation_rejects_missing_and_unknown_payload_fields() -> None:
+def test_evaluation_rejects_missing_consumed_payload_fields() -> None:
     missing = _payload()
     del missing["stress_reference"]
     with pytest.raises(ValueError, match="missing.*stress_reference"):
         evaluate_prediction(missing, [1.0], 1e-12)
 
-    unknown = _payload()
-    unknown["legacy_log_path"] = "/old/result"
-    with pytest.raises(ValueError, match="unknown.*legacy_log_path"):
-        evaluate_prediction(unknown, [1.0], 1e-12)
+
+def test_evaluation_accepts_representative_canonical_metadata_superset() -> None:
+    baseline = evaluate_prediction(_payload(), [1.0, 0.5], 1e-12)
+    canonical = _payload()
+    canonical.update(
+        {
+            "structure_ids": ("structure_000", "structure_001", "structure_002"),
+            "atomic_numbers": torch.tensor([1, 6, 8, 14], dtype=torch.int64),
+            "structure_mapping": torch.tensor([0, 0, 1, 2], dtype=torch.int64),
+            "target_names": {
+                "energy": "energy",
+                "forces": "forces",
+                "stress": "stress",
+            },
+            "units": {
+                "energy": "eV",
+                "forces": "eV/angstrom",
+                "stress": "eV/angstrom^3",
+            },
+            "statistics": {"K": 2, "S": 3, "A": 4},
+        }
+    )
+
+    enriched = evaluate_prediction(canonical, [1.0, 0.5], 1e-12)
+
+    assert enriched.metrics == baseline.metrics
+    assert enriched.report_inputs == baseline.report_inputs
+    for target in ("energy", "forces", "stress"):
+        torch.testing.assert_close(enriched.ensemble[target], baseline.ensemble[target])
 
 
 @pytest.mark.parametrize(
@@ -209,3 +265,30 @@ def test_evaluation_rejects_non_finite_values() -> None:
 
     with pytest.raises(ValueError, match="finite"):
         evaluate_prediction(payload, [1.0], 1e-12)
+
+
+def test_evaluation_rejects_non_finite_derived_uncertainty() -> None:
+    payload = _payload()
+    maximum = torch.finfo(torch.float32).max
+    payload["energy_prediction"] = torch.tensor(
+        [[-maximum, 0.0, 0.0], [maximum, 0.0, 0.0]], dtype=torch.float32
+    )
+
+    with pytest.raises(ValueError, match="derived.*finite"):
+        evaluate_prediction(payload, [1.0], 1e-12)
+
+
+def test_evaluation_keeps_finite_extreme_energy_mae() -> None:
+    payload = _payload()
+    maximum = torch.finfo(torch.float32).max
+    payload["energy_prediction"] = torch.full((2, 3), maximum, dtype=torch.float32)
+    payload["energy_reference"] = torch.full((3,), -maximum, dtype=torch.float32)
+
+    result = evaluate_prediction(payload, [1.0], 1e-12)
+
+    energy_total = result.metrics["mae"]["energy_total"]
+    energy_per_atom = result.metrics["mae"]["energy_per_atom"]
+    assert math.isfinite(energy_total)
+    assert math.isfinite(energy_per_atom)
+    assert energy_total == pytest.approx(2.0 * float(maximum))
+    assert energy_per_atom == pytest.approx((5.0 / 3.0) * float(maximum))

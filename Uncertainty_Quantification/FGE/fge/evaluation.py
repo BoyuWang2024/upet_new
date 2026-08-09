@@ -18,7 +18,7 @@ from .uncertainty import (
 )
 
 
-_PAYLOAD_FIELDS = frozenset(
+_REQUIRED_PAYLOAD_FIELDS = frozenset(
     {
         "energy_prediction",
         "forces_prediction",
@@ -83,7 +83,29 @@ def global_mae(prediction: torch.Tensor, reference: torch.Tensor) -> float:
         torch.isfinite(reference).all().item()
     ):
         raise ValueError("prediction and reference must contain only finite values")
-    return float(torch.abs(prediction - reference).sum().item() / prediction.numel())
+    prediction_float64 = prediction.to(dtype=torch.float64)
+    reference_float64 = reference.to(dtype=torch.float64)
+    return float(
+        torch.abs(prediction_float64 - reference_float64).sum().item()
+        / prediction.numel()
+    )
+
+
+def _assert_finite_derived(value: object, role: str) -> None:
+    if isinstance(value, torch.Tensor):
+        if not bool(torch.isfinite(value).all().item()):
+            raise ValueError(f"derived {role} must contain only finite values")
+        return
+    if isinstance(value, Mapping):
+        for name, nested in value.items():
+            _assert_finite_derived(nested, f"{role}.{name}")
+        return
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        for index, nested in enumerate(value):
+            _assert_finite_derived(nested, f"{role}[{index}]")
+        return
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"derived {role} must contain only finite values")
 
 
 def _validate_coverages(coverages: Sequence[float]) -> tuple[float, ...]:
@@ -108,12 +130,9 @@ def _validate_payload(payload: Mapping[str, object]) -> dict[str, Any]:
     if not isinstance(payload, Mapping):
         raise TypeError("payload must be a mapping")
     fields = set(payload)
-    missing = sorted(_PAYLOAD_FIELDS - fields)
-    unknown = sorted(fields - _PAYLOAD_FIELDS)
+    missing = sorted(_REQUIRED_PAYLOAD_FIELDS - fields)
     if missing:
         raise ValueError(f"payload has missing fields: {', '.join(missing)}")
-    if unknown:
-        raise ValueError(f"payload has unknown fields: {', '.join(unknown)}")
 
     energy = _floating_tensor(payload["energy_prediction"], "energy_prediction")
     forces = _floating_tensor(payload["forces_prediction"], "forces_prediction")
@@ -298,10 +317,11 @@ def evaluate_prediction(
     offsets = data["offsets"]
     n_atoms_float = n_atoms.to(dtype=energy.dtype)
 
-    energy_mean = energy.mean(dim=0)
-    forces_mean = forces.mean(dim=0)
-    stress_mean = stress.mean(dim=0)
+    energy_mean = energy.to(dtype=torch.float64).mean(dim=0).to(dtype=energy.dtype)
+    forces_mean = forces.to(dtype=torch.float64).mean(dim=0).to(dtype=forces.dtype)
+    stress_mean = stress.to(dtype=torch.float64).mean(dim=0).to(dtype=stress.dtype)
     ensemble = {"energy": energy_mean, "forces": forces_mean, "stress": stress_mean}
+    _assert_finite_derived(ensemble, "ensemble")
 
     energy_per_atom = energy / n_atoms_float.unsqueeze(0)
     force_deviation = forces - forces_mean.unsqueeze(0)
@@ -310,7 +330,6 @@ def evaluate_prediction(
     )
     force_vector_gmd = vector_gmd(forces)
     force_structure_std = reduce_force_by_structure(force_vector_std, offsets)
-    force_structure_gmd = reduce_force_by_structure(force_vector_gmd, offsets)
     energy_total_uncertainty = {
         "std": population_std(energy),
         "gmd": scalar_gmd(energy),
@@ -329,19 +348,39 @@ def evaluate_prediction(
         "energy_per_atom": energy_per_atom_uncertainty,
         "force_component": force_component_uncertainty,
         "force_atom_vector": {"std": force_vector_std, "gmd": force_vector_gmd},
-        "force_structure": {"std": force_structure_std, "gmd": force_structure_gmd},
+        "force_structure": {"std": force_structure_std},
     }
+    _assert_finite_derived(uncertainty, "uncertainty")
 
-    energy_total_error = torch.abs(energy_mean - energy_reference)
+    energy_mean_float64 = energy_mean.to(dtype=torch.float64)
+    forces_mean_float64 = forces_mean.to(dtype=torch.float64)
+    stress_mean_float64 = stress_mean.to(dtype=torch.float64)
+    energy_reference_float64 = energy_reference.to(dtype=torch.float64)
+    forces_reference_float64 = forces_reference.to(dtype=torch.float64)
+    stress_reference_float64 = stress_reference.to(dtype=torch.float64)
+    n_atoms_float64 = n_atoms.to(dtype=torch.float64)
+    energy_total_error = torch.abs(energy_mean_float64 - energy_reference_float64)
     energy_per_atom_error = torch.abs(
-        energy_mean / n_atoms_float - energy_reference / n_atoms_float
+        energy_mean_float64 / n_atoms_float64
+        - energy_reference_float64 / n_atoms_float64
     )
-    force_component_error = torch.abs(forces_mean - forces_reference)
+    force_component_error = torch.abs(forces_mean_float64 - forces_reference_float64)
     force_vector_error = torch.linalg.vector_norm(
-        forces_mean - forces_reference, dim=-1
+        forces_mean_float64 - forces_reference_float64, dim=-1
     )
     force_structure_error = reduce_force_by_structure(force_vector_error, offsets)
-    stress_component_error = torch.abs(stress_mean - stress_reference)
+    stress_component_error = torch.abs(stress_mean_float64 - stress_reference_float64)
+    _assert_finite_derived(
+        {
+            "energy_total": energy_total_error,
+            "energy_per_atom": energy_per_atom_error,
+            "force_component": force_component_error,
+            "force_vector": force_vector_error,
+            "force_structure": force_structure_error,
+            "stress_component": stress_component_error,
+        },
+        "errors",
+    )
 
     correlation_inputs = {
         "energy_total_std": (energy_total_uncertainty["std"], energy_total_error),
@@ -368,10 +407,6 @@ def evaluate_prediction(
     for reduction in ("mean", "max", "q95"):
         correlation_inputs[f"force_structure_{reduction}_std"] = (
             force_structure_std[reduction],
-            force_structure_error[reduction],
-        )
-        correlation_inputs[f"force_structure_{reduction}_gmd"] = (
-            force_structure_gmd[reduction],
             force_structure_error[reduction],
         )
     correlations = {
@@ -401,7 +436,8 @@ def evaluate_prediction(
         "mae": {
             "energy_total": global_mae(energy_mean, energy_reference),
             "energy_per_atom": global_mae(
-                energy_mean / n_atoms_float, energy_reference / n_atoms_float
+                energy_mean_float64 / n_atoms_float64,
+                energy_reference_float64 / n_atoms_float64,
             ),
             "force_component": global_mae(forces_mean, forces_reference),
             "stress_component": global_mae(stress_mean, stress_reference),
@@ -428,6 +464,8 @@ def evaluate_prediction(
             for diagnostic in diagnostics
         ),
     }
+    _assert_finite_derived(metrics, "metrics")
+    _assert_finite_derived(report_inputs, "report_inputs")
     return EvaluationArtifacts(
         ensemble=ensemble,
         uncertainty=uncertainty,
