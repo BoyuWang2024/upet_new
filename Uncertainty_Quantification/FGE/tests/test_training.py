@@ -18,10 +18,12 @@ import pytest
 import torch
 
 from Uncertainty_Quantification.FGE.fge import HardFailure, asymmetric_triangular_lr
+from Uncertainty_Quantification.FGE.fge.members import pack_member
 
 # RED contract: Task 6 supplies this native orchestration module.  Do not add
 # production code until this import has failed once on the remote test checkout.
 from Uncertainty_Quantification.FGE.fge.training import (  # noqa: F401
+    PETTrainingRuntime,
     TrainingBatchResult,
     TrainingRuntime,
     train_fge,
@@ -318,3 +320,79 @@ def test_resume_rejects_any_identity_mismatch_before_training(tmp_path: Path) ->
         train_fge(config, runtime=runtime)
 
     assert runtime.lrs == []
+
+
+def test_training_constructs_the_native_pet_runtime_when_not_injected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The public train path must bind the real PET runtime by default."""
+
+    runtime = _TorchRuntime(batches=4)
+    seen: dict[str, object] = {}
+
+    def build(config: Any) -> _TorchRuntime:
+        seen["config"] = config
+        return runtime
+
+    monkeypatch.setattr(PETTrainingRuntime, "from_config", staticmethod(build))
+
+    train_fge(_config(tmp_path))
+
+    assert seen["config"].project.name == "upet_fge_n20_cpu"
+    assert len(runtime.lrs) == 4
+
+
+_REAL_CHECKPOINT = Path("/home/bywang/code/UQ/upet/pet-omatpes-l-v0.1.0.ckpt")
+_REAL_N20 = Path("/home/bywang/code/UQ/upet_new/data/dataset/matpes_n20.extxyz")
+
+
+@pytest.mark.skipif(
+    not (_REAL_CHECKPOINT.is_file() and _REAL_N20.is_file()),
+    reason="requires the remote UPET n20 PET fixture",
+)
+def test_native_pet_runtime_runs_one_n20_batch_validation_and_member_reload(
+    tmp_path: Path,
+) -> None:
+    """Real PET API compatibility: batch, validation, and weights-only reload."""
+
+    config = SimpleNamespace(
+        paths=SimpleNamespace(
+            base_checkpoint=_REAL_CHECKPOINT, train_data=_REAL_N20, val_data=_REAL_N20
+        ),
+        data=SimpleNamespace(
+            energy_target="energy",
+            forces_target="non_conservative_forces",
+            stress_target="non_conservative_stress",
+            energy_unit="eV",
+            forces_unit="eV/angstrom",
+            stress_unit="eV/angstrom^3",
+        ),
+        training=SimpleNamespace(
+            device="cpu",
+            dtype="float32",
+            batch_size=4,
+            validation_batch_size=4,
+            drop_last=True,
+            num_workers=0,
+        ),
+        identity=SimpleNamespace(
+            base_checkpoint_sha256=SHA_BASE,
+            train_data_sha256=SHA_TRAIN,
+            val_data_sha256=SHA_TRAIN,
+        ),
+        sanitized=lambda: {"remote_n20": True},
+    )
+    runtime = PETTrainingRuntime.from_config(config)
+    result = runtime.train_batch(next(iter(runtime.train_loader)), lr=1e-8)
+    result.loss.backward()
+    assert tuple(result.loss_terms) == (
+        "energy",
+        "forces",
+        "virial",
+        "non_conservative_forces",
+        "non_conservative_stress",
+    )
+    assert runtime.validate(use_ema=False)["loss_total"] >= 0.0
+    member_path = tmp_path / "member_001.pt"
+    torch.save(pack_member(runtime.model, 1, 1, 1, SHA_BASE), member_path)
+    assert runtime.reload_and_smoke(member_path)

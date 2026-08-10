@@ -22,9 +22,11 @@ from .artifacts import (
 from .errors import HardFailure
 from .manifests import build_training_manifest
 from .members import (
+    apply_member,
     assert_frozen_unchanged,
     assert_readout_contract,
     frozen_fingerprint,
+    load_member,
     pack_member,
 )
 from .schedule import asymmetric_triangular_lr
@@ -267,10 +269,394 @@ def _manifest_identity(
     }
 
 
+class PETTrainingRuntime:
+    """Real PET restart runtime with frozen checkpoint transforms."""
+
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        raw: Mapping[str, object],
+        base_state: Mapping[str, torch.Tensor],
+        loss_fn: object,
+        train_loader: Iterable[object],
+        val_loader: Iterable[object],
+        config: Any,
+        unpack_batch: Any,
+        batch_to: Any,
+        evaluate_model: Any,
+        average_by_num_atoms: Any,
+        per_structure_targets: tuple[str, ...],
+    ) -> None:
+        self.model = model
+        self._raw = raw
+        self._base_state = {
+            name: value.detach().cpu().clone() for name, value in base_state.items()
+        }
+        self._loss_fn = loss_fn
+        self.train_loader = train_loader
+        self._val_loader = val_loader
+        self._config = config
+        self._unpack_batch = unpack_batch
+        self._batch_to = batch_to
+        self._evaluate_model = evaluate_model
+        self._average_by_num_atoms = average_by_num_atoms
+        self._per_structure_targets = per_structure_targets
+        self._frozen = frozen_fingerprint(model)
+
+    @staticmethod
+    def _targets(config: Any, path: Path) -> dict[str, object]:
+        source = str(path)
+        return {
+            "energy": {
+                "quantity": "energy",
+                "read_from": source,
+                "reader": "ase",
+                "key": config.data.energy_target,
+                "unit": "eV",
+                "type": "scalar",
+                "sample_kind": "system",
+                "per_atom": False,
+                "num_subtargets": 1,
+                "forces": {"read_from": source, "key": "forces"},
+                "stress": {"read_from": source, "key": "stress"},
+                "virial": False,
+            },
+            "non_conservative_forces": {
+                "quantity": "force",
+                "read_from": source,
+                "reader": "ase",
+                "key": "forces",
+                "unit": "eV/A",
+                "type": {"cartesian": {"rank": 1}},
+                "sample_kind": "atom",
+                "per_atom": True,
+                "num_subtargets": 1,
+            },
+            "non_conservative_stress": {
+                "quantity": "pressure",
+                "read_from": source,
+                "reader": "ase",
+                "key": "stress",
+                "unit": "eV/A^3",
+                "type": {"cartesian": {"rank": 2}},
+                "sample_kind": "system",
+                "per_atom": False,
+                "num_subtargets": 1,
+            },
+        }
+
+    @classmethod
+    def from_config(cls, config: Any) -> "PETTrainingRuntime":
+        """Construct only the official data/model/loss path; never refit transforms."""
+        try:
+            import copy
+            import warnings
+
+            from metatrain.utils.additive import get_remove_additive_transform
+            from metatrain.utils.augmentation import RotationalAugmenter
+            from metatrain.utils.data import (
+                CollateFn,
+                CombinedDataLoader,
+                Dataset,
+                read_systems,
+                read_targets,
+                unpack_batch,
+            )
+            from metatrain.utils.evaluate_model import evaluate_model
+            from metatrain.utils.io import model_from_checkpoint
+            from metatrain.utils.loss import LossAggregator
+            from metatrain.utils.neighbor_lists import (
+                get_requested_neighbor_lists,
+                get_system_with_neighbor_lists_transform,
+            )
+            from metatrain.utils.per_atom import average_by_num_atoms
+            from metatrain.utils.scaler import get_remove_scale_transform
+            from metatrain.utils.transfer import batch_to
+            from omegaconf import OmegaConf
+            from torch.utils.data import DataLoader
+        except ImportError as exc:
+            raise HardFailure(
+                "PET training runtime dependencies are unavailable"
+            ) from exc
+        if config.training.device != "cpu" or config.training.dtype != "float32":
+            raise HardFailure("native FGE PET runtime requires CPU float32 readouts")
+        raw = torch.load(
+            config.paths.base_checkpoint, map_location="cpu", weights_only=False
+        )
+        if not isinstance(raw, Mapping):
+            raise HardFailure("checkpoint is not a mapping")
+        from .checkpoint import recover_loss_contract
+
+        state = raw.get("model_state_dict")
+        if (
+            not isinstance(state, Mapping)
+            or not state
+            or any(
+                not isinstance(name, str)
+                or (not isinstance(value, torch.Tensor) and name != "finetune_config")
+                for name, value in state.items()
+            )
+            or (
+                "finetune_config" in state
+                and not isinstance(state["finetune_config"], Mapping)
+            )
+        ):
+            raise HardFailure("checkpoint is missing a valid restart model_state_dict")
+        base_state = {
+            name: value
+            for name, value in state.items()
+            if isinstance(value, torch.Tensor)
+        }
+        contract = recover_loss_contract(raw)
+        model = model_from_checkpoint(raw, context="restart").to(
+            device="cpu", dtype=torch.float32
+        )
+        for name, parameter in model.named_parameters():
+            parameter.requires_grad_(
+                name.startswith(("node_last_layers.", "edge_last_layers."))
+            )
+        assert_readout_contract(model)
+
+        for additive in model.additive_models:
+            additive.to(dtype=torch.float64)
+        model.scaler.to(dtype=torch.float64)
+        model.additive_models[0].weights_to(device="cpu", dtype=torch.float64)
+        additives = copy.deepcopy(
+            model.additive_models.to(device="cpu", dtype=torch.float64)
+        )
+        model.additive_models[0].weights_to(device="cpu", dtype=torch.float64)
+        model.scaler.scales_to(device="cpu", dtype=torch.float64)
+        scaler = copy.deepcopy(model.scaler.to(device="cpu", dtype=torch.float64))
+        model.scaler.scales_to(device="cpu", dtype=torch.float64)
+        model.additive_models.to(device="cpu", dtype=torch.float32)
+        model.additive_models[0].weights_to(device="cpu", dtype=torch.float32)
+        model.scaler.to(device="cpu", dtype=torch.float32)
+        model.scaler.scales_to(device="cpu", dtype=torch.float32)
+
+        def build_dataset(path: Path):
+            systems = read_systems(str(path))
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=(
+                        r"the name of "
+                        r"'non_conservative_(forces|stress)' resembles.*"
+                    ),
+                    category=UserWarning,
+                )
+                values, info = read_targets(
+                    OmegaConf.create(cls._targets(config, path))
+                )
+            expected = model.dataset_info.targets
+            if set(info) != set(expected) or any(
+                not info[name].is_compatible_with(expected[name]) for name in expected
+            ):
+                raise HardFailure("dataset targets are incompatible with checkpoint")
+            return Dataset.from_dict({"system": systems, **values})
+
+        train_data, val_data = (
+            build_dataset(config.paths.train_data),
+            build_dataset(config.paths.val_data),
+        )
+        targets, extra = model.dataset_info.targets, model.dataset_info.extra_data
+        fixed = [
+            get_system_with_neighbor_lists_transform(
+                get_requested_neighbor_lists(model)
+            ),
+            get_remove_additive_transform(additives, targets),
+            get_remove_scale_transform(scaler),
+        ]
+        train_collate = CollateFn(
+            target_keys=list(targets),
+            callables=[
+                RotationalAugmenter(
+                    target_info_dict=targets, extra_data_info_dict=extra
+                ).apply_random_augmentations,
+                *fixed,
+            ],
+        )
+        val_collate = CollateFn(target_keys=list(targets), callables=fixed)
+        train_loader = CombinedDataLoader(
+            [
+                DataLoader(
+                    train_data,
+                    batch_size=config.training.batch_size,
+                    shuffle=True,
+                    drop_last=config.training.drop_last,
+                    collate_fn=train_collate,
+                    num_workers=config.training.num_workers,
+                )
+            ],
+            shuffle=True,
+        )
+        val_loader = CombinedDataLoader(
+            [
+                DataLoader(
+                    val_data,
+                    batch_size=config.training.validation_batch_size,
+                    shuffle=False,
+                    drop_last=False,
+                    collate_fn=val_collate,
+                    num_workers=config.training.num_workers,
+                )
+            ],
+            shuffle=False,
+        )
+
+        terms = {term.name: term for term in contract.terms}
+
+        def loss_term(name: str) -> dict[str, object]:
+            term = terms[name]
+            return {
+                "type": "huber",
+                "delta": term.delta,
+                "weight": term.weight,
+                "reduction": contract.reduction,
+                "gradients": {},
+            }
+
+        loss_config = {
+            "energy": loss_term("energy"),
+            "non_conservative_forces": loss_term("non_conservative_forces"),
+            "non_conservative_stress": loss_term("non_conservative_stress"),
+        }
+        loss_config["energy"]["gradients"] = {
+            "positions": loss_term("forces"),
+            "strain": loss_term("virial"),
+        }
+        base_state = {
+            name: value.detach().cpu().clone()
+            for name, value in model.state_dict().items()
+        }
+        return cls(
+            model,
+            raw,
+            base_state,
+            LossAggregator(targets=targets, config=loss_config),
+            train_loader,
+            val_loader,
+            config,
+            unpack_batch,
+            batch_to,
+            evaluate_model,
+            average_by_num_atoms,
+            contract.per_structure_targets,
+        )
+
+    def _loss(self, batch: object, training: bool) -> torch.Tensor:
+        systems, targets, extra = self._unpack_batch(batch)
+        systems, targets, extra = self._batch_to(
+            systems, targets, extra, dtype=torch.float32, device=torch.device("cpu")
+        )
+        requested = {name: self.model.dataset_info.targets[name] for name in targets}
+        predicted = self._evaluate_model(
+            self.model, systems, requested, is_training=training
+        )
+        predicted = self._average_by_num_atoms(
+            predicted, systems, self._per_structure_targets
+        )
+        targets = self._average_by_num_atoms(
+            targets, systems, self._per_structure_targets
+        )
+        loss = self._loss_fn(predicted, targets, extra)
+        if (
+            not isinstance(loss, torch.Tensor)
+            or loss.numel() != 1
+            or not bool(torch.isfinite(loss).item())
+        ):
+            raise HardFailure("checkpoint-defined PET loss is invalid")
+        return loss
+
+    def train_batch(self, batch: object, *, lr: float) -> TrainingBatchResult:
+        del lr
+        self.model.train()
+        return TrainingBatchResult(self._loss(batch, True), _LOSS_TERMS)
+
+    def validate(self, *, use_ema: bool) -> Mapping[str, float]:
+        del use_ema
+        values: list[float] = []
+        with torch.no_grad():
+            for batch in self._val_loader:
+                values.append(float(self._loss(batch, False).item()))
+        if not values:
+            raise HardFailure("validation loader is empty")
+        return {"loss_total": sum(values) / len(values)}
+
+    def assert_frozen(self) -> None:
+        assert_frozen_unchanged(self.model, self._frozen)
+
+    def reload_and_smoke(self, member_path: Path) -> bool:
+        from metatrain.utils.io import model_from_checkpoint
+
+        member = load_member(
+            member_path,
+            self._config.identity.base_checkpoint_sha256,
+            assert_readout_contract(self.model),
+        )
+        model = model_from_checkpoint(self._raw, context="restart").to(
+            device="cpu", dtype=torch.float32
+        )
+        for name, parameter in model.named_parameters():
+            parameter.requires_grad_(
+                name.startswith(("node_last_layers.", "edge_last_layers."))
+            )
+        apply_member(model, self._base_state, member)
+        try:
+            batch = next(iter(self._val_loader))
+            systems, targets, extra = self._unpack_batch(batch)
+            systems, targets, _ = self._batch_to(
+                systems, targets, extra, dtype=torch.float32, device=torch.device("cpu")
+            )
+            requested = {name: model.dataset_info.targets[name] for name in targets}
+            with torch.no_grad():
+                outputs = self._evaluate_model(
+                    model, systems, requested, is_training=False
+                )
+            return all(
+                bool(torch.isfinite(block.values).all())
+                for value in outputs.values()
+                for block in value.blocks()
+            )
+        except (RuntimeError, ValueError, OSError) as exc:
+            raise HardFailure("member reload smoke execution failed") from exc
+
+    def resume_identity(self) -> Mapping[str, str]:
+        return {
+            "config": _canonical_sha256(self._config.sanitized()),
+            "code": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            "base": self._config.identity.base_checkpoint_sha256,
+            "data": _canonical_sha256(
+                {
+                    "train": self._config.identity.train_data_sha256,
+                    "val": self._config.identity.val_data_sha256,
+                }
+            ),
+        }
+
+    def manifest_metadata(self) -> Mapping[str, Mapping[str, str]]:
+        digest = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+        return {
+            "dependency_snapshot": {
+                "torch": torch.__version__,
+                "metatrain": "runtime",
+                "metatomic": "runtime",
+            },
+            "training_code_identity": {"commit": "unavailable", "dirty_sha256": digest},
+            "artifact_writer_code_identity": {
+                "commit": "unavailable",
+                "dirty_sha256": digest,
+            },
+            "validator_code_identity": {
+                "commit": "unavailable",
+                "dirty_sha256": digest,
+            },
+        }
+
+
 def train_fge(config: Any, *, runtime: TrainingRuntime | None = None) -> Path:
     """Train raw endpoint A3 members with one optimizer and validation-only EMA."""
     if runtime is None:
-        raise HardFailure("native PET runtime is unavailable")
+        runtime = PETTrainingRuntime.from_config(config)
     if not isinstance(runtime, TrainingRuntime):
         raise HardFailure("training runtime does not implement the formal contract")
     layout = _layout(config)
@@ -300,6 +686,8 @@ def train_fge(config: Any, *, runtime: TrainingRuntime | None = None) -> Path:
                     config.fge.rise_fraction,
                 )
                 optimizer.zero_grad(set_to_none=True)
+                for group in optimizer.param_groups:
+                    group["lr"] = lr
                 result = _assert_batch(runtime.train_batch(batch, lr=lr))
                 result.loss.backward()
                 torch.nn.utils.clip_grad_norm_(trainable, 1.0)
