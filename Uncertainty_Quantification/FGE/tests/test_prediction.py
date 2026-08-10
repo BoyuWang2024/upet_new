@@ -547,3 +547,23 @@ def test_predict_members_rejects_runtime_identity_content_sha_mismatch(
                 _standard_dataset_identity(content_sha256="b" * 64)
             ),
         )
+
+
+@pytest.mark.fge_n20
+def test_default_pet_runtime_reads_the_restart_checkpoint_only(tmp_path: Path) -> None:
+    """The default runtime must use metatrain's restart loader, not export state."""
+    checkpoint = Path("/home/bywang/code/UQ/upet/pet-omatpes-l-v0.1.0.ckpt")
+    if not checkpoint.is_file():
+        pytest.skip("remote PET checkpoint is not available")
+    from Uncertainty_Quantification.FGE.fge.prediction import PETPredictionRuntime
+
+    config = cast(
+        FGEConfig,
+        SimpleNamespace(paths=SimpleNamespace(base_checkpoint=checkpoint, output_root=tmp_path), identity=SimpleNamespace(base_checkpoint_sha256="879b1045391d88869522605a8b8b3cedeed74668e7062fdd7487548ab7b08004"), project=SimpleNamespace(name="upet_fge_n20_cpu")),
+    )
+    runtime = PETPredictionRuntime()
+    base = runtime.load_base(config)
+
+    assert base.model is not None
+    assert set(base.state_dict) == set(base.model.state_dict())
+    assert all(tensor.device.type == "cpu" for tensor in base.state_dict.values())

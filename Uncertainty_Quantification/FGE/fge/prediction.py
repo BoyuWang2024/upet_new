@@ -14,6 +14,7 @@ from .artifacts import ExperimentLayout, atomic_torch_save
 from .config import FGEConfig
 from .data import DatasetIdentity
 from .errors import HardFailure
+from .members import ReadoutAudit, apply_member, assert_readout_contract, load_member
 
 
 _PREDICTION_KEYS = frozenset(
@@ -356,3 +357,77 @@ def predict_members(config: object, *, runtime: object | None = None) -> Path:
         raise HardFailure("published prediction is not a mapping")
     validate_prediction_payload(stored)
     return layout.prediction_tensor
+
+
+@dataclass
+class PETBase:
+    """One restart-restored PET model and immutable CPU base state."""
+
+    model: torch.nn.Module
+    state_dict: Mapping[str, torch.Tensor]
+    audit: ReadoutAudit
+    members_directory: Path
+    base_sha256: str
+
+
+class PETPredictionRuntime:
+    """Real metatrain PET implementation of the formal prediction seam."""
+
+    def load_base(self, config: FGEConfig) -> PETBase:
+        try:
+            checkpoint_path = Path(config.paths.base_checkpoint)
+            base_sha256 = config.identity.base_checkpoint_sha256
+            members_directory = (
+                Path(config.paths.output_root)
+                / config.project.name
+                / "training"
+                / "members"
+            )
+        except AttributeError as exc:
+            raise HardFailure("PET prediction configuration is incomplete") from exc
+        try:
+            import metatomic.torch  # noqa: F401
+            from metatrain.utils.io import model_from_checkpoint
+
+            checkpoint = torch.load(
+                checkpoint_path, map_location="cpu", weights_only=False
+            )
+            if not isinstance(checkpoint, dict):
+                raise HardFailure("PET restart checkpoint is not a mapping")
+            model = model_from_checkpoint(checkpoint, context="restart")
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise HardFailure("unable to restore PET restart checkpoint") from exc
+        model.to(device="cpu", dtype=torch.float32)
+        for name, parameter in model.named_parameters():
+            parameter.requires_grad_(
+                name.startswith("node_last_layers.")
+                or name.startswith("edge_last_layers.")
+            )
+        audit = assert_readout_contract(model)
+        state_dict = {
+            name: tensor.detach().cpu().clone()
+            for name, tensor in model.state_dict().items()
+        }
+        return PETBase(
+            model=model,
+            state_dict=state_dict,
+            audit=audit,
+            members_directory=members_directory,
+            base_sha256=base_sha256,
+        )
+
+    def restore_and_apply(self, base: object, member_id: str) -> None:
+        if not isinstance(base, PETBase):
+            raise HardFailure("PET prediction base is invalid")
+        try:
+            index = int(member_id.removeprefix("member_"))
+        except ValueError as exc:
+            raise HardFailure("PET prediction member ID is invalid") from exc
+        if member_id != f"member_{index:03d}" or index < 1:
+            raise HardFailure("PET prediction member ID is invalid")
+        path = base.members_directory / f"{member_id}.pt"
+        try:
+            member = load_member(path, base.base_sha256, base.audit)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise HardFailure(f"unable to load PET member: {member_id}") from exc
+        apply_member(base.model, base.state_dict, member)
