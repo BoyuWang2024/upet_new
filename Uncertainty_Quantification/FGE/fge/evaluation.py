@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 
 from .artifacts import (
@@ -100,6 +101,51 @@ def global_mae(prediction: torch.Tensor, reference: torch.Tensor) -> float:
     return float(
         torch.abs(prediction_float64 - reference_float64).sum().item()
         / prediction.numel()
+    )
+
+
+def _legacy_mean(members: torch.Tensor) -> torch.Tensor:
+    """Preserve the historical dtype reduction, with a finite overflow fallback."""
+    result = members.mean(dim=0)
+    if bool(torch.isfinite(result).all().item()):
+        return result
+    return members.to(dtype=torch.float64).mean(dim=0).to(dtype=members.dtype)
+
+
+def _legacy_abs_error(
+    prediction: torch.Tensor, reference: torch.Tensor
+) -> torch.Tensor:
+    """Preserve historical error bits unless finite inputs overflow their dtype."""
+    result = torch.abs(prediction - reference)
+    if bool(torch.isfinite(result).all().item()):
+        return result
+    return torch.abs(
+        prediction.to(dtype=torch.float64) - reference.to(dtype=torch.float64)
+    )
+
+
+def _legacy_energy_per_atom_error(
+    prediction: torch.Tensor, reference: torch.Tensor, n_atoms: torch.Tensor
+) -> torch.Tensor:
+    result = torch.abs(prediction / n_atoms - reference / n_atoms)
+    if bool(torch.isfinite(result).all().item()):
+        return result
+    prediction_float64 = prediction.to(dtype=torch.float64)
+    reference_float64 = reference.to(dtype=torch.float64)
+    n_atoms_float64 = n_atoms.to(dtype=torch.float64)
+    return torch.abs(
+        prediction_float64 / n_atoms_float64 - reference_float64 / n_atoms_float64
+    )
+
+
+def _legacy_vector_error(
+    prediction: torch.Tensor, reference: torch.Tensor
+) -> torch.Tensor:
+    result = torch.linalg.vector_norm(prediction - reference, dim=-1)
+    if bool(torch.isfinite(result).all().item()):
+        return result
+    return torch.linalg.vector_norm(
+        prediction.to(dtype=torch.float64) - reference.to(dtype=torch.float64), dim=-1
     )
 
 
@@ -281,23 +327,21 @@ def _correlation(
 def _risk_coverage(
     uncertainty: torch.Tensor, error: torch.Tensor, coverages: tuple[float, ...]
 ) -> list[dict[str, float | int]]:
-    uncertainty_flat = uncertainty.detach().reshape(-1)
-    error_flat = error.detach().reshape(-1)
-    if uncertainty_flat.shape != error_flat.shape or uncertainty_flat.numel() == 0:
+    """Match the legacy NumPy quicksort tie and dtype-reduction semantics."""
+    uncertainty_flat = uncertainty.detach().numpy().reshape(-1)
+    error_flat = error.detach().numpy().reshape(-1)
+    if uncertainty_flat.shape != error_flat.shape or uncertainty_flat.size == 0:
         raise ValueError("risk inputs must have the same non-empty scalar shape")
-    order = sorted(
-        range(uncertainty_flat.numel()),
-        key=lambda index: (float(uncertainty_flat[index]), index),
-    )
+    order = np.argsort(-uncertainty_flat)
     rows: list[dict[str, float | int]] = []
     for coverage in coverages:
         kept_count = max(1, math.ceil(len(order) * coverage))
-        kept = torch.tensor(order[:kept_count], dtype=torch.int64)
+        kept = order[len(order) - kept_count :]
         rows.append(
             {
                 "coverage": coverage,
                 "kept": kept_count,
-                "risk": float(error_flat[kept].mean().item()),
+                "risk": float(np.mean(error_flat[kept])),
             }
         )
     return rows
@@ -329,9 +373,9 @@ def evaluate_prediction(
     offsets = data["offsets"]
     n_atoms_float = n_atoms.to(dtype=energy.dtype)
 
-    energy_mean = energy.to(dtype=torch.float64).mean(dim=0).to(dtype=energy.dtype)
-    forces_mean = forces.to(dtype=torch.float64).mean(dim=0).to(dtype=forces.dtype)
-    stress_mean = stress.to(dtype=torch.float64).mean(dim=0).to(dtype=stress.dtype)
+    energy_mean = _legacy_mean(energy)
+    forces_mean = _legacy_mean(forces)
+    stress_mean = _legacy_mean(stress)
     ensemble = {"energy": energy_mean, "forces": forces_mean, "stress": stress_mean}
     _assert_finite_derived(ensemble, "ensemble")
 
@@ -365,23 +409,16 @@ def evaluate_prediction(
     _assert_finite_derived(uncertainty, "uncertainty")
 
     energy_mean_float64 = energy_mean.to(dtype=torch.float64)
-    forces_mean_float64 = forces_mean.to(dtype=torch.float64)
-    stress_mean_float64 = stress_mean.to(dtype=torch.float64)
     energy_reference_float64 = energy_reference.to(dtype=torch.float64)
-    forces_reference_float64 = forces_reference.to(dtype=torch.float64)
-    stress_reference_float64 = stress_reference.to(dtype=torch.float64)
     n_atoms_float64 = n_atoms.to(dtype=torch.float64)
-    energy_total_error = torch.abs(energy_mean_float64 - energy_reference_float64)
-    energy_per_atom_error = torch.abs(
-        energy_mean_float64 / n_atoms_float64
-        - energy_reference_float64 / n_atoms_float64
+    energy_total_error = _legacy_abs_error(energy_mean, energy_reference)
+    energy_per_atom_error = _legacy_energy_per_atom_error(
+        energy_mean, energy_reference, n_atoms_float
     )
-    force_component_error = torch.abs(forces_mean_float64 - forces_reference_float64)
-    force_vector_error = torch.linalg.vector_norm(
-        forces_mean_float64 - forces_reference_float64, dim=-1
-    )
+    force_component_error = _legacy_abs_error(forces_mean, forces_reference)
+    force_vector_error = _legacy_vector_error(forces_mean, forces_reference)
     force_structure_error = reduce_force_by_structure(force_vector_error, offsets)
-    stress_component_error = torch.abs(stress_mean_float64 - stress_reference_float64)
+    stress_component_error = _legacy_abs_error(stress_mean, stress_reference)
     _assert_finite_derived(
         {
             "energy_total": energy_total_error,
