@@ -1,0 +1,273 @@
+"""Strict, source-independent manifest builders for formal FGE artifacts."""
+
+from __future__ import annotations
+
+import math
+import re
+from collections.abc import Mapping, Sequence
+from copy import deepcopy
+from pathlib import Path
+
+from .artifacts import normalize_artifact_path, sha256_file
+from .errors import HardFailure
+
+
+_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+_COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
+
+
+def _json_safe(value: object, label: str = "manifest") -> None:
+    if value is None or isinstance(value, (bool, str, int)):
+        if isinstance(value, str) and Path(value).is_absolute():
+            raise HardFailure(f"{label} contains an absolute path")
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise HardFailure(f"{label} contains non-finite JSON")
+        return
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise HardFailure(f"{label} contains a non-string JSON key")
+            _json_safe(item, f"{label}.{key}")
+        return
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _json_safe(item, f"{label}[{index}]")
+        return
+    raise HardFailure(f"{label} contains unsupported JSON data")
+
+
+def _sha256(value: object, label: str) -> str:
+    if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
+        raise HardFailure(f"{label} must be a lowercase SHA256")
+    return value
+
+
+def _code_identity(
+    value: object, label: str, *, allow_unavailable: bool
+) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        raise HardFailure(f"{label} must be a mapping")
+    if allow_unavailable and dict(value) == {"status": "unavailable"}:
+        return {"status": "unavailable"}
+    if set(value) != {"commit", "dirty_sha256"}:
+        raise HardFailure(f"{label} has an invalid schema")
+    commit = value["commit"]
+    if not isinstance(commit, str) or _COMMIT_RE.fullmatch(commit) is None:
+        raise HardFailure(f"{label}.commit must be a lowercase git commit")
+    return {"commit": commit, "dirty_sha256": _sha256(value["dirty_sha256"], label)}
+
+
+def _members(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)) or not value:
+        raise HardFailure("members must be a non-empty sequence")
+    result: list[dict[str, object]] = []
+    for index, member in enumerate(value, start=1):
+        if not isinstance(member, Mapping) or set(member) != {
+            "member_id",
+            "sha256",
+            "cycle",
+            "endpoint_global_step",
+        }:
+            raise HardFailure("member manifest entries have an invalid schema")
+        expected_id = f"member_{index:03d}"
+        if member["member_id"] != expected_id or member["cycle"] != index:
+            raise HardFailure("member order and cycle must be contiguous")
+        step = member["endpoint_global_step"]
+        if isinstance(step, bool) or not isinstance(step, int) or step < 1:
+            raise HardFailure("member endpoint_global_step must be positive")
+        result.append(
+            {
+                "member_id": expected_id,
+                "sha256": _sha256(member["sha256"], "member sha256"),
+                "cycle": index,
+                "endpoint_global_step": step,
+            }
+        )
+    if len({item["sha256"] for item in result}) != len(result):
+        raise HardFailure("member SHA256 values must be unique")
+    return result
+
+
+def build_training_manifest(
+    *,
+    project_name: str,
+    config_resolved: Mapping[str, object],
+    checkpoint_identity: Mapping[str, object],
+    data_identities: Mapping[str, object],
+    model_contract: Mapping[str, object],
+    frozen_fingerprint_identity: Mapping[str, object],
+    dependency_snapshot: Mapping[str, object],
+    scientific_flags: Mapping[str, object],
+    artifact_writer_code_identity: Mapping[str, object],
+    validator_code_identity: Mapping[str, object],
+    training_code_identity: Mapping[str, object],
+    members: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    """Build the native/migrated-invariant training provenance key tree."""
+    if not isinstance(project_name, str) or not project_name:
+        raise HardFailure("project_name must be a non-empty string")
+    for label, value in (
+        ("config_resolved", config_resolved),
+        ("checkpoint_identity", checkpoint_identity),
+        ("data_identities", data_identities),
+        ("model_contract", model_contract),
+        ("frozen_fingerprint_identity", frozen_fingerprint_identity),
+        ("dependency_snapshot", dependency_snapshot),
+        ("scientific_flags", scientific_flags),
+    ):
+        _json_safe(value, label)
+    if set(checkpoint_identity) != {"sha256"}:
+        raise HardFailure("checkpoint_identity has an invalid schema")
+    _sha256(checkpoint_identity["sha256"], "checkpoint_identity.sha256")
+    if set(frozen_fingerprint_identity) != {"sha256"}:
+        raise HardFailure("frozen_fingerprint_identity has an invalid schema")
+    _sha256(frozen_fingerprint_identity["sha256"], "frozen_fingerprint_identity.sha256")
+    if model_contract != {
+        "readout_tensor_count": 12,
+        "readout_parameter_count": 13338,
+    }:
+        raise HardFailure("model_contract must be the formal 12-tensor/13,338 contract")
+    return {
+        "schema_version": "upet.fge.training.v1",
+        "project_name": project_name,
+        "config_resolved": deepcopy(dict(config_resolved)),
+        "checkpoint_identity": deepcopy(dict(checkpoint_identity)),
+        "data_identities": deepcopy(dict(data_identities)),
+        "model_contract": deepcopy(dict(model_contract)),
+        "frozen_fingerprint_identity": deepcopy(dict(frozen_fingerprint_identity)),
+        "dependency_snapshot": deepcopy(dict(dependency_snapshot)),
+        "scientific_flags": deepcopy(dict(scientific_flags)),
+        "training_code_identity": _code_identity(
+            training_code_identity, "training_code_identity", allow_unavailable=True
+        ),
+        "artifact_writer_code_identity": _code_identity(
+            artifact_writer_code_identity,
+            "artifact_writer_code_identity",
+            allow_unavailable=False,
+        ),
+        "validator_code_identity": _code_identity(
+            validator_code_identity, "validator_code_identity", allow_unavailable=False
+        ),
+        "members": _members(members),
+    }
+
+
+def _artifact(root: Path, path: Path, role: str) -> dict[str, object]:
+    relative = normalize_artifact_path(root, path)
+    source = Path(path)
+    if not source.is_file() or source.is_symlink():
+        raise HardFailure("formal artifact must be a non-symlink regular file")
+    return {
+        "role": role,
+        "path": relative,
+        "bytes": source.stat().st_size,
+        "sha256": sha256_file(source),
+    }
+
+
+def build_prediction_manifest(
+    *,
+    root: Path,
+    prediction_path: Path,
+    member_ids: Sequence[str],
+    shape: Mapping[str, object],
+    artifact_writer_code_identity: Mapping[str, object],
+    validator_code_identity: Mapping[str, object],
+) -> dict[str, object]:
+    """Describe one validated canonical prediction tensor artifact."""
+    if (
+        not isinstance(member_ids, tuple)
+        or len(member_ids) < 2
+        or any(not isinstance(item, str) or not item for item in member_ids)
+        or len(set(member_ids)) != len(member_ids)
+    ):
+        raise HardFailure("member_ids must be an ordered unique tuple")
+    if set(shape) != {"K", "S", "A"} or any(
+        isinstance(shape[key], bool) or not isinstance(shape[key], int)
+        for key in ("K", "S", "A")
+    ):
+        raise HardFailure("prediction shape has an invalid schema")
+    K = shape["K"]
+    S = shape["S"]
+    A = shape["A"]
+    if not isinstance(K, int) or not isinstance(S, int) or not isinstance(A, int):
+        raise HardFailure("prediction shape has an invalid schema")
+    if K != len(member_ids) or S < 1 or A < 1:
+        raise HardFailure("prediction shape must match its canonical members and data")
+    artifact = _artifact(Path(root), Path(prediction_path), "prediction")
+    return {
+        "schema_version": "upet.fge.prediction.v1",
+        "member_ids": list(member_ids),
+        "shape": dict(shape),
+        "artifact": artifact,
+        "artifact_writer_code_identity": _code_identity(
+            artifact_writer_code_identity,
+            "artifact_writer_code_identity",
+            allow_unavailable=False,
+        ),
+        "validator_code_identity": _code_identity(
+            validator_code_identity, "validator_code_identity", allow_unavailable=False
+        ),
+    }
+
+
+def _default_formal_artifacts(root: Path) -> dict[str, Path]:
+    roles = {
+        "config_resolved.yaml": "config_resolved",
+        "prediction/test_raw.pt": "prediction",
+        "validation.json": "validation",
+    }
+    return {
+        roles.get(
+            path.relative_to(root).as_posix(), path.relative_to(root).as_posix()
+        ): path
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and path.name != "result_manifest.json"
+    }
+
+
+def build_result_manifest(
+    *,
+    root: Path,
+    project_name: str,
+    artifact_writer_code_identity: Mapping[str, object],
+    validator_code_identity: Mapping[str, object],
+    formal_artifacts: Mapping[str, Path] | None = None,
+) -> dict[str, object]:
+    """Inventory all already-written formal artifacts before final publication."""
+    result_root = Path(root).resolve()
+    if not isinstance(project_name, str) or not project_name:
+        raise HardFailure("project_name must be a non-empty string")
+    artifacts = (
+        _default_formal_artifacts(result_root)
+        if formal_artifacts is None
+        else formal_artifacts
+    )
+    if not isinstance(artifacts, Mapping) or not artifacts:
+        raise HardFailure("formal_artifacts must be a non-empty role mapping")
+    inventory = [
+        _artifact(result_root, Path(path), role) for role, path in artifacts.items()
+    ]
+    if any(not isinstance(item["role"], str) or not item["role"] for item in inventory):
+        raise HardFailure("formal artifact roles must be non-empty strings")
+    if len({item["role"] for item in inventory}) != len(inventory) or len(
+        {item["path"] for item in inventory}
+    ) != len(inventory):
+        raise HardFailure("formal artifact roles and paths must be unique")
+    inventory.sort(key=lambda item: str(item["path"]))
+    return {
+        "schema_version": "upet.fge.result.v1",
+        "project_name": project_name,
+        "status": "PASS",
+        "artifact_writer_code_identity": _code_identity(
+            artifact_writer_code_identity,
+            "artifact_writer_code_identity",
+            allow_unavailable=False,
+        ),
+        "validator_code_identity": _code_identity(
+            validator_code_identity, "validator_code_identity", allow_unavailable=False
+        ),
+        "artifacts": inventory,
+    }
