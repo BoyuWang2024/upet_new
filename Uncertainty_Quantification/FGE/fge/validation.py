@@ -183,9 +183,19 @@ def _identity(
     )
     sanitized = config.sanitized()
     _fail_unless(isinstance(sanitized, Mapping), "config identity is invalid")
+    expected_config_identity = _config_identity(sanitized)
     _fail_unless(
-        training.get("config_identity") == _config_identity(sanitized),
+        training.get("config_identity") == expected_config_identity,
         "training config identity does not match configuration",
+    )
+    _fail_unless(
+        prediction.get("config_identity") == expected_config_identity,
+        "prediction config identity does not match configuration",
+    )
+    _fail_unless(
+        prediction.get("test_data_identity")
+        == {"sha256": config.identity.test_data_sha256},
+        "prediction test data identity does not match configuration",
     )
     try:
         expected_training_flags = {
@@ -226,6 +236,24 @@ def _identity(
     _fail_unless(
         prediction.get("member_ids") == expected_ids,
         "prediction member order is invalid",
+    )
+    expected_targets = {
+        "energy": config.data.energy_target,
+        "forces": config.data.forces_target,
+        "stress": config.data.stress_target,
+    }
+    expected_units = {
+        "energy": config.data.energy_unit,
+        "forces": config.data.forces_unit,
+        "stress": config.data.stress_unit,
+    }
+    _fail_unless(
+        prediction.get("target_names") == expected_targets,
+        "prediction targets do not match configuration",
+    )
+    _fail_unless(
+        prediction.get("units") == expected_units,
+        "prediction units do not match configuration",
     )
     _fail_unless(
         training.get("model_contract")
@@ -387,6 +415,14 @@ def _validate_prediction(
     _fail_unless(
         prediction_manifest.get("shape") == {"K": shape.K, "S": shape.S, "A": shape.A},
         "prediction shape binding is invalid",
+    )
+    _fail_unless(
+        prediction_manifest.get("target_names") == payload.get("target_names"),
+        "prediction targets do not match payload",
+    )
+    _fail_unless(
+        prediction_manifest.get("units") == payload.get("units"),
+        "prediction units do not match payload",
     )
     return payload
 

@@ -473,3 +473,43 @@ def test_training_manifest_accepts_only_the_complete_sanitized_config() -> None:
     values["config_resolved"] = {"paths": {}}
     with pytest.raises(HardFailure):
         _build_training(values, _identity("5" * 40))
+
+
+def test_result_manifest_allows_exact_unavailable_writer_identities(
+    tmp_path: Path,
+) -> None:
+    """Native publication can retain an explicit unavailable writer identity."""
+    artifact = tmp_path / "validation.json"
+    artifact.write_text('{"status":"PASS"}\n', encoding="utf-8")
+
+    manifest = build_result_manifest(
+        root=tmp_path,
+        project_name="upet_fge_full",
+        artifact_writer_code_identity={"status": "unavailable"},
+        validator_code_identity={"status": "unavailable"},
+        formal_artifacts={"validation": artifact},
+    )
+
+    assert manifest["artifact_writer_code_identity"] == {"status": "unavailable"}
+    assert manifest["validator_code_identity"] == {"status": "unavailable"}
+
+
+@pytest.mark.parametrize(
+    "identity",
+    ({"status": "unknown"}, {"status": "unavailable", "extra": "x"}),
+)
+def test_result_manifest_rejects_malformed_unavailable_identity(
+    tmp_path: Path, identity: dict[str, str]
+) -> None:
+    """Only the exact unavailable fallback may replace a revision identity."""
+    artifact = tmp_path / "validation.json"
+    artifact.write_text('{"status":"PASS"}\n', encoding="utf-8")
+
+    with pytest.raises(HardFailure):
+        build_result_manifest(
+            root=tmp_path,
+            project_name="upet_fge_full",
+            artifact_writer_code_identity=identity,
+            validator_code_identity=_identity("2" * 40),
+            formal_artifacts={"validation": artifact},
+        )

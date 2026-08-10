@@ -324,7 +324,9 @@ def build_prediction_manifest(
     if (
         set(target_names) != expected_observables
         or set(units) != expected_observables
-        or any(not isinstance(value, str) or not value for value in target_names.values())
+        or any(
+            not isinstance(value, str) or not value for value in target_names.values()
+        )
         or any(not isinstance(value, str) or not value for value in units.values())
     ):
         raise HardFailure("prediction target names or units have an invalid schema")
@@ -413,10 +415,10 @@ def build_result_manifest(
         "artifact_writer_code_identity": _code_identity(
             artifact_writer_code_identity,
             "artifact_writer_code_identity",
-            allow_unavailable=False,
+            allow_unavailable=True,
         ),
         "validator_code_identity": _code_identity(
-            validator_code_identity, "validator_code_identity", allow_unavailable=False
+            validator_code_identity, "validator_code_identity", allow_unavailable=True
         ),
         "artifacts": inventory,
     }

@@ -93,6 +93,8 @@ def assert_safe_result_path(root: str | Path, path: str | Path) -> None:
     """Reject a formal output path whose existing ancestors escape via symlinks."""
     result_root = Path(root).absolute()
     candidate = Path(path).absolute()
+    if candidate.is_symlink():
+        raise HardFailure(f"formal artifact destination is a symlink: {candidate}")
     try:
         relative = candidate.relative_to(result_root)
     except ValueError as exc:

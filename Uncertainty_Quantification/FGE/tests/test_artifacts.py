@@ -172,3 +172,17 @@ def test_formal_result_paths_reject_internal_symlink_ancestors(
 
     with pytest.raises(HardFailure, match="ancestor is a symlink"):
         assert_safe_result_path(root, root / destination)
+
+
+def test_formal_result_path_rejects_a_broken_destination_symlink(
+    tmp_path: Path,
+) -> None:
+    """A broken staged evaluation destination must never be replaced or followed."""
+    root = tmp_path / "upet_fge_full"
+    destination = root / "evaluation" / "legacy_equal_weight"
+    root.mkdir()
+    destination.parent.mkdir()
+    os.symlink(tmp_path / "outside", destination, target_is_directory=True)
+
+    with pytest.raises(HardFailure):
+        assert_safe_result_path(root, destination)

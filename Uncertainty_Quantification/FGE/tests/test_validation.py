@@ -277,8 +277,12 @@ def make_canonical_result(
         root / "prediction" / "manifest.json",
         {
             "schema_version": "upet.fge.prediction.v1",
+            "config_identity": _config_identity(config_resolved),
+            "test_data_identity": _identity("d"),
             "member_ids": list(payload["member_ids"]),
             "shape": {"K": member_count, "S": 1, "A": 1},
+            "target_names": payload["target_names"],
+            "units": payload["units"],
             "artifact": {
                 "role": "prediction",
                 "path": "prediction/test_raw.pt",
@@ -599,6 +603,34 @@ def test_validation_rejects_numeric_training_scientific_flags(
     assert isinstance(flags, dict)
     flags["scientific_evaluation"] = 0
     _write_training(root, training)
+
+    with pytest.raises(HardFailure):
+        validate_result(config, root, publish_completion=False)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("config_identity", "test_data_identity", "target_names", "units"),
+)
+def test_validation_rejects_missing_or_tampered_prediction_identity_fields(
+    tmp_path: Path, field: str
+) -> None:
+    """Prediction manifest must bind config, test data, targets, and units exactly."""
+    from Uncertainty_Quantification.FGE.fge.errors import HardFailure
+    from Uncertainty_Quantification.FGE.fge.validation import validate_result
+
+    config, root = make_canonical_result(tmp_path)
+    path = root / "prediction" / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    if field == "config_identity":
+        manifest[field] = {"sha256": "0" * 64}
+    elif field == "test_data_identity":
+        manifest[field] = {"sha256": "1" * 64}
+    elif field == "target_names":
+        manifest[field]["energy"] = "wrong"
+    else:
+        manifest[field]["energy"] = "wrong"
+    _write_json(path, manifest)
 
     with pytest.raises(HardFailure):
         validate_result(config, root, publish_completion=False)
