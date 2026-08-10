@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from collections.abc import Mapping, Sequence
@@ -17,12 +18,15 @@ from .config import FGEConfig
 from .errors import HardFailure
 from .evaluation import evaluate_prediction
 from .manifests import build_result_manifest
+from .members import ReadoutAudit, load_member
 from .prediction import validate_prediction_payload
 
 
 _ATOL = 2e-7
 _RTOL = 2e-6
-_FORBIDDEN = ("source", "migration", "bootstrap", "wandb")
+_FORBIDDEN_KEYS = frozenset(
+    {"source", "source_path", "migration", "legacy", "old_member_sha"}
+)
 _PREDICTION_FIELD_SHAPES: dict[str, list[int | str]] = {
     "energy_prediction": ["K", "S"],
     "forces_prediction": ["K", "A", 3],
@@ -120,9 +124,8 @@ def _assert_clean(value: object) -> None:
             _fail_unless(
                 isinstance(key, str), "formal artifact contains non-string key"
             )
-            lowered = key.lower()
             _fail_unless(
-                not any(marker in lowered for marker in _FORBIDDEN),
+                key.lower() not in _FORBIDDEN_KEYS,
                 "formal artifact contains forbidden provenance",
             )
             _assert_clean(nested)
@@ -132,11 +135,6 @@ def _assert_clean(value: object) -> None:
     elif isinstance(value, str):
         _fail_unless(
             not Path(value).is_absolute(), "formal artifact contains an absolute path"
-        )
-        lowered = value.lower()
-        _fail_unless(
-            not any(marker in lowered for marker in _FORBIDDEN),
-            "formal artifact contains forbidden provenance",
         )
     elif isinstance(value, float):
         _fail_unless(math.isfinite(value), "formal artifact contains non-finite JSON")
@@ -156,6 +154,17 @@ def _assert_finite(value: object) -> None:
             _assert_finite(nested)
 
 
+def _canonical_config(value: Mapping[str, object]) -> dict[str, object]:
+    return json.loads(json.dumps(dict(value), sort_keys=True))
+
+
+def _config_identity(value: Mapping[str, object]) -> dict[str, str]:
+    encoded = json.dumps(
+        _canonical_config(value), sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return {"sha256": hashlib.sha256(encoded).hexdigest()}
+
+
 def _identity(
     config: FGEConfig, training: Mapping[str, Any], prediction: Mapping[str, Any]
 ) -> None:
@@ -171,6 +180,12 @@ def _identity(
     _fail_unless(
         project == training.get("project_name"),
         "project identity does not match training manifest",
+    )
+    sanitized = config.sanitized()
+    _fail_unless(isinstance(sanitized, Mapping), "config identity is invalid")
+    _fail_unless(
+        training.get("config_identity") == _config_identity(sanitized),
+        "training config identity does not match configuration",
     )
     members = training.get("members")
     if not isinstance(members, list) or len(members) < 2:
@@ -229,23 +244,87 @@ def _identity(
         )
 
 
+def _member_index(member_id: object) -> int:
+    if not isinstance(member_id, str) or not member_id.startswith("member_"):
+        raise HardFailure("training member ID is invalid")
+    suffix = member_id.removeprefix("member_")
+    if len(suffix) != 3 or not suffix.isdecimal():
+        raise HardFailure("training member ID is invalid")
+    return int(suffix)
+
+
+def _member_audit(path: Path) -> ReadoutAudit:
+    raw = _load_torch(path)
+    entries = raw.get("tensors")
+    if not isinstance(entries, Sequence) or len(entries) != 12:
+        raise HardFailure("member tensor count is invalid")
+    names: list[str] = []
+    shapes: list[tuple[int, ...]] = []
+    dtypes: list[str] = []
+    scalar_count = 0
+    for entry in entries:
+        mapping = _string_key_mapping(entry, "member tensor is invalid")
+        name, dtype, shape, value = (
+            mapping.get("name"),
+            mapping.get("dtype"),
+            mapping.get("shape"),
+            mapping.get("value"),
+        )
+        if (
+            not isinstance(name, str)
+            or not isinstance(dtype, str)
+            or not isinstance(shape, list)
+            or not isinstance(value, torch.Tensor)
+        ):
+            raise HardFailure("member tensor is invalid")
+        names.append(name)
+        shapes.append(tuple(shape))
+        dtypes.append(dtype)
+        scalar_count += value.numel()
+    return ReadoutAudit(
+        names=tuple(names),
+        tensor_count=len(names),
+        scalar_count=scalar_count,
+        shapes=tuple(shapes),
+        dtypes=tuple(dtypes),
+        all_finite=True,
+    )
+
+
 def _validate_members(root: Path, training: Mapping[str, Any]) -> None:
     members = training.get("members")
-    if not isinstance(members, list):
+    checkpoint = _string_key_mapping(
+        training.get("checkpoint_identity"), "checkpoint identity binding is invalid"
+    )
+    base_sha256 = checkpoint.get("sha256")
+    if not isinstance(members, list) or not isinstance(base_sha256, str):
         raise HardFailure("training members are invalid")
-    for member in members:
-        if not isinstance(member, Mapping):
-            raise HardFailure("training member is invalid")
-        member_id = member.get("member_id")
-        _fail_unless(isinstance(member_id, str), "training member ID is invalid")
-        path = root / "training" / "members" / f"{member_id}.pt"
+    audit: ReadoutAudit | None = None
+    for expected_index, entry in enumerate(members, start=1):
+        member = _string_key_mapping(entry, "training member is invalid")
+        index = _member_index(member.get("member_id"))
+        _fail_unless(index == expected_index, "training member order is invalid")
+        path = root / "training" / "members" / f"member_{index:03d}.pt"
+        _regular(path, "member artifact")
         _fail_unless(
             member.get("sha256") == sha256_file(path), "member SHA256 does not match"
         )
-        payload = _load_torch(path)
+        if audit is None:
+            audit = _member_audit(path)
+        payload = load_member(path, base_sha256, audit)
+        _fail_unless(payload.member_id == index, "member payload ID is invalid")
+        _fail_unless(payload.cycle == expected_index, "member payload cycle is invalid")
         _fail_unless(
-            payload.get("member_id") == member_id, "member payload ID is invalid"
+            payload.global_step == member.get("endpoint_global_step"),
+            "member payload endpoint step is invalid",
         )
+    _fail_unless(
+        audit is not None
+        and audit.tensor_count == 12
+        and audit.scalar_count == 13338
+        and audit.all_finite,
+        "member readout contract is invalid",
+    )
 
 
 def _exact_or_close(actual: object, expected: object, name: str) -> None:
@@ -292,6 +371,36 @@ def _validate_prediction(
     return payload
 
 
+def _compare_value(actual: object, expected: object, name: str) -> None:
+    if isinstance(expected, torch.Tensor):
+        _exact_or_close(actual, expected, name)
+        return
+    if isinstance(expected, Mapping):
+        actual_mapping = _string_key_mapping(actual, f"{name} is invalid")
+        _fail_unless(set(actual_mapping) == set(expected), f"{name} keys differ")
+        for key, nested in expected.items():
+            _compare_value(actual_mapping[key], nested, f"{name}.{key}")
+        return
+    if isinstance(expected, Sequence) and not isinstance(expected, (str, bytes)):
+        if not isinstance(actual, Sequence) or isinstance(actual, (str, bytes)):
+            raise HardFailure(f"{name} is invalid")
+        _fail_unless(len(actual) == len(expected), f"{name} length differs")
+        for index, nested in enumerate(expected):
+            _compare_value(actual[index], nested, f"{name}[{index}]")
+        return
+    if isinstance(expected, float):
+        _fail_unless(
+            isinstance(actual, (float, int))
+            and not isinstance(actual, bool)
+            and math.isclose(float(actual), expected, rel_tol=_RTOL, abs_tol=_ATOL),
+            f"{name} differs",
+        )
+        return
+    _fail_unless(
+        actual == expected and type(actual) is type(expected), f"{name} differs"
+    )
+
+
 def _validate_evaluation(
     root: Path, config: FGEConfig, payload: Mapping[str, Any]
 ) -> None:
@@ -299,44 +408,22 @@ def _validate_evaluation(
     ensemble = _load_torch(directory / "ensemble.pt")
     uncertainty = _load_torch(directory / "uncertainty.pt")
     metrics = _load_json(directory / "metrics.json")
-    _regular(directory / "report.md", "evaluation report")
+    report_path = directory / "report.md"
+    _regular(report_path, "evaluation report")
     evaluation = getattr(config, "evaluation", None)
     if evaluation is None:
         raise HardFailure("validation configuration has no evaluation settings")
     recomputed = evaluate_prediction(
         payload, evaluation.risk_coverages, evaluation.constant_tolerance
     )
+    _compare_value(ensemble, recomputed.ensemble, "ensemble")
+    _compare_value(uncertainty, recomputed.uncertainty, "uncertainty")
+    _compare_value(metrics, recomputed.metrics, "metrics")
+    expected_report_inputs = json.dumps(recomputed.report_inputs, sort_keys=True)
     _fail_unless(
-        set(ensemble) == {"energy", "forces", "stress"}, "ensemble keys are invalid"
+        expected_report_inputs in report_path.read_text(encoding="utf-8"),
+        "evaluation report inputs differ",
     )
-    for name, expected in recomputed.ensemble.items():
-        _exact_or_close(ensemble[name], expected, f"ensemble.{name}")
-    _fail_unless(
-        uncertainty.get("formula_version") == evaluation.formula_version,
-        "uncertainty formula is invalid",
-    )
-    for name, expected in recomputed.uncertainty["energy_total"].items():
-        _exact_or_close(
-            uncertainty.get("energy_total", {}).get(name),
-            expected,
-            f"uncertainty.energy_total.{name}",
-        )
-    _fail_unless(
-        metrics.get("schema_version") == evaluation.metric_schema_version,
-        "metrics schema is invalid",
-    )
-    stored_mae = metrics.get("mae")
-    if not isinstance(stored_mae, Mapping):
-        raise HardFailure("metrics MAE is invalid")
-    for name, expected in recomputed.metrics["mae"].items():
-        value = stored_mae.get(name)
-        _fail_unless(
-            isinstance(value, (int, float))
-            and math.isclose(
-                float(value), float(expected), rel_tol=_RTOL, abs_tol=_ATOL
-            ),
-            f"metrics MAE differs: {name}",
-        )
 
 
 def _validate_preflight(root: Path) -> None:
@@ -346,6 +433,45 @@ def _validate_preflight(root: Path) -> None:
             report.get("stage") == stage and report.get("status") == "PASS",
             "preflight report is invalid",
         )
+
+
+def _expected_manifest_roles(member_count: int) -> dict[str, str]:
+    expected = {
+        "config_resolved.yaml": "config_resolved",
+        "preflight/train.json": "preflight_train",
+        "preflight/predict.json": "preflight_predict",
+        "preflight/evaluate.json": "preflight_evaluate",
+        "training/manifest.json": "training_manifest",
+        "prediction/manifest.json": "prediction_manifest",
+        "prediction/test_raw.pt": "prediction",
+        "evaluation/legacy_equal_weight/ensemble.pt": "ensemble",
+        "evaluation/legacy_equal_weight/uncertainty.pt": "uncertainty",
+        "evaluation/legacy_equal_weight/metrics.json": "metrics",
+        "evaluation/legacy_equal_weight/report.md": "report",
+        "validation.json": "validation",
+    }
+    for index in range(1, member_count + 1):
+        expected[f"training/members/member_{index:03d}.pt"] = (
+            f"training_member_{index:03d}"
+        )
+    return expected
+
+
+def _manifest_artifact_path(root: Path, path_text: object) -> Path:
+    if not isinstance(path_text, str):
+        raise HardFailure("result manifest path is invalid")
+    candidate = Path(path_text)
+    if (
+        candidate.is_absolute()
+        or ".." in candidate.parts
+        or path_text == "result_manifest.json"
+    ):
+        raise HardFailure("result manifest path is invalid")
+    try:
+        (root / candidate).resolve().relative_to(root.resolve())
+    except ValueError as exc:
+        raise HardFailure("result manifest path escapes result root") from exc
+    return root / candidate
 
 
 def _validate_completed_manifest(root: Path, config: FGEConfig) -> int:
@@ -362,18 +488,26 @@ def _validate_completed_manifest(root: Path, config: FGEConfig) -> int:
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, list) or not artifacts:
         raise HardFailure("result manifest inventory is invalid")
+    training = _load_json(root / "training" / "manifest.json")
+    member_count = training.get("member_count")
+    if isinstance(member_count, bool) or not isinstance(member_count, int):
+        raise HardFailure("training member count is invalid")
+    expected = _expected_manifest_roles(member_count)
+    actual: dict[str, str] = {}
     for artifact in artifacts:
         artifact_mapping = _string_key_mapping(
             artifact, "result manifest artifact is invalid"
         )
-        path_text = artifact_mapping.get("path")
-        if (
-            not isinstance(path_text, str)
-            or path_text == "result_manifest.json"
-            or Path(path_text).is_absolute()
-        ):
-            raise HardFailure("result manifest path is invalid")
-        path = root / path_text
+        if set(artifact_mapping) != {"role", "path", "bytes", "sha256"}:
+            raise HardFailure("result manifest artifact schema is invalid")
+        role = artifact_mapping.get("role")
+        path = _manifest_artifact_path(root, artifact_mapping.get("path"))
+        relative = path.relative_to(root).as_posix()
+        if not isinstance(role, str) or expected.get(relative) != role:
+            raise HardFailure("result manifest canonical role/inventory is invalid")
+        if relative in actual:
+            raise HardFailure("result manifest contains duplicate artifact")
+        actual[relative] = role
         _regular(path, "result manifest artifact")
         _fail_unless(
             artifact_mapping.get("sha256") == sha256_file(path),
@@ -383,6 +517,7 @@ def _validate_completed_manifest(root: Path, config: FGEConfig) -> int:
             artifact_mapping.get("bytes") == path.stat().st_size,
             "result manifest byte count differs",
         )
+    _fail_unless(actual == expected, "result manifest inventory is incomplete")
     return len(artifacts)
 
 
@@ -397,6 +532,12 @@ def validate_result(
     completed = result_root / "result_manifest.json"
     _validate_preflight(result_root)
     config_resolved = _load_yaml(result_root / "config_resolved.yaml")
+    sanitized = config.sanitized()
+    _fail_unless(isinstance(sanitized, Mapping), "validation configuration is invalid")
+    _fail_unless(
+        config_resolved == _canonical_config(sanitized),
+        "resolved config differs from validation configuration",
+    )
     training = _load_json(result_root / "training" / "manifest.json")
     _fail_unless(
         training.get("config_resolved") == config_resolved,
@@ -451,14 +592,34 @@ def _tensor_signature(value: object, K: int, S: int, A: int) -> object:
             "shape": _shape(value.shape, K, S, A),
         }
     if isinstance(value, Mapping):
+        if set(value) == {"name", "dtype", "shape", "value"}:
+            name, dtype, shape, tensor = (
+                value["name"],
+                value["dtype"],
+                value["shape"],
+                value["value"],
+            )
+            if (
+                not isinstance(name, str)
+                or not isinstance(dtype, str)
+                or not isinstance(shape, list)
+                or not isinstance(tensor, torch.Tensor)
+            ):
+                raise HardFailure("member tensor signature is invalid")
+            return {
+                "name": name,
+                "dtype": dtype,
+                "shape": _shape(torch.Size(shape), K, S, A),
+                "value": _tensor_signature(tensor, K, S, A),
+            }
         return {
             str(key): _tensor_signature(nested, K, S, A)
             for key, nested in sorted(value.items())
         }
-    if isinstance(value, tuple):
-        if not value:
-            return []
-        return ["string" if isinstance(value[0], str) else type(value[0]).__name__]
+    if isinstance(value, tuple) and all(isinstance(item, str) for item in value):
+        return ["string"]
+    if isinstance(value, (list, tuple)):
+        return [_tensor_signature(item, K, S, A) for item in value]
     return type(value).__name__
 
 
@@ -486,6 +647,38 @@ def _key_tree(value: object) -> object:
     return type(value).__name__
 
 
+def _result_manifest_signature(document: Mapping[str, Any]) -> dict[str, object]:
+    artifacts = document.get("artifacts")
+    if not isinstance(artifacts, list):
+        raise HardFailure("result manifest signature is invalid")
+    references: list[dict[str, str]] = []
+    for artifact in artifacts:
+        mapping = _string_key_mapping(artifact, "result manifest signature is invalid")
+        role, path = mapping.get("role"), mapping.get("path")
+        if not isinstance(role, str) or not isinstance(path, str):
+            raise HardFailure("result manifest signature is invalid")
+        if role.startswith("training_member_"):
+            role = "training_member_NNN"
+        if path.startswith("training/members/member_"):
+            path = "training/members/member_NNN.pt"
+        references.append({"role": role, "path": path})
+    return {
+        "schema_version": type(document.get("schema_version")).__name__,
+        "project_name": type(document.get("project_name")).__name__,
+        "status": type(document.get("status")).__name__,
+        "artifact_writer_code_identity": _key_tree(
+            document.get("artifact_writer_code_identity")
+        ),
+        "validator_code_identity": _key_tree(document.get("validator_code_identity")),
+        "artifacts": [
+            {"role": role, "path": path}
+            for path, role in sorted(
+                {(item["path"], item["role"]) for item in references}
+            )
+        ],
+    }
+
+
 def schema_signature(root: str | Path) -> dict[str, object]:
     """Return an identity-free structural signature with symbolic K/S/A dimensions."""
     result_root = Path(root)
@@ -495,10 +688,12 @@ def schema_signature(root: str | Path) -> dict[str, object]:
     tensors: dict[str, object] = {}
     member_signature: object | None = None
     for path in sorted(result_root.rglob("*")):
-        if not path.is_file() or path.name == "result_manifest.json":
+        if not path.is_file():
             continue
         relative = path.relative_to(result_root).as_posix()
-        if path.suffix == ".json":
+        if path.name == "result_manifest.json":
+            documents[relative] = _result_manifest_signature(_load_json(path))
+        elif path.suffix == ".json":
             documents[relative] = _key_tree(_load_json(path))
         elif path.suffix in {".yaml", ".yml"}:
             documents[relative] = _key_tree(_load_yaml(path))

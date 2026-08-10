@@ -209,34 +209,129 @@ def test_later_preflights_are_same_schema_and_do_not_rewrite_completed_results(
 def test_canonical_preflight_reads_only_canonical_artifacts_and_rejects_provenance(
     tmp_path: Path,
 ) -> None:
-    """Canonical basis is source-independent and checks files already on disk."""
+    """Canonical basis requires a complete training prior and no provenance."""
     from Uncertainty_Quantification.FGE.fge.preflight import run_preflight
 
     config = _config(tmp_path)
     run_preflight(config, "train")
-    root = config.paths.output_root / config.project.name
-    (root / "training").mkdir(parents=True)
-    (root / "prediction").mkdir()
-    (root / "training" / "manifest.json").write_text(
-        json.dumps({"schema_version": "upet.fge.training.v1", "member_count": 2}),
-        encoding="utf-8",
-    )
-    (root / "prediction" / "manifest.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "upet.fge.prediction.v1",
-                "member_ids": ["member_001", "member_002"],
-            }
-        ),
-        encoding="utf-8",
-    )
+    prior = _write_predict_prior(config)
 
     report = run_preflight(config, "predict", basis="canonical_artifacts")
     assert report["basis"] == "canonical_artifacts"
 
-    (root / "training" / "manifest.json").write_text(
-        json.dumps({"schema_version": "upet.fge.training.v1", "migration": True}),
-        encoding="utf-8",
-    )
+    training = json.loads(prior.read_text(encoding="utf-8"))
+    training["migration"] = {"source": "old-result"}
+    prior.write_text(json.dumps(training), encoding="utf-8")
+    with pytest.raises(HardFailure):
+        run_preflight(config, "predict", basis="canonical_artifacts")
+
+
+def _canonical_hash(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _write_predict_prior(config: Any) -> Path:
+    """Create a complete training prior but deliberately no prediction manifest."""
+    from Uncertainty_Quantification.FGE.tests.test_validation import _formal_a3_payload
+
+    root = config.paths.output_root / config.project.name
+    resolved = config.sanitized()
+    resolved["ema"] = {"member_source": "raw_endpoint"}
+    config.sanitized = lambda: dict(resolved)
+    members: list[dict[str, object]] = []
+    for index in range(1, 3):
+        path = root / "training" / "members" / f"member_{index:03d}.pt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload, _ = _formal_a3_payload(index, config.identity.base_checkpoint_sha256)
+        torch.save(payload, path)
+        members.append(
+            {
+                "member_id": f"member_{index:03d}",
+                "sha256": _sha256(path),
+                "cycle": index,
+                "endpoint_global_step": index,
+            }
+        )
+    training = {
+        "schema_version": "upet.fge.training.v1",
+        "project_name": config.project.name,
+        "config_resolved": resolved,
+        "config_identity": {"sha256": _canonical_hash(resolved)},
+        "checkpoint_identity": {
+            "sha256": config.identity.base_checkpoint_sha256,
+        },
+        "data_identities": {
+            "train": {"sha256": config.identity.train_data_sha256},
+            "val": {"sha256": config.identity.val_data_sha256},
+            "test": {"sha256": config.identity.test_data_sha256},
+        },
+        "model_contract": {
+            "readout_tensor_count": 12,
+            "readout_parameter_count": 13338,
+        },
+        "frozen_fingerprint_identity": {"sha256": "f" * 64},
+        "dependency_snapshot": {"torch": "2.x", "metatrain": "2026.3.1"},
+        "scientific_flags": {
+            "path_feasibility_only": True,
+            "split_leakage": True,
+            "scientific_evaluation": False,
+            "inference_only": False,
+        },
+        "training_code_identity": {"status": "unavailable"},
+        "artifact_writer_code_identity": {
+            "commit": "a" * 40,
+            "dirty_sha256": "a" * 64,
+        },
+        "validator_code_identity": {
+            "commit": "b" * 40,
+            "dirty_sha256": "b" * 64,
+        },
+        "member_count": 2,
+        "members": members,
+    }
+    path = root / "training" / "manifest.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(training), encoding="utf-8")
+    return path
+
+
+def test_predict_canonical_preflight_only_requires_verified_training_prior(
+    tmp_path: Path,
+) -> None:
+    """Predict starts after training; prediction artifacts do not exist yet."""
+    from Uncertainty_Quantification.FGE.fge.preflight import run_preflight
+
+    config = _config(tmp_path)
+    run_preflight(config, "train")
+    prior = _write_predict_prior(config)
+
+    report = run_preflight(config, "predict", basis="canonical_artifacts")
+
+    assert report["stage"] == "predict"
+    assert prior.is_file()
+    assert not (prior.parents[1] / "prediction" / "manifest.json").exists()
+
+
+def test_predict_canonical_preflight_rejects_training_identity_or_provenance_drift(
+    tmp_path: Path,
+) -> None:
+    """Prior config/hash/schema and explicit migration provenance are strict."""
+    from Uncertainty_Quantification.FGE.fge.preflight import run_preflight
+
+    config = _config(tmp_path)
+    run_preflight(config, "train")
+    prior = _write_predict_prior(config)
+    training = json.loads(prior.read_text(encoding="utf-8"))
+    training["config_identity"] = {"sha256": "0" * 64}
+    prior.write_text(json.dumps(training), encoding="utf-8")
+
+    with pytest.raises(HardFailure):
+        run_preflight(config, "predict", basis="canonical_artifacts")
+
+    training["config_identity"] = {"sha256": _canonical_hash(config.sanitized())}
+    training["migration"] = {"source": "old"}
+    prior.write_text(json.dumps(training), encoding="utf-8")
     with pytest.raises(HardFailure):
         run_preflight(config, "predict", basis="canonical_artifacts")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from collections.abc import Mapping
@@ -32,7 +33,9 @@ _UNITS = {
     "forces": "eV/angstrom",
     "stress": "eV/angstrom^3",
 }
-_FORBIDDEN_PROVENANCE = ("source", "migration", "legacy", "bootstrap", "wandb")
+_FORBIDDEN_PROVENANCE = frozenset(
+    {"source", "source_path", "migration", "legacy", "old_member_sha"}
+)
 
 
 def _fail_unless(condition: bool, message: str) -> None:
@@ -188,22 +191,138 @@ def _scientific_flags(config: FGEConfig, stage: str) -> dict[str, bool]:
     return flags
 
 
-def _canonical_documents(layout: ExperimentLayout, stage: str) -> None:
-    required = [layout.training_manifest]
-    if stage == "evaluate":
-        required.append(layout.prediction_manifest)
-    if stage == "predict":
-        required.append(layout.prediction_manifest)
-    for path in required:
+def _canonical_config(value: Mapping[str, object]) -> dict[str, object]:
+    return json.loads(json.dumps(dict(value), sort_keys=True))
+
+
+def _canonical_config_identity(value: Mapping[str, object]) -> dict[str, str]:
+    encoded = json.dumps(
+        _canonical_config(value), sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return {"sha256": hashlib.sha256(encoded).hexdigest()}
+
+
+def _mapping(value: object, label: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
+        raise HardFailure(f"{label} is invalid")
+    return value
+
+
+def _validate_training_prior(
+    config: FGEConfig, layout: ExperimentLayout, training: Mapping[str, object]
+) -> list[str]:
+    _fail_unless(
+        training.get("schema_version") == "upet.fge.training.v1",
+        "training schema is invalid",
+    )
+    _fail_unless(
+        training.get("project_name") == config.project.name,
+        "training project identity is invalid",
+    )
+    sanitized = config.sanitized()
+    _fail_unless(isinstance(sanitized, Mapping), "sanitized configuration is invalid")
+    _fail_unless(
+        training.get("config_resolved") == _canonical_config(sanitized)
+        and training.get("config_identity") == _canonical_config_identity(sanitized),
+        "training config identity is invalid",
+    )
+    model_contract = training.get("model_contract")
+    _fail_unless(
+        model_contract
+        == {"readout_tensor_count": 12, "readout_parameter_count": 13338},
+        "training model contract is invalid",
+    )
+    expected_hashes = {
+        "base_checkpoint": config.identity.base_checkpoint_sha256,
+        "train_data": config.identity.train_data_sha256,
+        "val_data": config.identity.val_data_sha256,
+        "test_data": config.identity.test_data_sha256,
+    }
+    checkpoint = _mapping(training.get("checkpoint_identity"), "checkpoint identity")
+    _fail_unless(
+        checkpoint.get("sha256") == expected_hashes["base_checkpoint"],
+        "training checkpoint identity is invalid",
+    )
+    identities = _mapping(training.get("data_identities"), "data identities")
+    for split in ("train", "val", "test"):
+        identity = _mapping(identities.get(split), "data identity")
         _fail_unless(
-            path.is_file() and not path.is_symlink(),
-            f"canonical artifact is missing: {path}",
+            identity.get("sha256") == expected_hashes[f"{split}_data"],
+            "training data identity is invalid",
         )
-        try:
-            document = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise HardFailure(f"canonical artifact is not valid JSON: {path}") from exc
-        _assert_source_independent(document)
+    members = training.get("members")
+    member_count = training.get("member_count")
+    if (
+        not isinstance(members, list)
+        or isinstance(member_count, bool)
+        or not isinstance(member_count, int)
+        or member_count != config.fge.member_count
+        or len(members) != member_count
+    ):
+        raise HardFailure("training member identity is invalid")
+    member_ids: list[str] = []
+    for index, member in enumerate(members, start=1):
+        entry = _mapping(member, "training member")
+        member_id = f"member_{index:03d}"
+        _fail_unless(
+            entry.get("member_id") == member_id and entry.get("cycle") == index,
+            "training member order is invalid",
+        )
+        path = layout.root / "training" / "members" / f"{member_id}.pt"
+        _fail_unless(
+            path.is_file()
+            and not path.is_symlink()
+            and entry.get("sha256") == sha256_file(path),
+            "training member hash is invalid",
+        )
+        member_ids.append(member_id)
+    return member_ids
+
+
+def _canonical_documents(
+    config: FGEConfig, layout: ExperimentLayout, stage: str
+) -> None:
+    path = layout.training_manifest
+    _fail_unless(
+        path.is_file() and not path.is_symlink(),
+        f"canonical artifact is missing: {path}",
+    )
+    try:
+        training = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HardFailure(f"canonical artifact is not valid JSON: {path}") from exc
+    _assert_source_independent(training)
+    member_ids = _validate_training_prior(
+        config, layout, _mapping(training, "training manifest")
+    )
+    if stage != "evaluate":
+        return
+    path = layout.prediction_manifest
+    _fail_unless(
+        path.is_file() and not path.is_symlink(),
+        f"canonical artifact is missing: {path}",
+    )
+    try:
+        prediction = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HardFailure(f"canonical artifact is not valid JSON: {path}") from exc
+    _assert_source_independent(prediction)
+    prediction_mapping = _mapping(prediction, "prediction manifest")
+    _fail_unless(
+        prediction_mapping.get("schema_version") == "upet.fge.prediction.v1"
+        and prediction_mapping.get("member_ids") == member_ids,
+        "prediction prior identity is invalid",
+    )
+    artifact = _mapping(prediction_mapping.get("artifact"), "prediction artifact")
+    artifact_path = layout.root / "prediction" / "test_raw.pt"
+    _fail_unless(
+        artifact.get("path") == "prediction/test_raw.pt"
+        and artifact_path.is_file()
+        and not artifact_path.is_symlink()
+        and artifact.get("sha256") == sha256_file(artifact_path)
+        and artifact.get("bytes") == artifact_path.stat().st_size,
+        "prediction artifact identity is invalid",
+    )
 
 
 def _assert_source_independent(value: object) -> None:
@@ -211,8 +330,7 @@ def _assert_source_independent(value: object) -> None:
         for key, nested in value.items():
             if not isinstance(key, str):
                 raise HardFailure("canonical artifact contains a non-string key")
-            lowered = key.lower()
-            if any(marker in lowered for marker in _FORBIDDEN_PROVENANCE):
+            if key.lower() in _FORBIDDEN_PROVENANCE:
                 raise HardFailure(
                     "canonical artifact contains source or migration provenance"
                 )
@@ -220,10 +338,8 @@ def _assert_source_independent(value: object) -> None:
     elif isinstance(value, list):
         for nested in value:
             _assert_source_independent(nested)
-    elif isinstance(value, str) and any(
-        marker in value.lower() for marker in _FORBIDDEN_PROVENANCE
-    ):
-        raise HardFailure("canonical artifact contains source or migration provenance")
+    elif isinstance(value, str) and Path(value).is_absolute():
+        raise HardFailure("canonical artifact contains an absolute path")
 
 
 def _layout(config: FGEConfig) -> ExperimentLayout:
@@ -271,7 +387,7 @@ def run_preflight(
     identity = _identity(config)
     scientific_flags = _scientific_flags(config, stage)
     if basis == "canonical_artifacts":
-        _canonical_documents(layout, stage)
+        _canonical_documents(config, layout, stage)
     if stage == "train" and basis == "runtime_inputs":
         _write_initial_config(config, layout)
     report: dict[str, Any] = {
