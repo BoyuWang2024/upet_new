@@ -122,9 +122,7 @@ def validate_prediction_payload(payload: Mapping[str, object]) -> PredictionShap
     expected_member_ids = tuple(f"member_{index:03d}" for index in range(1, K + 1))
     if member_ids != expected_member_ids:
         raise HardFailure("member_ids must be contiguous canonical FGE IDs")
-    structure_ids = _ordered_ids(payload["structure_ids"], "structure_ids", S)
-    if tuple(sorted(structure_ids)) != structure_ids:
-        raise HardFailure("structure_ids must be in canonical order")
+    _ordered_ids(payload["structure_ids"], "structure_ids", S)
 
     _tensor(payload, "energy_prediction", (K, S), torch.float32)
     _tensor(payload, "forces_prediction", (K, A, 3), torch.float32)

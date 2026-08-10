@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from Uncertainty_Quantification.FGE.internal_migration.scripts import (
@@ -77,5 +81,39 @@ def test_hard_failure_becomes_nonzero_exit(monkeypatch, capsys) -> None:
         raise HardFailure("bad legacy source")
 
     monkeypatch.setattr(inspect_legacy, "inspect", fail)
-    assert inspect_legacy.main(["--source", "/old"]) == 2
+    assert inspect_legacy.main(["--source", "/old", "--config", "/config.yaml"]) == 2
     assert capsys.readouterr().err.strip() == "bad legacy source"
+
+
+@pytest.mark.parametrize(
+    "script_name",
+    [
+        "inspect_legacy.py",
+        "migrate_results.py",
+        "validate_migration.py",
+        "audit_results.py",
+    ],
+)
+def test_migration_scripts_execute_directly_by_path(script_name: str) -> None:
+    script = Path(__file__).parents[1] / "scripts" / script_name
+    completed = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_inspect_script_requires_config() -> None:
+    with pytest.raises(SystemExit) as error:
+        inspect_legacy.build_parser().parse_args(["--source", "/old"])
+    assert error.value.code == 2
+
+
+def test_audit_script_uses_destination_and_audit_root() -> None:
+    args = audit_results.build_parser().parse_args(
+        ["--destination", "/outputs/full", "--audit-root", "/outputs/_audit"]
+    )
+    assert args.destination == "/outputs/full"
+    assert args.audit_root == "/outputs/_audit"

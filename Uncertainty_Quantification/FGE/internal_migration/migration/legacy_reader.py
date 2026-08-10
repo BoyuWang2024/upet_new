@@ -274,8 +274,8 @@ def _prediction(
     ):
         raise HardFailure("legacy prediction summary mapping is invalid")
     structure_ids = tuple(str(value) for value in structure_ids_raw)
-    if len(set(structure_ids)) != S or tuple(sorted(structure_ids)) != structure_ids:
-        raise HardFailure("legacy structure IDs are not unique canonical order")
+    if len(set(structure_ids)) != S:
+        raise HardFailure("legacy structure IDs are not unique")
     chunks = summary.get("chunks")
     listed = summary.get("member_chunks")
     if (

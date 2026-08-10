@@ -658,7 +658,7 @@ def _manifest_artifact_path(root: Path, path_text: object) -> Path:
     return root / candidate
 
 
-def _validate_completed_manifest(root: Path, config: FGEConfig) -> int:
+def _validate_completed_manifest(root: Path, expected_project_name: str) -> int:
     manifest = _load_json(root / "result_manifest.json")
     _fail_unless(
         manifest.get("schema_version") == "upet.fge.result.v1"
@@ -666,7 +666,7 @@ def _validate_completed_manifest(root: Path, config: FGEConfig) -> int:
         "result manifest is invalid",
     )
     _fail_unless(
-        manifest.get("project_name") == config.project.name,
+        manifest.get("project_name") == expected_project_name,
         "result manifest project is invalid",
     )
     artifacts = manifest.get("artifacts")
@@ -714,6 +714,31 @@ def _validate_completed_manifest(root: Path, config: FGEConfig) -> int:
     return len(artifacts)
 
 
+def validate_completed_result(root: str | Path) -> ValidationReport:
+    """Reopen and hash-check a completed formal tree without writing any file."""
+
+    result_root = Path(root)
+    _fail_unless(
+        result_root.is_dir() and not result_root.is_symlink(), "result root is invalid"
+    )
+    config_resolved = _load_yaml(result_root / "config_resolved.yaml")
+    project = config_resolved.get("project")
+    if not isinstance(project, Mapping) or not isinstance(project.get("name"), str):
+        raise HardFailure("resolved config project identity is invalid")
+    training = _load_json(result_root / "training" / "manifest.json")
+    member_count = training.get("member_count")
+    if isinstance(member_count, bool) or not isinstance(member_count, int):
+        raise HardFailure("training member count is invalid")
+    _validate_formal_tree(
+        result_root,
+        member_count,
+        validation_exists=True,
+        completion_exists=True,
+    )
+    count = _validate_completed_manifest(result_root, project["name"])
+    return ValidationReport("PASS", "read_only", count)
+
+
 def validate_result(
     config: FGEConfig, root: str | Path, *, publish_completion: bool = True
 ) -> ValidationReport:
@@ -753,7 +778,9 @@ def validate_result(
     )
     if completed.exists():
         return ValidationReport(
-            "PASS", "read_only", _validate_completed_manifest(result_root, config)
+            "PASS",
+            "read_only",
+            _validate_completed_manifest(result_root, config.project.name),
         )
     report = ValidationReport(
         "PASS", "published" if publish_completion else "validated", 0

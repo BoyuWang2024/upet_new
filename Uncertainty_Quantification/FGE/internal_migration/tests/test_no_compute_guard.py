@@ -23,8 +23,10 @@ def test_converter_never_calls_training_prediction_evaluation_or_model_compute(
         raise AssertionError("converter invoked forbidden compute")
 
     monkeypatch.setattr(torch.nn.Module, "forward", forbidden)
+    monkeypatch.setattr(torch.nn.Linear, "forward", forbidden)
     monkeypatch.setattr(torch.Tensor, "backward", forbidden)
     monkeypatch.setattr(torch.optim.Optimizer, "step", forbidden)
+    monkeypatch.setattr(torch.optim.Adam, "step", forbidden)
     monkeypatch.setattr(training, "train_fge", forbidden)
     monkeypatch.setattr(prediction, "predict_members", forbidden)
     monkeypatch.setattr(evaluation, "evaluate_fge", forbidden)

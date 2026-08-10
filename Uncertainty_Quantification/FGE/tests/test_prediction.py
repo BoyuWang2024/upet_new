@@ -233,7 +233,7 @@ def test_canonical_prediction_keeps_one_reference_and_exact_member_order() -> No
         ("atomic_numbers", torch.tensor([1.0, 6.0, 8.0], dtype=torch.float32)),
         ("structure_mapping", torch.tensor([0.0, 0.0, 1.0], dtype=torch.float32)),
         ("member_ids", ("member_001", "member_001")),
-        ("structure_ids", ("structure_001", "structure_000")),
+        ("structure_ids", ("structure_001", "structure_001")),
         ("target_names", {"energy": "energy"}),
         ("units", {"energy": "eV"}),
         ("statistics", {"K": 2, "S": 3, "A": 3}),

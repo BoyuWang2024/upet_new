@@ -6,7 +6,9 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import re
 import shutil
+import subprocess
 import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -47,6 +49,86 @@ _DEFAULT_MEMBER_SHA256 = {
     "member_008": "5b91297faa2a1f0ec95d48f728e33687efd4fe3e6f6773c5de2f985ac6671521",
 }
 _UNAVAILABLE = {"status": "unavailable"}
+_COMMIT = re.compile(r"[0-9a-f]{40}\Z")
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def _migration_code_identity(value: Mapping[str, object]) -> dict[str, str]:
+    if set(value) != {"commit", "dirty_sha256"}:
+        raise HardFailure("migration code identity has an invalid schema")
+    commit, dirty = value.get("commit"), value.get("dirty_sha256")
+    if (
+        not isinstance(commit, str)
+        or _COMMIT.fullmatch(commit) is None
+        or not isinstance(dirty, str)
+        or _SHA256.fullmatch(dirty) is None
+    ):
+        raise HardFailure("migration code identity has invalid digests")
+    return {"commit": commit, "dirty_sha256": dirty}
+
+
+def _repo_code_identity(repo_root: Path | None = None) -> dict[str, str]:
+    """Return the exact commit and a content digest of every dirty repository byte."""
+
+    cwd = Path(repo_root or __file__).resolve()
+    if cwd.is_file():
+        cwd = cwd.parent
+    try:
+        root = Path(
+            subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=cwd,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        tracked = subprocess.run(
+            ["git", "diff", "--binary", "HEAD", "--", "."],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        ).stdout
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        ).stdout.split(b"\0")
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise HardFailure("repository code identity is unavailable") from exc
+    digest = hashlib.sha256(tracked)
+    for encoded in sorted(item for item in untracked if item):
+        candidate = root / os.fsdecode(encoded)
+        if not candidate.is_file() or candidate.is_symlink():
+            raise HardFailure("repository identity contains an unsafe untracked path")
+        digest.update(encoded)
+        digest.update(b"\0")
+        digest.update(candidate.read_bytes())
+    return {"commit": commit, "dirty_sha256": digest.hexdigest()}
+
+
+def _safe_absolute(path: Path, label: str) -> Path:
+    candidate = Path(path).absolute()
+    for item in (candidate, *candidate.parents):
+        if item.is_symlink():
+            raise HardFailure(f"{label} must not contain a symbolic link")
+    return candidate.resolve()
+
+
+def _contains(parent: Path, child: Path) -> bool:
+    try:
+        child.relative_to(parent)
+    except ValueError:
+        return False
+    return True
 
 
 def _default_expectations() -> LegacyExpectations:
@@ -285,6 +367,7 @@ def _write_formal_tree(
     run: LegacyRun,
     config: FGEConfig,
     base_checkpoint: Path,
+    code_identity: Mapping[str, object],
 ) -> list[dict[str, object]]:
     base_sha = sha256_file(base_checkpoint)
     if base_sha != config.identity.base_checkpoint_sha256:
@@ -318,8 +401,8 @@ def _write_formal_tree(
             "scientific_evaluation": config.scientific.training.scientific_evaluation,
             "inference_only": config.scientific.training.inference_only,
         },
-        artifact_writer_code_identity=_UNAVAILABLE,
-        validator_code_identity=_UNAVAILABLE,
+        artifact_writer_code_identity=code_identity,
+        validator_code_identity=code_identity,
         training_code_identity=_UNAVAILABLE,
         member_count=len(run.members),
         members=manifest_members,
@@ -331,6 +414,10 @@ def _write_formal_tree(
     prediction_shape = run.prediction["statistics"]
     if not isinstance(prediction_shape, Mapping):
         raise HardFailure("canonical prediction statistics are invalid")
+    target_names = run.prediction["target_names"]
+    units = run.prediction["units"]
+    if not isinstance(target_names, Mapping) or not isinstance(units, Mapping):
+        raise HardFailure("canonical prediction metadata is invalid")
     prediction_manifest = build_prediction_manifest(
         root=staging,
         prediction_path=prediction_path,
@@ -338,10 +425,10 @@ def _write_formal_tree(
         shape=prediction_shape,
         config_identity=config_identity,
         test_data_identity={"sha256": config.identity.test_data_sha256},
-        target_names=run.prediction["target_names"],
-        units=run.prediction["units"],
-        artifact_writer_code_identity=_UNAVAILABLE,
-        validator_code_identity=_UNAVAILABLE,
+        target_names=target_names,
+        units=units,
+        artifact_writer_code_identity=code_identity,
+        validator_code_identity=code_identity,
     )
     atomic_write_json(staging / "prediction" / "manifest.json", prediction_manifest)
     ensemble, uncertainty, metrics, report_inputs = evaluation_values(run, config)
@@ -358,6 +445,9 @@ def _write_formal_tree(
         newline="\n",
     )
     validate_result(config, staging, publish_completion=True)
+    completed = validate_result(config, staging)
+    if completed.mode != "read_only":
+        raise HardFailure("completed staging did not enter read-only validation mode")
     return audit_mapping
 
 
@@ -370,8 +460,11 @@ def write_external_audit(
 ) -> Path:
     """Atomically publish the durable authorization record outside formal output."""
 
-    destination = Path(audit_root).resolve() / experiment
-    if destination.exists() or destination.is_symlink():
+    root = _safe_absolute(Path(audit_root), "audit path")
+    if Path(experiment).name != experiment:
+        raise HardFailure("external audit experiment escapes audit root")
+    destination = _safe_absolute(root / experiment, "audit path")
+    if destination.exists():
         raise HardFailure("external migration audit destination already exists")
     with sibling_staging(destination) as staging:
         atomic_write_json(staging / "audit.json", payload)
@@ -386,23 +479,31 @@ def convert_legacy_run(
     base_checkpoint: Path,
     *,
     expected: LegacyExpectations | None = None,
+    code_identity: Mapping[str, object] | None = None,
 ) -> Path:
     """Validate, stage, audit and atomically publish one legacy result."""
 
-    destination_path = Path(destination).absolute()
-    if destination_path.is_symlink():
-        raise HardFailure(
-            f"artifact destination must not be a symbolic link: {destination_path}"
-        )
-    final = destination_path.resolve()
+    final = _safe_absolute(Path(destination), "artifact destination")
+    safe_audit_root = _safe_absolute(Path(audit_root), "audit path")
+    audit_destination = _safe_absolute(safe_audit_root / final.name, "audit path")
+    if (
+        _contains(final, safe_audit_root)
+        or _contains(safe_audit_root, final)
+        or _contains(final, audit_destination)
+        or _contains(audit_destination, final)
+    ):
+        raise HardFailure("artifact destination and audit must be separate trees")
     if final.exists():
         raise HardFailure(f"artifact destination already exists: {final}")
-    final.parent.mkdir(parents=True, exist_ok=True)
+    identity = _migration_code_identity(code_identity or _repo_code_identity())
     run = read_legacy_run(Path(source), expected or _default_expectations())
+    final.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{final.name}.staging-", dir=final.parent))
     published = False
     try:
-        mapping = _write_formal_tree(staging, run, config, Path(base_checkpoint))
+        mapping = _write_formal_tree(
+            staging, run, config, Path(base_checkpoint), identity
+        )
         verify_source_unchanged(run.source_snapshot)
         before = _snapshot_json(run.source_snapshot)
         after = {
@@ -417,8 +518,8 @@ def convert_legacy_run(
             "source_hashes_before": before,
             "source_hashes_after": after,
             "source_to_a3": mapping,
-            "artifact_writer_code_identity": dict(_UNAVAILABLE),
-            "validator_code_identity": dict(_UNAVAILABLE),
+            "artifact_writer_code_identity": dict(identity),
+            "validator_code_identity": dict(identity),
             "canonical_staging_signature": schema_signature(staging),
             "expected_final_destination": str(final),
             "publication_authorized": True,
