@@ -245,7 +245,14 @@ def test_training_uses_one_optimizer_and_raw_endpoint_members_across_cycles(
     ]
     assert manifest_path == tmp_path / "upet_fge_n20_cpu" / "training" / "manifest.json"
     assert not (tmp_path / "upet_fge_n20_cpu" / "_work").exists()
-    assert (tmp_path / ".fge_work" / "upet_fge_n20_cpu" / "native_resume.pt").is_file()
+    assert sorted(
+        path.name for path in (tmp_path / ".fge_work" / "upet_fge_n20_cpu").glob("*.pt")
+    ) == [
+        "native_resume_step_000000000001.pt",
+        "native_resume_step_000000000002.pt",
+        "native_resume_step_000000000003.pt",
+        "native_resume_step_000000000004.pt",
+    ]
     manifest = json.loads(manifest_path.read_text())
     resolved = config.sanitized()
     canonical = json.dumps(resolved, sort_keys=True, separators=(",", ":")).encode(
@@ -319,16 +326,17 @@ def test_resume_rejects_any_identity_mismatch_before_training(tmp_path: Path) ->
                 "code": "d" * 64,
                 "base": SHA_BASE,
                 "data": SHA_TRAIN,
-            }
+            },
+            "global_step": 1,
         },
-        work / "native_resume.pt",
+        work / "native_resume_step_000000000001.pt",
     )
 
     with pytest.raises(HardFailure, match="resume identity"):
         train_fge(config, runtime=runtime)
 
     assert runtime.lrs == []
-    assert (work / "native_resume.pt").is_file()
+    assert (work / "native_resume_step_000000000001.pt").is_file()
 
 
 def test_failed_training_retains_identity_matched_resume_state(tmp_path: Path) -> None:
@@ -339,7 +347,12 @@ def test_failed_training_retains_identity_matched_resume_state(tmp_path: Path) -
     with pytest.raises(HardFailure, match="reload smoke"):
         train_fge(_config(tmp_path), runtime=runtime)
 
-    assert (tmp_path / ".fge_work" / "upet_fge_n20_cpu" / "native_resume.pt").is_file()
+    assert (
+        tmp_path
+        / ".fge_work"
+        / "upet_fge_n20_cpu"
+        / "native_resume_step_000000000002.pt"
+    ).is_file()
     assert not (tmp_path / "upet_fge_n20_cpu" / "_work").exists()
 
 
@@ -483,7 +496,14 @@ def test_success_retains_external_resume_without_deletion(
         for path in deleted
     )
     assert not (tmp_path / "upet_fge_n20_cpu" / "_work").exists()
-    assert (tmp_path / ".fge_work" / "upet_fge_n20_cpu" / "native_resume.pt").is_file()
+    assert sorted(
+        path.name for path in (tmp_path / ".fge_work" / "upet_fge_n20_cpu").glob("*.pt")
+    ) == [
+        "native_resume_step_000000000001.pt",
+        "native_resume_step_000000000002.pt",
+        "native_resume_step_000000000003.pt",
+        "native_resume_step_000000000004.pt",
+    ]
 
 
 def test_external_resume_rejects_symlinked_work_ancestor(tmp_path: Path) -> None:
@@ -511,7 +531,7 @@ def test_external_resume_rejects_symlinked_file(tmp_path: Path) -> None:
     outside = tmp_path / "outside.pt"
     outside.write_bytes(b"outside")
     try:
-        (work / "native_resume.pt").symlink_to(outside)
+        (work / "native_resume_step_000000000001.pt").symlink_to(outside)
     except OSError:
         pytest.skip("symlink creation is unavailable")
 
@@ -644,3 +664,28 @@ def test_external_resume_rejects_project_component_escape(tmp_path: Path) -> Non
         train_fge(config, runtime=_TorchRuntime(batches=4))
 
     assert not (tmp_path.parent / "escape" / "native_resume.pt").exists()
+
+
+def test_external_resume_append_only_publish_has_no_swappable_source_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from Uncertainty_Quantification.FGE.fge import training
+
+    original_link = training._link_open_file
+    observed: dict[str, Path] = {}
+
+    def attacker_precreates_target(fd: int, work_fd: int, name: str) -> None:
+        attacker = os.open(
+            name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=work_fd
+        )
+        os.write(attacker, b"attacker")
+        os.close(attacker)
+        observed["path"] = tmp_path / ".fge_work" / "upet_fge_n20_cpu" / name
+        original_link(fd, work_fd, name)
+
+    monkeypatch.setattr(training, "_link_open_file", attacker_precreates_target)
+    with pytest.raises(HardFailure, match="resume state cannot be written"):
+        train_fge(_config(tmp_path), runtime=_TorchRuntime(batches=4))
+
+    assert observed["path"].read_bytes() == b"attacker"
+    assert not (tmp_path / "upet_fge_n20_cpu" / "training" / "manifest.json").exists()

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from Uncertainty_Quantification.FGE.fge import artifacts
 from Uncertainty_Quantification.FGE.fge.errors import HardFailure
 from Uncertainty_Quantification.FGE.internal_migration.migration import converter
 
@@ -19,16 +20,16 @@ def test_audit_is_durable_before_final_rename(
     )
     destination = tmp_path / "published"
     audit_root = tmp_path / "audit"
-    real_replace = converter.os.replace
+    real_rename = artifacts._rename_directory_noreplace
 
-    def fail_final(source_path, destination_path, **kwargs):
-        bound_parent = (Path("/proc/self/fd") / str(kwargs.get("dst_dir_fd"))).resolve()
+    def fail_final(parent_fd: int, source_name: str, destination_name: str) -> None:
+        bound_parent = (Path("/proc/self/fd") / str(parent_fd)).resolve()
         if bound_parent == destination.parent:
             assert (audit_root / "published/audit.json").is_file()
             raise OSError("injected final rename failure")
-        return real_replace(source_path, destination_path, **kwargs)
+        real_rename(parent_fd, source_name, destination_name)
 
-    monkeypatch.setattr(converter.os, "replace", fail_final)
+    monkeypatch.setattr(artifacts, "_rename_directory_noreplace", fail_final)
     with pytest.raises(HardFailure, match="publish"):
         converter.convert_legacy_run(
             source, destination, audit_root, config, base, expected=expected

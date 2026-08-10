@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
+import io
 import json
 import os
 import secrets
@@ -10,7 +13,7 @@ import stat
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, BinaryIO, Callable, Iterator, Mapping
+from typing import Any, Iterator, Mapping
 
 import torch
 import yaml
@@ -33,8 +36,12 @@ def sha256_file(path: str | Path) -> str:
 _DIRECTORY_FLAGS = (
     os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 )
-_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
 _PROC_FD_ROOT = Path("/proc/self/fd")
+_AT_EMPTY_PATH = 0x1000
+_AT_FDCWD = -100
+_AT_SYMLINK_FOLLOW = 0x400
+_RENAME_NOREPLACE = 1
+_LIBC = ctypes.CDLL(None, use_errno=True)
 _SECURE_ARTIFACT_PRIMITIVES = (
     all(
         operation in os.supports_dir_fd
@@ -42,6 +49,9 @@ _SECURE_ARTIFACT_PRIMITIVES = (
     )
     and hasattr(os, "O_DIRECTORY")
     and hasattr(os, "O_NOFOLLOW")
+    and hasattr(os, "O_TMPFILE")
+    and hasattr(_LIBC, "linkat")
+    and hasattr(_LIBC, "renameat2")
     and _PROC_FD_ROOT.is_dir()
 )
 
@@ -97,6 +107,19 @@ def _open_stable_directory(path: Path, *, create: bool) -> int:
         raise
 
 
+def is_bound_directory_path(path: Path) -> bool:
+    """Return whether *path* is exactly one live proc-fd directory handle."""
+    absolute = path.absolute()
+    parts = absolute.parts
+    prefix = (absolute.anchor, "proc", "self", "fd")
+    if len(parts) != 5 or parts[:4] != prefix:
+        return False
+    try:
+        return stat.S_ISDIR(os.fstat(int(parts[4])).st_mode)
+    except (OSError, ValueError):
+        return False
+
+
 def _safe_name(path: Path) -> str:
     name = path.name
     if not name or name in {".", ".."} or Path(name).name != name:
@@ -108,35 +131,110 @@ def _random_name(prefix: str) -> str:
     return f"{prefix}{secrets.token_hex(16)}"
 
 
-def _create_temporary_file(parent_fd: int, destination_name: str) -> tuple[int, str]:
-    for _ in range(100):
-        temporary_name = _random_name(f".{destination_name}.")
-        try:
-            descriptor = os.open(temporary_name, _FILE_FLAGS, 0o600, dir_fd=parent_fd)
-        except FileExistsError:
-            continue
-        return descriptor, temporary_name
-    raise HardFailure("unable to allocate a unique artifact temporary file")
+def _same_inode(left: os.stat_result, right: os.stat_result) -> bool:
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
 
 
-def _atomic_store(destination: Path, writer: Callable[[BinaryIO], object]) -> None:
+def _link_open_file(descriptor: int, parent_fd: int, destination_name: str) -> None:
+    result = _LIBC.linkat(
+        descriptor,
+        ctypes.c_char_p(b""),
+        parent_fd,
+        ctypes.c_char_p(os.fsencode(destination_name)),
+        _AT_EMPTY_PATH,
+    )
+    if result != 0 and ctypes.get_errno() in {errno.ENOENT, errno.EPERM}:
+        proc_source = os.fsencode(f"/proc/self/fd/{descriptor}")
+        result = _LIBC.linkat(
+            _AT_FDCWD,
+            ctypes.c_char_p(proc_source),
+            parent_fd,
+            ctypes.c_char_p(os.fsencode(destination_name)),
+            _AT_SYMLINK_FOLLOW,
+        )
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), destination_name)
+
+
+def _rename_directory_noreplace(parent_fd: int, source: str, destination: str) -> None:
+    result = _LIBC.renameat2(
+        parent_fd,
+        ctypes.c_char_p(os.fsencode(source)),
+        parent_fd,
+        ctypes.c_char_p(os.fsencode(destination)),
+        _RENAME_NOREPLACE,
+    )
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), destination)
+
+
+def _verify_parent_binding(path: Path, expected_fd: int) -> None:
+    actual_fd = _open_stable_directory(path, create=False)
+    try:
+        if not _same_inode(os.fstat(actual_fd), os.fstat(expected_fd)):
+            raise HardFailure("artifact destination parent identity changed")
+    finally:
+        os.close(actual_fd)
+
+
+def _verify_entry_binding(
+    parent_fd: int, name: str, expected: os.stat_result, *, directory: bool
+) -> None:
+    flags = _DIRECTORY_FLAGS if directory else os.O_RDONLY | os.O_NOFOLLOW
+    descriptor = os.open(name, flags, dir_fd=parent_fd)
+    try:
+        if not _same_inode(os.fstat(descriptor), expected):
+            raise HardFailure("published artifact identity differs from staged inode")
+    finally:
+        os.close(descriptor)
+
+
+def _read_open_file(descriptor: int) -> bytes:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(descriptor, 1024 * 1024)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+def _atomic_store(destination: Path, payload: bytes) -> None:
     parent_fd = _open_stable_directory(destination.parent, create=True)
     descriptor = -1
     try:
-        descriptor, temporary_name = _create_temporary_file(
-            parent_fd, _safe_name(destination)
-        )
-        with os.fdopen(descriptor, "wb") as stream:
-            descriptor = -1
-            writer(stream)
+        destination_name = _safe_name(destination)
+        try:
+            existing = os.open(
+                destination_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            try:
+                if not stat.S_ISREG(os.fstat(existing).st_mode):
+                    raise HardFailure("artifact destination is not a regular file")
+                if _read_open_file(existing) != payload:
+                    raise HardFailure("immutable artifact destination already exists")
+            finally:
+                os.close(existing)
+            _verify_parent_binding(destination.parent, parent_fd)
+            return
+        descriptor = os.open(".", os.O_RDWR | os.O_TMPFILE, 0o600, dir_fd=parent_fd)
+        with os.fdopen(os.dup(descriptor), "wb") as stream:
+            stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(
-            temporary_name,
-            destination.name,
-            src_dir_fd=parent_fd,
-            dst_dir_fd=parent_fd,
-        )
+        expected = os.fstat(descriptor)
+        _link_open_file(descriptor, parent_fd, destination_name)
+        _verify_entry_binding(parent_fd, destination_name, expected, directory=False)
+        _verify_parent_binding(destination.parent, parent_fd)
+    except FileExistsError as exc:
+        raise HardFailure("immutable artifact destination already exists") from exc
+    except OSError as exc:
+        raise HardFailure("unable to publish descriptor-bound artifact") from exc
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -150,7 +248,7 @@ def atomic_write_json(path: str | Path, payload: Mapping[str, Any] | list[Any]) 
         document = json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n"
     except (TypeError, ValueError) as exc:
         raise HardFailure(f"non-finite JSON or unsupported value: {exc}") from exc
-    _atomic_store(destination, lambda stream: stream.write(document.encode("utf-8")))
+    _atomic_store(destination, document.encode("utf-8"))
 
 
 def atomic_write_yaml(path: str | Path, payload: Mapping[str, Any]) -> None:
@@ -160,12 +258,14 @@ def atomic_write_yaml(path: str | Path, payload: Mapping[str, Any]) -> None:
         document = yaml.safe_dump(dict(payload), sort_keys=False, allow_unicode=True)
     except yaml.YAMLError as exc:
         raise HardFailure(f"unable to serialize YAML: {exc}") from exc
-    _atomic_store(destination, lambda stream: stream.write(document.encode("utf-8")))
+    _atomic_store(destination, document.encode("utf-8"))
 
 
 def atomic_torch_save(path: str | Path, payload: Any) -> None:
     """Atomically store a torch payload through a descriptor-bound sibling."""
-    _atomic_store(Path(path), lambda stream: torch.save(payload, stream))
+    stream = io.BytesIO()
+    torch.save(payload, stream)
+    _atomic_store(Path(path), stream.getvalue())
 
 
 def assert_safe_result_path(root: str | Path, path: str | Path) -> None:
@@ -271,7 +371,8 @@ def sibling_staging(destination: str | Path) -> Iterator[Path]:
         else:
             raise HardFailure("unable to allocate a unique staging directory")
         staging_fd = _open_directory_component(parent_fd, staging_name, create=False)
-        yield _PROC_FD_ROOT / str(parent_fd) / staging_name
+        expected = os.fstat(staging_fd)
+        yield _PROC_FD_ROOT / str(staging_fd)
         try:
             os.stat(final_name, dir_fd=parent_fd, follow_symlinks=False)
         except FileNotFoundError:
@@ -279,9 +380,9 @@ def sibling_staging(destination: str | Path) -> Iterator[Path]:
         else:
             raise HardFailure(f"artifact destination already exists: {final_path}")
         try:
-            os.replace(
-                staging_name, final_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd
-            )
+            _rename_directory_noreplace(parent_fd, staging_name, final_name)
+            _verify_entry_binding(parent_fd, final_name, expected, directory=True)
+            _verify_parent_binding(final_path.parent, parent_fd)
         except OSError as exc:
             raise HardFailure(
                 "unable to publish descriptor-bound staging atomically"

@@ -7,7 +7,7 @@ import io
 import json
 import math
 import os
-import secrets
+import re
 import stat
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import contextmanager
@@ -19,6 +19,9 @@ import torch
 
 from .artifacts import (
     ExperimentLayout,
+    _link_open_file,
+    _same_inode,
+    _verify_entry_binding,
     assert_safe_result_path,
     atomic_torch_save,
     atomic_write_json,
@@ -144,7 +147,7 @@ def _loader_length(loader: Iterable[object]) -> int:
 
 
 _WORK_DIRECTORY = ".fge_work"
-_RESUME_NAME = "native_resume.pt"
+_RESUME_PATTERN = re.compile(r"native_resume_step_([0-9]{12})[.]pt\Z")
 _WORK_DIRECTORY_FLAGS = (
     os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 )
@@ -172,6 +175,7 @@ _SAFE_WORK_PRIMITIVES = (
     all(operation in os.supports_dir_fd for operation in (os.open, os.mkdir, os.rename))
     and hasattr(os, "O_DIRECTORY")
     and hasattr(os, "O_NOFOLLOW")
+    and hasattr(os, "O_TMPFILE")
 )
 
 
@@ -247,20 +251,61 @@ def _resume_identity(runtime: TrainingRuntime) -> dict[str, str]:
     return identity
 
 
+def _resume_candidates(work_fd: int) -> tuple[tuple[int, str], ...]:
+    candidates: list[tuple[int, str]] = []
+    for name in os.listdir(work_fd):
+        match = _RESUME_PATTERN.fullmatch(name)
+        if match is not None:
+            entry = os.stat(name, dir_fd=work_fd, follow_symlinks=False)
+            if not stat.S_ISREG(entry.st_mode):
+                raise HardFailure("external FGE resume entry is not a regular file")
+            candidates.append((int(match.group(1)), name))
+        elif name.startswith("native_resume"):
+            raise HardFailure("unexpected external FGE resume entry")
+    return tuple(sorted(candidates))
+
+
+def _load_resume_entry(work_fd: int, name: str) -> Mapping[str, object]:
+    resume_fd = os.open(name, _WORK_FILE_FLAGS, dir_fd=work_fd)
+    try:
+        if not stat.S_ISREG(os.fstat(resume_fd).st_mode):
+            raise HardFailure("native resume state is not a regular file")
+        with os.fdopen(resume_fd, "rb", closefd=False) as handle:
+            state = torch.load(handle, map_location="cpu", weights_only=True)
+    finally:
+        os.close(resume_fd)
+    if not isinstance(state, Mapping):
+        raise HardFailure("native resume state is invalid")
+    return state
+
+
+def _verify_work_binding(config: FGEConfig, expected_fd: int) -> None:
+    actual_fd = _open_work_directory(config, create=False)
+    try:
+        if not _same_inode(os.fstat(actual_fd), os.fstat(expected_fd)):
+            raise HardFailure("external FGE work directory identity changed")
+    finally:
+        os.close(actual_fd)
+
+
 def _assert_resume_identity(
     config: FGEConfig, runtime: TrainingRuntime, enabled: bool
 ) -> None:
     if not enabled:
         return
     work_fd: int | None = None
-    resume_fd: int | None = None
     try:
         work_fd = _open_work_directory(config, create=False)
-        resume_fd = os.open(_RESUME_NAME, _WORK_FILE_FLAGS, dir_fd=work_fd)
-        if not stat.S_ISREG(os.fstat(resume_fd).st_mode):
-            raise HardFailure("native resume state is not a regular file")
-        with os.fdopen(resume_fd, "rb", closefd=False) as handle:
-            state = torch.load(handle, map_location="cpu", weights_only=True)
+        candidates = _resume_candidates(work_fd)
+        if not candidates:
+            return
+        step, name = candidates[-1]
+        state = _load_resume_entry(work_fd, name)
+        if state.get("global_step") != step:
+            raise HardFailure("resume filename and payload step differ")
+        if state.get("resume_identity") != _resume_identity(runtime):
+            raise HardFailure("resume identity does not match config/code/base/data")
+        _verify_work_binding(config, work_fd)
     except FileNotFoundError:
         return
     except HardFailure:
@@ -268,14 +313,8 @@ def _assert_resume_identity(
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise HardFailure("native resume state cannot be read") from exc
     finally:
-        if resume_fd is not None:
-            os.close(resume_fd)
         if work_fd is not None:
             os.close(work_fd)
-    if not isinstance(state, Mapping) or state.get(
-        "resume_identity"
-    ) != _resume_identity(runtime):
-        raise HardFailure("resume identity does not match config/code/base/data")
 
 
 def _save_resume(config: FGEConfig, runtime: TrainingRuntime, global_step: int) -> None:
@@ -284,39 +323,33 @@ def _save_resume(config: FGEConfig, runtime: TrainingRuntime, global_step: int) 
         {"resume_identity": _resume_identity(runtime), "global_step": global_step},
         payload,
     )
+    name = f"native_resume_step_{global_step:012d}.pt"
     work_fd: int | None = None
     temporary_fd: int | None = None
-    temporary_name = f".native_resume.{secrets.token_hex(16)}.tmp"
     try:
         work_fd = _open_work_directory(config, create=True)
+        _resume_candidates(work_fd)
         try:
-            existing_fd = os.open(_RESUME_NAME, _WORK_FILE_FLAGS, dir_fd=work_fd)
+            existing = _load_resume_entry(work_fd, name)
         except FileNotFoundError:
             pass
-        except OSError as exc:
-            raise HardFailure("external FGE resume path is unsafe") from exc
         else:
-            try:
-                if not stat.S_ISREG(os.fstat(existing_fd).st_mode):
-                    raise HardFailure("external FGE resume path is unsafe")
-            finally:
-                os.close(existing_fd)
-        temporary_fd = os.open(
-            temporary_name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-            0o600,
-            dir_fd=work_fd,
-        )
-        with os.fdopen(temporary_fd, "wb", closefd=False) as handle:
+            if (
+                existing.get("resume_identity") != _resume_identity(runtime)
+                or existing.get("global_step") != global_step
+            ):
+                raise HardFailure("existing append-only resume state differs")
+            _verify_work_binding(config, work_fd)
+            return
+        temporary_fd = os.open(".", os.O_RDWR | os.O_TMPFILE, 0o600, dir_fd=work_fd)
+        with os.fdopen(os.dup(temporary_fd), "wb") as handle:
             handle.write(payload.getvalue())
             handle.flush()
-            os.fsync(temporary_fd)
-        os.rename(
-            temporary_name,
-            _RESUME_NAME,
-            src_dir_fd=work_fd,
-            dst_dir_fd=work_fd,
-        )
+            os.fsync(handle.fileno())
+        expected = os.fstat(temporary_fd)
+        _link_open_file(temporary_fd, work_fd, name)
+        _verify_entry_binding(work_fd, name, expected, directory=False)
+        _verify_work_binding(config, work_fd)
         os.fsync(work_fd)
     except HardFailure:
         raise

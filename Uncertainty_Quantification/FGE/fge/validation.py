@@ -13,7 +13,7 @@ from typing import Any
 import torch
 import yaml
 
-from .artifacts import atomic_write_json, sha256_file
+from .artifacts import atomic_write_json, is_bound_directory_path, sha256_file
 from .config import FGEConfig
 from .errors import HardFailure
 from .evaluation import evaluate_prediction
@@ -768,7 +768,9 @@ def validate_result(
     """Reopen every canonical artifact, recompute evaluation, then publish once."""
     result_root = Path(root)
     _fail_unless(
-        result_root.is_dir() and not result_root.is_symlink(), "result root is invalid"
+        result_root.is_dir()
+        and (not result_root.is_symlink() or is_bound_directory_path(result_root)),
+        "result root is invalid",
     )
     completed = result_root / "result_manifest.json"
     config_resolved = _load_yaml(result_root / "config_resolved.yaml")

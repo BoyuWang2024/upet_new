@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from Uncertainty_Quantification.FGE.fge import validation
+from Uncertainty_Quantification.FGE.fge import artifacts, validation
 from Uncertainty_Quantification.FGE.fge.errors import HardFailure
 from Uncertainty_Quantification.FGE.internal_migration.migration import converter
 
@@ -72,7 +72,7 @@ def test_every_formal_write_boundary_retains_staging_without_final(
     assert retained[0].is_dir()
 
 
-def test_failed_converter_publication_never_deletes_through_swapped_ancestor(
+def test_failed_converter_publication_retains_bound_staging_after_ancestor_swap(
     legacy_tree, config_payload, tmp_path: Path, monkeypatch
 ) -> None:
     source, base, config, expected = build_conversion_case(
@@ -84,27 +84,20 @@ def test_failed_converter_publication_never_deletes_through_swapped_ancestor(
     owned = tmp_path / ".owned_publication"
     outside = tmp_path / "outside_publication"
     outside.mkdir()
-    real_replace = converter.os.replace
-    observed: dict[str, Path] = {}
+    real_rename = artifacts._rename_directory_noreplace
+    observed: dict[str, str] = {}
 
-    def swap_and_fail(source_path, destination_path, **kwargs):
-        bound_parent = Path("/proc/self/fd") / str(kwargs.get("dst_dir_fd"))
-        if bound_parent.resolve() != publication:
-            return real_replace(source_path, destination_path, **kwargs)
-        staging = Path(source_path)
+    def swap_and_fail(parent_fd: int, source_name: str, target_name: str) -> None:
+        bound_parent = (Path("/proc/self/fd") / str(parent_fd)).resolve()
+        if bound_parent != publication:
+            return real_rename(parent_fd, source_name, target_name)
         os.rename(publication, owned)
         publication.symlink_to(outside, target_is_directory=True)
-        external = outside / staging.name
-        external.mkdir()
-        sentinel = external / "sentinel.txt"
-        sentinel.write_text("outside", encoding="utf-8")
-        observed["staging"] = staging
-        observed["sentinel"] = sentinel
+        observed["staging"] = source_name
         raise OSError("injected publication failure")
 
-    monkeypatch.setattr(converter.os, "replace", swap_and_fail)
-
-    with pytest.raises(HardFailure, match="unable to publish descriptor-bound staging"):
+    monkeypatch.setattr(artifacts, "_rename_directory_noreplace", swap_and_fail)
+    with pytest.raises(HardFailure, match="descriptor-bound staging"):
         converter.convert_legacy_run(
             source,
             destination,
@@ -114,14 +107,12 @@ def test_failed_converter_publication_never_deletes_through_swapped_ancestor(
             expected=expected,
         )
 
-    staging = observed["staging"]
-    sentinel = observed["sentinel"]
-    assert sentinel.read_text(encoding="utf-8") == "outside"
-    assert (owned / staging.name).is_dir()
+    assert (owned / observed["staging"]).is_dir()
     assert not destination.exists()
+    assert not any(outside.iterdir())
 
 
-def test_converter_publication_remains_bound_when_parent_is_swapped(
+def test_converter_publication_rejects_configured_parent_swap(
     legacy_tree, config_payload, tmp_path: Path, monkeypatch
 ) -> None:
     source, base, config, expected = build_conversion_case(
@@ -133,37 +124,74 @@ def test_converter_publication_remains_bound_when_parent_is_swapped(
     owned = tmp_path / ".owned_bound_publication"
     outside = tmp_path / "outside_bound_publication"
     outside.mkdir()
-    real_replace = converter.os.replace
-    observed: dict[str, Path] = {}
+    real_rename = artifacts._rename_directory_noreplace
 
-    def swap_then_replace(source_path, destination_path, **kwargs):
-        bound = kwargs.get("dst_dir_fd")
-        if bound is None:
-            targets_publication = Path(destination_path) == destination
-        else:
-            bound_parent = (Path("/proc/self/fd") / str(bound)).resolve()
-            targets_publication = bound_parent == publication
-        if not targets_publication:
-            return real_replace(source_path, destination_path, **kwargs)
+    def swap_then_rename(parent_fd: int, source_name: str, target_name: str) -> None:
+        bound_parent = (Path("/proc/self/fd") / str(parent_fd)).resolve()
+        if bound_parent != publication:
+            return real_rename(parent_fd, source_name, target_name)
         os.rename(publication, owned)
         publication.symlink_to(outside, target_is_directory=True)
-        attacker = outside / Path(source_path).name
-        attacker.mkdir()
-        (attacker / "attacker.txt").write_text("outside", encoding="utf-8")
-        observed["attacker"] = attacker
-        return real_replace(source_path, destination_path, **kwargs)
+        real_rename(parent_fd, source_name, target_name)
 
-    monkeypatch.setattr(converter.os, "replace", swap_then_replace)
-    result = converter.convert_legacy_run(
-        source,
-        destination,
-        tmp_path / "audit_bound",
-        config,
-        base,
-        expected=expected,
-    )
+    monkeypatch.setattr(artifacts, "_rename_directory_noreplace", swap_then_rename)
+    with pytest.raises(HardFailure, match="descriptor-bound staging"):
+        converter.convert_legacy_run(
+            source,
+            destination,
+            tmp_path / "audit_bound",
+            config,
+            base,
+            expected=expected,
+        )
 
-    assert result == destination
-    assert (observed["attacker"] / "attacker.txt").is_file()
     assert not (outside / destination.name).exists()
     assert (owned / destination.name / "result_manifest.json").is_file()
+
+
+def test_converter_rejects_staging_basename_substitution_without_acceptance(
+    legacy_tree, config_payload, tmp_path: Path, monkeypatch
+) -> None:
+    source, base, config, expected = build_conversion_case(
+        legacy_tree, config_payload, tmp_path
+    )
+    destination = tmp_path / "published_basename"
+    real_rename = artifacts._rename_directory_noreplace
+    observed: dict[str, str] = {}
+
+    def substitute(parent_fd: int, source_name: str, target_name: str) -> None:
+        bound_parent = (Path("/proc/self/fd") / str(parent_fd)).resolve()
+        if bound_parent != tmp_path:
+            return real_rename(parent_fd, source_name, target_name)
+        owned = f".owned-{source_name}"
+        os.rename(source_name, owned, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        os.mkdir(source_name, 0o700, dir_fd=parent_fd)
+        attacker_fd = os.open(source_name, artifacts._DIRECTORY_FLAGS, dir_fd=parent_fd)
+        try:
+            marker = os.open(
+                "attacker.txt",
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=attacker_fd,
+            )
+            os.write(marker, b"attacker")
+            os.close(marker)
+        finally:
+            os.close(attacker_fd)
+        observed["owned"] = owned
+        real_rename(parent_fd, source_name, target_name)
+
+    monkeypatch.setattr(artifacts, "_rename_directory_noreplace", substitute)
+    with pytest.raises(HardFailure, match="descriptor-bound staging|identity differs"):
+        converter.convert_legacy_run(
+            source,
+            destination,
+            tmp_path / "audit_basename",
+            config,
+            base,
+            expected=expected,
+        )
+
+    assert (destination / "attacker.txt").read_bytes() == b"attacker"
+    assert not (destination / "result_manifest.json").exists()
+    assert (tmp_path / observed["owned"] / "result_manifest.json").is_file()
