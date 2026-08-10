@@ -7,9 +7,25 @@ from pathlib import Path
 import pytest
 import torch
 
+from Uncertainty_Quantification.FGE.fge.errors import HardFailure
+from Uncertainty_Quantification.FGE.internal_migration.migration import converter
 from Uncertainty_Quantification.FGE.tests.conftest import (
     config_payload as config_payload,  # noqa: F401
 )
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_restart_materializer(monkeypatch):
+    def materialize(path: Path, expected_sha256: str):
+        if _sha(path) != expected_sha256:
+            raise HardFailure("synthetic checkpoint identity mismatch")
+        raw = torch.load(path, map_location="cpu", weights_only=True)
+        return {
+            name: value.detach().cpu()
+            for name, value in raw["model_state_dict"].items()
+        }
+
+    monkeypatch.setattr(converter, "_restart_materialized_state", materialize)
 
 
 def _sha(path: Path) -> str:

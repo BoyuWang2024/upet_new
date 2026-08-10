@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
+import io
 import json
 import os
 import re
+import stat
 import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -193,6 +195,46 @@ def _state(path: Path) -> dict[str, torch.Tensor]:
     return result
 
 
+def _restart_materialized_state(
+    path: Path, expected_sha256: str
+) -> dict[str, torch.Tensor]:
+    """Materialize one authenticated immutable restart payload without compute."""
+
+    candidate = _safe_absolute(path, "checkpoint")
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise HardFailure("safe checkpoint loading is unsupported on this platform")
+    try:
+        import metatomic.torch  # noqa: F401
+        from metatrain.utils.io import model_from_checkpoint
+
+        descriptor = os.open(candidate, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise HardFailure("checkpoint is not a regular file")
+            snapshot = handle.read()
+        if hashlib.sha256(snapshot).hexdigest() != expected_sha256:
+            raise HardFailure("checkpoint SHA256 differs from authenticated identity")
+        raw = torch.load(io.BytesIO(snapshot), map_location="cpu", weights_only=False)
+        if not isinstance(raw, Mapping):
+            raise HardFailure("legacy checkpoint must be a mapping")
+        model = model_from_checkpoint(raw, context="restart").to(
+            device="cpu", dtype=torch.float32
+        )
+        state = model.state_dict()
+    except HardFailure:
+        raise
+    except (OSError, RuntimeError, ValueError, TypeError, ImportError) as exc:
+        raise HardFailure(
+            f"unable to materialize authenticated restart: {path.name}"
+        ) from exc
+    if not state or any(
+        not isinstance(name, str) or not isinstance(value, torch.Tensor)
+        for name, value in state.items()
+    ):
+        raise HardFailure("materialized restart state contains unsupported data")
+    return {name: value.detach().cpu() for name, value in state.items()}
+
+
 def _readout_names(state: Mapping[str, torch.Tensor]) -> tuple[str, ...]:
     names = tuple(name for name in state if name.startswith(READOUT_PREFIXES))
     if len(names) != 12 or sum(state[name].numel() for name in names) != 13_338:
@@ -231,15 +273,18 @@ def _frozen_identity(
 def _extract_members(
     staging: Path,
     run: LegacyRun,
-    base_state: Mapping[str, torch.Tensor],
+    base_checkpoint: Path,
     base_sha256: str,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, str]]:
+    base_state = _restart_materialized_state(base_checkpoint, base_sha256)
     readout_names = _readout_names(base_state)
     members_dir = staging / "training" / "members"
     manifest_members: list[dict[str, object]] = []
     audit_mapping: list[dict[str, object]] = []
     for member in run.members:
-        member_state = _state(member.checkpoint_path)
+        member_state = _restart_materialized_state(
+            member.checkpoint_path, member.sha256
+        )
         if set(member_state) != set(base_state):
             raise HardFailure("legacy member state keys differ from base")
         for name in set(base_state) - set(readout_names):
@@ -370,12 +415,11 @@ def _write_formal_tree(
     base_sha = sha256_file(base_checkpoint)
     if base_sha != config.identity.base_checkpoint_sha256:
         raise HardFailure("base checkpoint SHA256 differs from configuration")
-    base_state = _state(base_checkpoint)
     config_resolved = config.sanitized()
     config_identity = _config_identity(config_resolved)
     atomic_write_yaml(staging / "config_resolved.yaml", config_resolved)
     manifest_members, audit_mapping, frozen_identity = _extract_members(
-        staging, run, base_state, base_sha
+        staging, run, base_checkpoint, base_sha
     )
     training = build_training_manifest(
         project_name=config.project.name,
