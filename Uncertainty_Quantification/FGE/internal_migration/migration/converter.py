@@ -7,9 +7,7 @@ import importlib.metadata
 import json
 import os
 import re
-import shutil
 import subprocess
-import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -496,10 +494,7 @@ def convert_legacy_run(
         raise HardFailure(f"artifact destination already exists: {final}")
     identity = _migration_code_identity(_repo_code_identity())
     run = read_legacy_run(Path(source), expected or _default_expectations())
-    final.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=f".{final.name}.staging-", dir=final.parent))
-    published = False
-    try:
+    with sibling_staging(final) as staging:
         mapping = _write_formal_tree(
             staging, run, config, Path(base_checkpoint), identity
         )
@@ -524,16 +519,4 @@ def convert_legacy_run(
             "publication_authorized": True,
         }
         write_external_audit(Path(audit_root), final.name, audit)
-        if final.exists():
-            raise HardFailure(f"artifact destination already exists: {final}")
-        try:
-            os.replace(staging, final)
-        except OSError as exc:
-            raise HardFailure(
-                "unable to publish canonical migration atomically"
-            ) from exc
-        published = True
-    finally:
-        if not published and staging.exists():
-            shutil.rmtree(staging)
     return final

@@ -8,6 +8,7 @@ import pytest
 import torch
 import yaml
 
+from Uncertainty_Quantification.FGE.fge import artifacts
 from Uncertainty_Quantification.FGE.fge.artifacts import (
     ExperimentLayout,
     assert_safe_result_path,
@@ -33,10 +34,11 @@ def test_atomic_json_fsyncs_a_sibling_temporary_file_then_replaces_target(
         observed["fsync"] = True
         original_fsync(fd)
 
-    def record_replace(source: os.PathLike[str], destination: os.PathLike[str]) -> None:
+    def record_replace(source, destination, **kwargs) -> None:
         observed["source"] = Path(source)
         observed["destination"] = Path(destination)
-        original_replace(source, destination)
+        observed["replace_kwargs"] = kwargs
+        original_replace(source, destination, **kwargs)
 
     monkeypatch.setattr(os, "fsync", record_fsync)
     monkeypatch.setattr(os, "replace", record_replace)
@@ -46,10 +48,13 @@ def test_atomic_json_fsyncs_a_sibling_temporary_file_then_replaces_target(
     assert observed["fsync"] is True
     source = observed["source"]
     assert isinstance(source, Path)
-    assert source.parent == target.parent
-    assert observed["destination"] == target
+    assert source.name.startswith(f".{target.name}.")
+    assert observed["destination"] == Path(target.name)
+    replace_kwargs = observed["replace_kwargs"]
+    assert isinstance(replace_kwargs, dict)
+    assert replace_kwargs["src_dir_fd"] == replace_kwargs["dst_dir_fd"]
     assert json.loads(target.read_text(encoding="utf-8")) == {"status": "PASS"}
-    assert not source.exists()
+    assert not (target.parent / source).exists()
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
@@ -90,7 +95,7 @@ def test_atomic_write_preserves_existing_destination_when_replace_fails(
     target = tmp_path / "result.json"
     target.write_text('{"old": true}\n', encoding="utf-8")
 
-    def fail_replace(_source: os.PathLike[str], _destination: os.PathLike[str]) -> None:
+    def fail_replace(_source, _destination, **_kwargs) -> None:
         raise OSError("replace failed")
 
     monkeypatch.setattr(os, "replace", fail_replace)
@@ -139,7 +144,7 @@ def test_sibling_staging_publishes_a_complete_directory_atomically(
     destination = tmp_path / "published"
 
     with sibling_staging(destination) as staging:
-        assert staging.parent == destination.parent
+        assert staging.is_dir()
         (staging / "result.txt").write_text("complete", encoding="utf-8")
 
     assert (destination / "result.txt").read_text(encoding="utf-8") == "complete"
@@ -201,7 +206,7 @@ def test_failed_atomic_write_never_deletes_through_swapped_ancestor(
     target = parent / "manifest.json"
     observed: dict[str, Path] = {}
 
-    def swap_and_fail(source: os.PathLike[str], _destination: os.PathLike[str]) -> None:
+    def swap_and_fail(source, _destination, **_kwargs) -> None:
         temporary = Path(source)
         os.rename(parent, owned)
         parent.symlink_to(outside, target_is_directory=True)
@@ -220,3 +225,117 @@ def test_failed_atomic_write_never_deletes_through_swapped_ancestor(
     assert external.read_bytes() == b"outside"
     assert (owned / temporary.name).is_file()
     assert not target.exists()
+
+
+def test_failed_sibling_staging_never_deletes_through_swapped_ancestor(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "formal"
+    parent.mkdir()
+    owned = tmp_path / ".owned_formal"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    destination = parent / "published"
+    observed: dict[str, Path] = {}
+
+    with pytest.raises(RuntimeError, match="injected failure"):
+        with sibling_staging(destination) as staging:
+            (staging / "partial.txt").write_text("partial", encoding="utf-8")
+            os.rename(parent, owned)
+            parent.symlink_to(outside, target_is_directory=True)
+            external = outside / staging.name
+            external.mkdir()
+            sentinel = external / "sentinel.txt"
+            sentinel.write_text("outside", encoding="utf-8")
+            observed["staging"] = staging
+            observed["sentinel"] = sentinel
+            raise RuntimeError("injected failure")
+
+    staging = observed["staging"]
+    sentinel = observed["sentinel"]
+    assert sentinel.read_text(encoding="utf-8") == "outside"
+    assert (owned / staging.name / "partial.txt").is_file()
+
+
+def test_atomic_replace_remains_bound_when_parent_is_swapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = tmp_path / "formal" / "training"
+    parent.mkdir(parents=True)
+    owned = parent.with_name(".owned_training")
+    outside = tmp_path / "outside_bound"
+    outside.mkdir()
+    target = parent / "manifest.json"
+    real_replace = os.replace
+    observed: dict[str, Path] = {}
+
+    def swap_then_replace(source, destination, **kwargs):
+        os.rename(parent, owned)
+        parent.symlink_to(outside, target_is_directory=True)
+        external_source = outside / Path(source).name
+        external_source.write_bytes(b"attacker")
+        external_target = outside / Path(destination).name
+        external_target.write_bytes(b"outside")
+        observed["source"] = external_source
+        observed["target"] = external_target
+        return real_replace(source, destination, **kwargs)
+
+    monkeypatch.setattr(os, "replace", swap_then_replace)
+    atomic_write_json(target, {"status": "PASS"})
+
+    assert observed["source"].read_bytes() == b"attacker"
+    assert observed["target"].read_bytes() == b"outside"
+    assert json.loads((owned / target.name).read_text(encoding="utf-8")) == {
+        "status": "PASS"
+    }
+
+
+def test_artifact_writes_fail_closed_without_secure_primitives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(artifacts, "_SECURE_ARTIFACT_PRIMITIVES", False)
+    target = tmp_path / "formal" / "manifest.json"
+
+    with pytest.raises(HardFailure, match="race-safe artifact operations"):
+        atomic_write_json(target, {"status": "blocked"})
+
+    assert not target.parent.exists()
+
+
+def test_sibling_publication_remains_bound_when_parent_is_swapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = tmp_path / "formal_publish"
+    parent.mkdir()
+    owned = tmp_path / ".owned_formal_publish"
+    outside = tmp_path / "outside_publish"
+    outside.mkdir()
+    destination = parent / "published"
+    real_replace = os.replace
+    observed: dict[str, Path] = {}
+
+    def swap_then_replace(source, target, **kwargs):
+        bound = kwargs.get("dst_dir_fd")
+        if bound is not None:
+            bound_parent = (Path("/proc/self/fd") / str(bound)).resolve()
+            if bound_parent != parent:
+                return real_replace(source, target, **kwargs)
+        elif Path(target) != destination:
+            return real_replace(source, target, **kwargs)
+        os.rename(parent, owned)
+        parent.symlink_to(outside, target_is_directory=True)
+        attacker = outside / Path(source).name
+        attacker.mkdir()
+        (attacker / "attacker.txt").write_text("outside", encoding="utf-8")
+        observed["attacker"] = attacker
+        return real_replace(source, target, **kwargs)
+
+    monkeypatch.setattr(os, "replace", swap_then_replace)
+    with sibling_staging(destination) as staging:
+        (staging / "result.txt").write_text("complete", encoding="utf-8")
+
+    assert (observed["attacker"] / "attacker.txt").is_file()
+    assert not (outside / destination.name).exists()
+    assert (owned / destination.name / "result.txt").read_text(
+        encoding="utf-8"
+    ) == "complete"

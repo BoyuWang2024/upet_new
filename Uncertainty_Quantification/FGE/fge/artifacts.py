@@ -5,12 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
-import tempfile
+import secrets
+import stat
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, BinaryIO, Callable, Iterator, Mapping
 
 import torch
 import yaml
@@ -30,60 +30,142 @@ def sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
-@contextmanager
-def _sibling_temporary_file(destination: Path) -> Iterator[Path]:
-    """Yield a same-filesystem temporary path, retaining failures for audit."""
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, name = tempfile.mkstemp(
-        prefix=f".{destination.name}.", dir=destination.parent
+_DIRECTORY_FLAGS = (
+    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+)
+_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+_PROC_FD_ROOT = Path("/proc/self/fd")
+_SECURE_ARTIFACT_PRIMITIVES = (
+    all(
+        operation in os.supports_dir_fd
+        for operation in (os.open, os.mkdir, os.rename, os.stat)
     )
-    os.close(descriptor)
-    temporary = Path(name)
-    yield temporary
+    and hasattr(os, "O_DIRECTORY")
+    and hasattr(os, "O_NOFOLLOW")
+    and _PROC_FD_ROOT.is_dir()
+)
 
 
-def _fsync(path: Path) -> None:
-    with path.open("rb") as stream:
-        os.fsync(stream.fileno())
+def _assert_secure_artifact_primitives() -> None:
+    if not _SECURE_ARTIFACT_PRIMITIVES:
+        raise HardFailure("race-safe artifact operations are unavailable")
+
+
+def _open_directory_component(parent_fd: int, component: str, *, create: bool) -> int:
+    try:
+        return os.open(component, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+    except FileNotFoundError:
+        if not create:
+            raise
+        try:
+            os.mkdir(component, 0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+        return os.open(component, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+
+
+def _open_stable_directory(path: Path, *, create: bool) -> int:
+    _assert_secure_artifact_primitives()
+    absolute = path.absolute()
+    parts = absolute.parts
+    proc_prefix = (absolute.anchor, "proc", "self", "fd")
+    if len(parts) >= 5 and parts[:4] == proc_prefix:
+        try:
+            current = os.dup(int(parts[4]))
+        except (OSError, ValueError) as exc:
+            raise HardFailure("artifact proc-fd anchor is invalid") from exc
+        if not stat.S_ISDIR(os.fstat(current).st_mode):
+            os.close(current)
+            raise HardFailure("artifact proc-fd anchor is not a directory")
+        components = parts[5:]
+    else:
+        if not parts or parts[0] != absolute.anchor:
+            raise HardFailure("artifact path has no trusted filesystem anchor")
+        try:
+            current = os.open(absolute.anchor, _DIRECTORY_FLAGS)
+        except OSError as exc:
+            raise HardFailure("artifact filesystem anchor is unsafe") from exc
+        components = parts[1:]
+    try:
+        for component in components:
+            child = _open_directory_component(current, component, create=create)
+            os.close(current)
+            current = child
+        return current
+    except BaseException:
+        os.close(current)
+        raise
+
+
+def _safe_name(path: Path) -> str:
+    name = path.name
+    if not name or name in {".", ".."} or Path(name).name != name:
+        raise HardFailure("artifact destination name is unsafe")
+    return name
+
+
+def _random_name(prefix: str) -> str:
+    return f"{prefix}{secrets.token_hex(16)}"
+
+
+def _create_temporary_file(parent_fd: int, destination_name: str) -> tuple[int, str]:
+    for _ in range(100):
+        temporary_name = _random_name(f".{destination_name}.")
+        try:
+            descriptor = os.open(temporary_name, _FILE_FLAGS, 0o600, dir_fd=parent_fd)
+        except FileExistsError:
+            continue
+        return descriptor, temporary_name
+    raise HardFailure("unable to allocate a unique artifact temporary file")
+
+
+def _atomic_store(destination: Path, writer: Callable[[BinaryIO], object]) -> None:
+    parent_fd = _open_stable_directory(destination.parent, create=True)
+    descriptor = -1
+    try:
+        descriptor, temporary_name = _create_temporary_file(
+            parent_fd, _safe_name(destination)
+        )
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = -1
+            writer(stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(
+            temporary_name,
+            destination.name,
+            src_dir_fd=parent_fd,
+            dst_dir_fd=parent_fd,
+        )
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
 
 
 def atomic_write_json(path: str | Path, payload: Mapping[str, Any] | list[Any]) -> None:
-    """Atomically write strict JSON through a sibling temporary file."""
+    """Atomically write strict JSON through a descriptor-bound sibling."""
     destination = Path(path)
     try:
         document = json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n"
     except (TypeError, ValueError) as exc:
         raise HardFailure(f"non-finite JSON or unsupported value: {exc}") from exc
-    with _sibling_temporary_file(destination) as temporary:
-        with temporary.open("w", encoding="utf-8", newline="\n") as stream:
-            stream.write(document)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, destination)
+    _atomic_store(destination, lambda stream: stream.write(document.encode("utf-8")))
 
 
 def atomic_write_yaml(path: str | Path, payload: Mapping[str, Any]) -> None:
-    """Atomically write a deterministic UTF-8 YAML document."""
+    """Atomically write deterministic UTF-8 YAML through a bound sibling."""
     destination = Path(path)
     try:
         document = yaml.safe_dump(dict(payload), sort_keys=False, allow_unicode=True)
     except yaml.YAMLError as exc:
         raise HardFailure(f"unable to serialize YAML: {exc}") from exc
-    with _sibling_temporary_file(destination) as temporary:
-        with temporary.open("w", encoding="utf-8", newline="\n") as stream:
-            stream.write(document)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, destination)
+    _atomic_store(destination, lambda stream: stream.write(document.encode("utf-8")))
 
 
 def atomic_torch_save(path: str | Path, payload: Any) -> None:
-    """Atomically store a torch payload through a sibling temporary file."""
-    destination = Path(path)
-    with _sibling_temporary_file(destination) as temporary:
-        torch.save(payload, temporary)
-        _fsync(temporary)
-        os.replace(temporary, destination)
+    """Atomically store a torch payload through a descriptor-bound sibling."""
+    _atomic_store(Path(path), lambda stream: torch.save(payload, stream))
 
 
 def assert_safe_result_path(root: str | Path, path: str | Path) -> None:
@@ -167,21 +249,44 @@ class ExperimentLayout:
 
 @contextmanager
 def sibling_staging(destination: str | Path) -> Iterator[Path]:
-    """Build a sibling directory and publish it atomically when complete."""
-    final_path = Path(destination).resolve()
-    if final_path.exists():
-        raise HardFailure(f"artifact destination already exists: {final_path}")
-    final_path.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(
-        tempfile.mkdtemp(prefix=f".{final_path.name}.staging-", dir=final_path.parent)
-    )
-    published = False
+    """Build through a bound directory and retain failed staging for audit."""
+    final_path = Path(destination).absolute()
+    final_name = _safe_name(final_path)
+    parent_fd = _open_stable_directory(final_path.parent, create=True)
+    staging_fd = -1
     try:
-        yield staging
-        if final_path.exists():
+        try:
+            os.stat(final_name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
             raise HardFailure(f"artifact destination already exists: {final_path}")
-        os.replace(staging, final_path)
-        published = True
+        for _ in range(100):
+            staging_name = _random_name(f".{final_name}.staging-")
+            try:
+                os.mkdir(staging_name, 0o700, dir_fd=parent_fd)
+            except FileExistsError:
+                continue
+            break
+        else:
+            raise HardFailure("unable to allocate a unique staging directory")
+        staging_fd = _open_directory_component(parent_fd, staging_name, create=False)
+        yield _PROC_FD_ROOT / str(parent_fd) / staging_name
+        try:
+            os.stat(final_name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise HardFailure(f"artifact destination already exists: {final_path}")
+        try:
+            os.replace(
+                staging_name, final_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd
+            )
+        except OSError as exc:
+            raise HardFailure(
+                "unable to publish descriptor-bound staging atomically"
+            ) from exc
     finally:
-        if not published and staging.exists():
-            shutil.rmtree(staging)
+        if staging_fd >= 0:
+            os.close(staging_fd)
+        os.close(parent_fd)

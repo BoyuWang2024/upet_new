@@ -21,11 +21,12 @@ def test_audit_is_durable_before_final_rename(
     audit_root = tmp_path / "audit"
     real_replace = converter.os.replace
 
-    def fail_final(source_path, destination_path):
-        if Path(destination_path) == destination.resolve():
+    def fail_final(source_path, destination_path, **kwargs):
+        bound_parent = (Path("/proc/self/fd") / str(kwargs.get("dst_dir_fd"))).resolve()
+        if bound_parent == destination.parent:
             assert (audit_root / "published/audit.json").is_file()
             raise OSError("injected final rename failure")
-        return real_replace(source_path, destination_path)
+        return real_replace(source_path, destination_path, **kwargs)
 
     monkeypatch.setattr(converter.os, "replace", fail_final)
     with pytest.raises(HardFailure, match="publish"):
