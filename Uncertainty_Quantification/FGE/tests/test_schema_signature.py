@@ -158,9 +158,15 @@ def test_evaluation_signature_symbolizes_dataset_dimensions() -> None:
         ensemble, "evaluation/legacy_equal_weight/ensemble.pt", 2, 20, 143
     )
 
-    assert signature["energy"]["shape"] == ["S"]
-    assert signature["forces"]["shape"] == ["A", 3]
-    assert signature["stress"]["shape"] == ["S", 3, 3]
+    energy_signature = signature["energy"]
+    forces_signature = signature["forces"]
+    stress_signature = signature["stress"]
+    assert isinstance(energy_signature, dict)
+    assert isinstance(forces_signature, dict)
+    assert isinstance(stress_signature, dict)
+    assert energy_signature["shape"] == ["S"]
+    assert forces_signature["shape"] == ["A", 3]
+    assert stress_signature["shape"] == ["S", 3, 3]
 
     uncertainty = {
         "energy_total": {"std": torch.zeros(20), "gmd": torch.zeros(20)},
@@ -186,9 +192,23 @@ def test_evaluation_signature_symbolizes_dataset_dimensions() -> None:
         143,
     )
 
-    assert nested["energy_total"]["std"]["shape"] == ["S"]
-    assert nested["force_component"]["gmd"]["shape"] == ["A", 3]
-    assert nested["force_structure"]["std"]["q95"]["shape"] == ["S"]
+    energy_total = nested["energy_total"]
+    force_component = nested["force_component"]
+    force_structure = nested["force_structure"]
+    assert isinstance(energy_total, dict)
+    assert isinstance(force_component, dict)
+    assert isinstance(force_structure, dict)
+    energy_std = energy_total["std"]
+    force_gmd = force_component["gmd"]
+    force_structure_std = force_structure["std"]
+    assert isinstance(energy_std, dict)
+    assert isinstance(force_gmd, dict)
+    assert isinstance(force_structure_std, dict)
+    force_q95 = force_structure_std["q95"]
+    assert isinstance(force_q95, dict)
+    assert energy_std["shape"] == ["S"]
+    assert force_gmd["shape"] == ["A", 3]
+    assert force_q95["shape"] == ["S"]
 
 
 def test_document_signature_ignores_values_and_code_identity_availability() -> None:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Iterable
 from pathlib import Path
 from types import SimpleNamespace
@@ -332,7 +333,7 @@ def test_resume_rejects_any_identity_mismatch_before_training(tmp_path: Path) ->
 def test_failed_training_retains_identity_matched_resume_state(tmp_path: Path) -> None:
     """Only successful training publication may consume its own resume state."""
     runtime = _TorchRuntime(batches=4)
-    runtime.reload_and_smoke = lambda _: False  # type: ignore[method-assign]
+    runtime.reload_and_smoke = lambda _: False  # type: ignore[assignment]
 
     with pytest.raises(HardFailure, match="reload smoke"):
         train_fge(_config(tmp_path), runtime=runtime)
@@ -462,3 +463,156 @@ def test_success_cleanup_ignores_empty_directory_removal_race(
     _consume_resume_after_success(ExperimentLayout(root), runtime)
 
     assert not resume.exists()
+
+
+def _has_stable_directory_descriptors() -> bool:
+    return (
+        all(
+            operation in os.supports_dir_fd
+            for operation in (os.open, os.rename, os.stat, os.unlink)
+        )
+        and hasattr(os, "O_NOFOLLOW")
+        and hasattr(os, "O_DIRECTORY")
+    )
+
+
+@pytest.mark.skipif(
+    not _has_stable_directory_descriptors(),
+    reason="stable directory descriptors are unavailable",
+)
+def test_success_cleanup_is_bound_to_open_work_directory_during_ancestor_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A check-to-unlink ancestor swap cannot redirect cleanup outside the root."""
+    from Uncertainty_Quantification.FGE.fge import training
+    from Uncertainty_Quantification.FGE.fge.artifacts import ExperimentLayout
+
+    root = tmp_path / "result"
+    work = root / "_work"
+    work.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    runtime = _TorchRuntime(batches=4)
+    torch.save(
+        {"resume_identity": runtime.resume_identity()}, work / "native_resume.pt"
+    )
+    outside_resume = outside / "native_resume.pt"
+    torch.save({"resume_identity": runtime.resume_identity()}, outside_resume)
+    original_rename = os.rename
+    swapped = False
+
+    def swap_ancestor_then_rename(
+        src: str,
+        dst: str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        nonlocal swapped
+        if not swapped:
+            original_rename(work, root / "_owned_work")
+            work.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        original_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    monkeypatch.setattr(os, "rename", swap_ancestor_then_rename)
+
+    training._consume_resume_after_success(ExperimentLayout(root), runtime)
+
+    assert swapped
+    assert outside_resume.is_file()
+    assert not (root / "_owned_work" / "native_resume.pt").exists()
+
+
+@pytest.mark.skipif(
+    not _has_stable_directory_descriptors(),
+    reason="stable directory descriptors are unavailable",
+)
+def test_success_cleanup_does_not_delete_basename_swapped_after_authentication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A different inode substituted after authentication is never deleted."""
+    from Uncertainty_Quantification.FGE.fge import training
+    from Uncertainty_Quantification.FGE.fge.artifacts import ExperimentLayout
+
+    root = tmp_path / "result"
+    work = root / "_work"
+    work.mkdir(parents=True)
+    runtime = _TorchRuntime(batches=4)
+    torch.save(
+        {"resume_identity": runtime.resume_identity()}, work / "native_resume.pt"
+    )
+    torch.save({"resume_identity": runtime.resume_identity()}, work / "replacement.pt")
+    original_rename = os.rename
+    swapped = False
+
+    def swap_basename_then_rename(
+        src: str,
+        dst: str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        nonlocal swapped
+        if not swapped:
+            assert src_dir_fd is not None
+            original_rename(
+                "native_resume.pt",
+                "authenticated.pt",
+                src_dir_fd=src_dir_fd,
+                dst_dir_fd=src_dir_fd,
+            )
+            original_rename(
+                "replacement.pt",
+                "native_resume.pt",
+                src_dir_fd=src_dir_fd,
+                dst_dir_fd=src_dir_fd,
+            )
+            swapped = True
+        original_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    monkeypatch.setattr(os, "rename", swap_basename_then_rename)
+
+    with pytest.raises(HardFailure, match="changed"):
+        training._consume_resume_after_success(ExperimentLayout(root), runtime)
+
+    assert swapped
+    assert (work / "authenticated.pt").is_file()
+    assert any(
+        path.name.startswith(".native_resume.consume.") for path in work.iterdir()
+    )
+
+
+def test_success_cleanup_fails_closed_without_stable_directory_descriptors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A platform without race-safe unlink primitives retains private run state."""
+    from Uncertainty_Quantification.FGE.fge import training
+    from Uncertainty_Quantification.FGE.fge.artifacts import ExperimentLayout
+
+    root = tmp_path / "result"
+    work = root / "_work"
+    work.mkdir(parents=True)
+    resume = work / "native_resume.pt"
+    runtime = _TorchRuntime(batches=4)
+    torch.save({"resume_identity": runtime.resume_identity()}, resume)
+    monkeypatch.setattr(training, "_STABLE_CLEANUP_DESCRIPTORS", False)
+
+    with pytest.raises(HardFailure, match="directory descriptor"):
+        training._consume_resume_after_success(ExperimentLayout(root), runtime)
+
+    assert resume.is_file()
+
+
+def test_training_fails_before_creating_state_without_safe_cleanup_primitives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unsupported platforms fail before training creates private run state."""
+    from Uncertainty_Quantification.FGE.fge import training
+
+    monkeypatch.setattr(training, "_STABLE_CLEANUP_DESCRIPTORS", False)
+
+    with pytest.raises(HardFailure, match="directory descriptor"):
+        train_fge(_config(tmp_path), runtime=_TorchRuntime(batches=4))
+
+    assert not (tmp_path / "upet_fge_n20_cpu").exists()

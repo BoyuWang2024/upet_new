@@ -163,22 +163,21 @@ def test_native_train_preflight_checks_runtime_basis_without_compute(
     assert train_report.is_file()
 
 
-def test_restart_preflight_hashes_and_loads_the_same_open_file(
+def test_restart_preflight_loads_an_immutable_authenticated_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A pathname swap after authentication cannot switch the unsafe payload."""
+    """An in-place mutation after authentication cannot switch the unsafe payload."""
     from Uncertainty_Quantification.FGE.fge import preflight
 
     checkpoint = tmp_path / "base.ckpt"
     trusted = b"authenticated checkpoint bytes"
     checkpoint.write_bytes(trusted)
-    replacement = tmp_path / "replacement.ckpt"
-    replacement.write_bytes(b"unauthenticated replacement")
+    replacement = b"unauthenticated mutation"
     calls: list[tuple[object, object, bool]] = []
 
     def load(handle: object, *, map_location: object, weights_only: bool) -> object:
         calls.append((handle, map_location, weights_only))
-        replacement.replace(checkpoint)
+        checkpoint.write_bytes(replacement)
         assert hasattr(handle, "read")
         assert handle.read() == trusted  # type: ignore[union-attr]
         return {"model_state_dict": {}}
@@ -190,6 +189,31 @@ def test_restart_preflight_hashes_and_loads_the_same_open_file(
     assert len(calls) == 1
     assert calls[0][0] is not checkpoint
     assert calls[0][1:] == ("cpu", False)
+
+
+def test_restart_preflight_snapshot_survives_path_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pathname swap after authentication cannot switch the unsafe payload."""
+    from Uncertainty_Quantification.FGE.fge import preflight
+
+    checkpoint = tmp_path / "base.ckpt"
+    trusted = b"authenticated checkpoint bytes"
+    checkpoint.write_bytes(trusted)
+    replacement = tmp_path / "replacement.ckpt"
+    replacement.write_bytes(b"unauthenticated replacement")
+
+    def load(handle: object, *, map_location: object, weights_only: bool) -> object:
+        assert map_location == "cpu"
+        assert weights_only is False
+        replacement.replace(checkpoint)
+        assert hasattr(handle, "read")
+        assert handle.read() == trusted  # type: ignore[union-attr]
+        return {"model_state_dict": {}}
+
+    monkeypatch.setattr(preflight.torch, "load", load)
+
+    preflight._restart_state(checkpoint, hashlib.sha256(trusted).hexdigest())
 
 
 def test_restart_preflight_rejects_a_symlinked_input_ancestor(tmp_path: Path) -> None:

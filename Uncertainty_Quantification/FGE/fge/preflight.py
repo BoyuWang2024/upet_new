@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -155,15 +156,14 @@ def _restart_state(path: Path, expected_sha256: str) -> None:
         with os.fdopen(descriptor, "rb") as handle:
             if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
                 raise HardFailure("restart checkpoint is not a regular file")
-            digest = hashlib.sha256()
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-            if digest.hexdigest() != expected_sha256:
+            snapshot = handle.read()
+            if hashlib.sha256(snapshot).hexdigest() != expected_sha256:
                 raise HardFailure(
                     "base_checkpoint SHA256 does not match the configuration"
                 )
-            handle.seek(0)
-            checkpoint = torch.load(handle, map_location="cpu", weights_only=False)
+        checkpoint = torch.load(
+            io.BytesIO(snapshot), map_location="cpu", weights_only=False
+        )
     except HardFailure:
         raise
     except (OSError, RuntimeError, ValueError, TypeError, ImportError) as exc:

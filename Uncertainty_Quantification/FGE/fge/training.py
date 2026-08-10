@@ -5,6 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import secrets
+import stat
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -180,40 +183,82 @@ def _save_resume(
     )
 
 
+_STABLE_CLEANUP_DESCRIPTORS = (
+    all(
+        operation in os.supports_dir_fd
+        for operation in (os.open, os.rename, os.stat, os.unlink, os.rmdir)
+    )
+    and hasattr(os, "O_DIRECTORY")
+    and hasattr(os, "O_NOFOLLOW")
+)
+
+
+def _stable_cleanup_descriptors_available() -> bool:
+    return _STABLE_CLEANUP_DESCRIPTORS
+
+
 def _consume_resume_after_success(
     layout: ExperimentLayout, runtime: TrainingRuntime
 ) -> None:
     """Remove only this successful run's authenticated private resume state."""
     path = _resume_path(layout)
     assert_safe_result_path(layout.root, path)
-    if path.is_symlink() or not path.is_file():
-        raise HardFailure("successful training resume state is missing or unsafe")
+    if not _stable_cleanup_descriptors_available():
+        raise HardFailure("race-safe directory descriptor cleanup is unavailable")
+
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW
+    root_fd: int | None = None
+    work_fd: int | None = None
+    resume_fd: int | None = None
+    consumed = False
     try:
-        before = path.stat(follow_symlinks=False)
-        state = torch.load(path, map_location="cpu", weights_only=True)
+        root_fd = os.open(layout.root, directory_flags)
+        work_fd = os.open("_work", directory_flags, dir_fd=root_fd)
+        resume_fd = os.open("native_resume.pt", file_flags, dir_fd=work_fd)
+        authenticated = os.fstat(resume_fd)
+        if not stat.S_ISREG(authenticated.st_mode):
+            raise HardFailure("successful training resume state is missing or unsafe")
+        with os.fdopen(resume_fd, "rb", closefd=False) as handle:
+            state = torch.load(handle, map_location="cpu", weights_only=True)
+        if not isinstance(state, Mapping) or state.get(
+            "resume_identity"
+        ) != _resume_identity(runtime):
+            raise HardFailure("successful training resume identity differs")
+
+        quarantine = f".native_resume.consume.{secrets.token_hex(16)}"
+        os.rename(
+            "native_resume.pt",
+            quarantine,
+            src_dir_fd=work_fd,
+            dst_dir_fd=work_fd,
+        )
+        moved = os.stat(quarantine, dir_fd=work_fd, follow_symlinks=False)
+        if (moved.st_dev, moved.st_ino) != (
+            authenticated.st_dev,
+            authenticated.st_ino,
+        ):
+            raise HardFailure("successful training resume state changed")
+        os.unlink(quarantine, dir_fd=work_fd)
+        consumed = True
+    except HardFailure:
+        raise
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
-        raise HardFailure("successful training resume state cannot be read") from exc
-    if not isinstance(state, Mapping) or state.get(
-        "resume_identity"
-    ) != _resume_identity(runtime):
-        raise HardFailure("successful training resume identity differs")
-    assert_safe_result_path(layout.root, path)
-    try:
-        current = path.stat(follow_symlinks=False)
-    except OSError as exc:
-        raise HardFailure("successful training resume state changed") from exc
-    if (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino):
-        raise HardFailure("successful training resume state changed")
-    try:
-        path.unlink()
-    except OSError as exc:
-        raise HardFailure("successful training resume state cannot be removed") from exc
-    work = path.parent
-    try:
-        if not any(work.iterdir()):
-            work.rmdir()
-    except OSError:
-        pass
+        raise HardFailure(
+            "successful training resume state cannot be consumed"
+        ) from exc
+    finally:
+        if resume_fd is not None:
+            os.close(resume_fd)
+        if work_fd is not None:
+            os.close(work_fd)
+        if consumed and root_fd is not None:
+            try:
+                os.rmdir("_work", dir_fd=root_fd)
+            except OSError:
+                pass
+        if root_fd is not None:
+            os.close(root_fd)
 
 
 def _assert_batch(result: object) -> TrainingBatchResult:
@@ -700,6 +745,8 @@ class PETTrainingRuntime:
 
 def train_fge(config: FGEConfig, *, runtime: TrainingRuntime | None = None) -> Path:
     """Train raw endpoint A3 members with one optimizer and validation-only EMA."""
+    if not _stable_cleanup_descriptors_available():
+        raise HardFailure("race-safe directory descriptor cleanup is unavailable")
     if runtime is None:
         runtime = PETTrainingRuntime.from_config(config)
     if not isinstance(runtime, TrainingRuntime):
