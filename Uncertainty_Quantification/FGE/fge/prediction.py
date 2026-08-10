@@ -6,14 +6,21 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 import torch
 
-from .artifacts import ExperimentLayout, atomic_torch_save, sha256_file
+from .artifacts import (
+    ExperimentLayout,
+    assert_safe_result_path,
+    atomic_torch_save,
+    atomic_write_json,
+    sha256_file,
+)
 from .config import FGEConfig
 from .data import DatasetIdentity
 from .errors import HardFailure
+from .manifests import build_prediction_manifest
 from .members import ReadoutAudit, apply_member, assert_readout_contract, load_member
 
 
@@ -210,17 +217,22 @@ _MEMBER_OUTPUT_KEYS = frozenset(
 )
 
 
-def _manifest_member_ids(path: Path, expected_count: int) -> tuple[str, ...]:
+def _training_manifest(path: Path) -> Mapping[str, object]:
     try:
         manifest = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise HardFailure("training manifest cannot be loaded") from exc
-    if not isinstance(manifest, Mapping) or not isinstance(
-        manifest.get("members"), list
-    ):
+    if not isinstance(manifest, Mapping):
+        raise HardFailure("training manifest has an invalid schema")
+    return manifest
+
+
+def _manifest_member_ids(path: Path, expected_count: int) -> tuple[str, ...]:
+    manifest = _training_manifest(path)
+    if not isinstance(manifest.get("members"), list):
         raise HardFailure("training manifest has no member list")
     member_ids: list[str] = []
-    for member in manifest["members"]:
+    for member in cast(list[object], manifest["members"]):
         if not isinstance(member, Mapping) or not isinstance(
             member.get("member_id"), str
         ):
@@ -271,6 +283,7 @@ def predict_members(config: object, *, runtime: object | None = None) -> Path:
     ):
         raise HardFailure("predict_members requires a valid FGE configuration")
     layout = ExperimentLayout(output_root / project_name)
+    training_manifest = _training_manifest(layout.training_manifest)
     member_ids = _manifest_member_ids(layout.training_manifest, expected_count)
     load_base = getattr(runtime, "load_base", None)
     restore_and_apply = getattr(runtime, "restore_and_apply", None)
@@ -351,12 +364,55 @@ def predict_members(config: object, *, runtime: object | None = None) -> Path:
             },
         }
     )
+    assert_safe_result_path(layout.root, layout.prediction_tensor)
     atomic_torch_save(layout.prediction_tensor, payload)
     stored = torch.load(layout.prediction_tensor, weights_only=True, map_location="cpu")
     if not isinstance(stored, Mapping):
         raise HardFailure("published prediction is not a mapping")
-    validate_prediction_payload(stored)
+    shape = validate_prediction_payload(stored)
+    try:
+        config_identity = training_manifest["config_identity"]
+        data_identities = cast(
+            Mapping[str, object], training_manifest["data_identities"]
+        )
+        test_data_identity = data_identities["test"]
+        artifact_writer_code_identity = training_manifest[
+            "artifact_writer_code_identity"
+        ]
+        validator_code_identity = training_manifest["validator_code_identity"]
+    except (KeyError, TypeError) as exc:
+        raise HardFailure(
+            "training manifest lacks prediction publication identities"
+        ) from exc
+    manifest = build_prediction_manifest(
+        root=layout.root,
+        prediction_path=layout.prediction_tensor,
+        member_ids=member_ids,
+        shape={"K": shape.K, "S": shape.S, "A": shape.A},
+        config_identity=cast(Mapping[str, object], config_identity),
+        test_data_identity=cast(Mapping[str, object], test_data_identity),
+        target_names=cast(Mapping[str, object], first["target_names"]),
+        units=cast(Mapping[str, object], first["units"]),
+        artifact_writer_code_identity=cast(
+            Mapping[str, object], artifact_writer_code_identity
+        ),
+        validator_code_identity=cast(Mapping[str, object], validator_code_identity),
+    )
+    assert_safe_result_path(layout.root, layout.prediction_manifest)
+    atomic_write_json(layout.prediction_manifest, manifest)
     return layout.prediction_tensor
+
+
+def _ordered_ase_systems(systems: list[Any]) -> list[Any]:
+    """Return extxyz structures in the canonical structure-ID order."""
+    try:
+        ordered = sorted(systems, key=lambda system: str(system.info["structure_id"]))
+        identifiers = tuple(str(system.info["structure_id"]) for system in ordered)
+    except (AttributeError, KeyError) as exc:
+        raise HardFailure("PET prediction dataset lacks structure_id") from exc
+    if len(set(identifiers)) != len(identifiers):
+        raise HardFailure("PET prediction dataset has duplicate structure_id")
+    return ordered
 
 
 @dataclass
@@ -385,6 +441,8 @@ class PETPredictionRuntime:
             )
         except AttributeError as exc:
             raise HardFailure("PET prediction configuration is incomplete") from exc
+        if sha256_file(checkpoint_path) != base_sha256:
+            raise HardFailure("base checkpoint SHA256 does not match configuration")
         try:
             import metatomic.torch  # noqa: F401
             from metatrain.utils.io import model_from_checkpoint
@@ -441,12 +499,8 @@ class PETPredictionRuntime:
             raise HardFailure("unable to read PET prediction dataset") from exc
         if not isinstance(systems, list) or not systems:
             raise HardFailure("PET prediction dataset is empty")
-        try:
-            structure_ids = tuple(
-                str(system.info["structure_id"]) for system in systems
-            )
-        except (KeyError, AttributeError) as exc:
-            raise HardFailure("PET prediction dataset lacks structure_id") from exc
+        systems = _ordered_ase_systems(cast(list[Any], systems))
+        structure_ids = tuple(str(system.info["structure_id"]) for system in systems)
         return DatasetIdentity(
             split="test",
             structure_ids=structure_ids,
@@ -491,6 +545,14 @@ class PETPredictionRuntime:
             or len(ase_systems) != len(model_systems)
         ):
             raise HardFailure("PET prediction datasets are empty or inconsistent")
+        ase_systems = cast(list[Any], ase_systems)
+        model_systems = cast(list[Any], model_systems)
+        ordered_pairs = sorted(
+            zip(ase_systems, model_systems, strict=True),
+            key=lambda pair: str(pair[0].info["structure_id"]),
+        )
+        ase_systems = _ordered_ase_systems([pair[0] for pair in ordered_pairs])
+        model_systems = [pair[1] for pair in ordered_pairs]
         try:
             requested = get_requested_neighbor_lists(base.model)
             prepared_systems = [

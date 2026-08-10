@@ -15,6 +15,7 @@ import torch
 
 from .artifacts import (
     ExperimentLayout,
+    assert_safe_result_path,
     atomic_torch_save,
     atomic_write_json,
     sha256_file,
@@ -172,6 +173,7 @@ def _assert_resume_identity(
 def _save_resume(
     layout: ExperimentLayout, runtime: TrainingRuntime, global_step: int
 ) -> None:
+    assert_safe_result_path(layout.root, _resume_path(layout))
     atomic_torch_save(
         _resume_path(layout),
         {"resume_identity": _resume_identity(runtime), "global_step": global_step},
@@ -649,22 +651,15 @@ class PETTrainingRuntime:
         }
 
     def manifest_metadata(self) -> Mapping[str, Mapping[str, str]]:
-        digest = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
         return {
             "dependency_snapshot": {
                 "torch": torch.__version__,
                 "metatrain": "runtime",
                 "metatomic": "runtime",
             },
-            "training_code_identity": {"commit": "unavailable", "dirty_sha256": digest},
-            "artifact_writer_code_identity": {
-                "commit": "unavailable",
-                "dirty_sha256": digest,
-            },
-            "validator_code_identity": {
-                "commit": "unavailable",
-                "dirty_sha256": digest,
-            },
+            "training_code_identity": {"status": "unavailable"},
+            "artifact_writer_code_identity": {"status": "unavailable"},
+            "validator_code_identity": {"status": "unavailable"},
         }
 
 
@@ -728,6 +723,7 @@ def train_fge(config: FGEConfig, *, runtime: TrainingRuntime | None = None) -> P
             global_step=global_step,
             base_sha256=config.identity.base_checkpoint_sha256,
         )
+        assert_safe_result_path(layout.root, member_path)
         atomic_torch_save(member_path, payload)
         if not runtime.reload_and_smoke(member_path):
             member_path.unlink(missing_ok=True)
@@ -750,5 +746,6 @@ def train_fge(config: FGEConfig, *, runtime: TrainingRuntime | None = None) -> P
         member_count=len(accepted),
         members=accepted,
     )
+    assert_safe_result_path(layout.root, layout.training_manifest)
     atomic_write_json(layout.training_manifest, manifest)
     return layout.training_manifest

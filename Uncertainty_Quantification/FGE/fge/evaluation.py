@@ -13,6 +13,7 @@ import torch
 
 from .artifacts import (
     ExperimentLayout,
+    assert_safe_result_path,
     atomic_torch_save,
     atomic_write_json,
     sibling_staging,
@@ -507,6 +508,7 @@ def evaluate_fge(config: FGEConfig) -> Path:
     directory = layout.evaluation_dir / "legacy_equal_weight"
     if directory.exists():
         raise HardFailure("formal evaluation output is immutable")
+    assert_safe_result_path(layout.root, directory)
     with sibling_staging(directory) as staging:
         atomic_torch_save(staging / "ensemble.pt", dict(result.ensemble))
         atomic_torch_save(staging / "uncertainty.pt", dict(result.uncertainty))

@@ -10,6 +10,7 @@ import yaml
 
 from Uncertainty_Quantification.FGE.fge.artifacts import (
     ExperimentLayout,
+    assert_safe_result_path,
     atomic_torch_save,
     atomic_write_json,
     atomic_write_yaml,
@@ -149,3 +150,25 @@ def test_sibling_staging_refuses_existing_destination(tmp_path: Path) -> None:
     with pytest.raises(HardFailure, match="already exists"):
         with sibling_staging(destination):
             pass
+
+
+@pytest.mark.parametrize(
+    ("directory", "destination"),
+    [
+        ("training", "training/members/member_001.pt"),
+        ("prediction", "prediction/test_raw.pt"),
+        ("evaluation", "evaluation/legacy_equal_weight"),
+    ],
+)
+def test_formal_result_paths_reject_internal_symlink_ancestors(
+    tmp_path: Path, directory: str, destination: str
+) -> None:
+    """A staged formal write cannot escape through an internal result symlink."""
+    root = tmp_path / "upet_fge_full"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    os.symlink(outside, root / directory, target_is_directory=True)
+
+    with pytest.raises(HardFailure, match="ancestor is a symlink"):
+        assert_safe_result_path(root, root / destination)

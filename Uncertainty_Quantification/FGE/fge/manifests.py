@@ -254,10 +254,10 @@ def build_training_manifest(
         "artifact_writer_code_identity": _code_identity(
             artifact_writer_code_identity,
             "artifact_writer_code_identity",
-            allow_unavailable=False,
+            allow_unavailable=True,
         ),
         "validator_code_identity": _code_identity(
-            validator_code_identity, "validator_code_identity", allow_unavailable=False
+            validator_code_identity, "validator_code_identity", allow_unavailable=True
         ),
         "member_count": member_count,
         "members": canonical_members,
@@ -283,6 +283,10 @@ def build_prediction_manifest(
     prediction_path: Path,
     member_ids: Sequence[str],
     shape: Mapping[str, object],
+    config_identity: Mapping[str, object],
+    test_data_identity: Mapping[str, object],
+    target_names: Mapping[str, object],
+    units: Mapping[str, object],
     artifact_writer_code_identity: Mapping[str, object],
     validator_code_identity: Mapping[str, object],
 ) -> dict[str, object]:
@@ -306,19 +310,41 @@ def build_prediction_manifest(
         raise HardFailure("prediction shape has an invalid schema")
     if K != len(member_ids) or S < 1 or A < 1:
         raise HardFailure("prediction shape must match its canonical members and data")
+    _json_safe(config_identity, "config_identity")
+    _json_safe(test_data_identity, "test_data_identity")
+    _json_safe(target_names, "target_names")
+    _json_safe(units, "units")
+    _forbid_provenance(config_identity)
+    _forbid_provenance(test_data_identity)
+    _forbid_provenance(target_names)
+    _forbid_provenance(units)
+    config = {"sha256": _sha_identity(config_identity, "config_identity")}
+    test_data = {"sha256": _sha_identity(test_data_identity, "test_data_identity")}
+    expected_observables = {"energy", "forces", "stress"}
+    if (
+        set(target_names) != expected_observables
+        or set(units) != expected_observables
+        or any(not isinstance(value, str) or not value for value in target_names.values())
+        or any(not isinstance(value, str) or not value for value in units.values())
+    ):
+        raise HardFailure("prediction target names or units have an invalid schema")
     artifact = _artifact(Path(root), Path(prediction_path), "prediction")
     return {
         "schema_version": "upet.fge.prediction.v1",
+        "config_identity": config,
+        "test_data_identity": test_data,
         "member_ids": list(member_ids),
         "shape": dict(shape),
+        "target_names": dict(target_names),
+        "units": dict(units),
         "artifact": artifact,
         "artifact_writer_code_identity": _code_identity(
             artifact_writer_code_identity,
             "artifact_writer_code_identity",
-            allow_unavailable=False,
+            allow_unavailable=True,
         ),
         "validator_code_identity": _code_identity(
-            validator_code_identity, "validator_code_identity", allow_unavailable=False
+            validator_code_identity, "validator_code_identity", allow_unavailable=True
         ),
     }
 

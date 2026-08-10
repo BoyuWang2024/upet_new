@@ -89,6 +89,27 @@ def atomic_torch_save(path: str | Path, payload: Any) -> None:
         os.replace(temporary, destination)
 
 
+def assert_safe_result_path(root: str | Path, path: str | Path) -> None:
+    """Reject a formal output path whose existing ancestors escape via symlinks."""
+    result_root = Path(root).absolute()
+    candidate = Path(path).absolute()
+    try:
+        relative = candidate.relative_to(result_root)
+    except ValueError as exc:
+        raise HardFailure(f"formal artifact path escapes result root: {path}") from exc
+    ancestor = result_root
+    if ancestor.exists() and ancestor.is_symlink():
+        raise HardFailure("formal result root must not be a symlink")
+    for part in relative.parts[:-1]:
+        ancestor = ancestor / part
+        if ancestor.exists() and ancestor.is_symlink():
+            raise HardFailure(f"formal artifact ancestor is a symlink: {ancestor}")
+    try:
+        candidate.parent.resolve().relative_to(result_root.resolve())
+    except ValueError as exc:
+        raise HardFailure(f"formal artifact path escapes result root: {path}") from exc
+
+
 def normalize_artifact_path(root: str | Path, path: str | Path) -> str:
     """Return a POSIX relative artifact path or reject paths outside *root*."""
     result_root = Path(root).resolve()

@@ -347,6 +347,18 @@ def test_training_constructs_the_native_pet_runtime_when_not_injected(
     assert len(runtime.lrs) == 4
 
 
+def test_pet_runtime_marks_unavailable_code_identities() -> None:
+    """A runtime without a git revision must use the builder's exact fallback."""
+
+    runtime = object.__new__(PETTrainingRuntime)
+
+    metadata = runtime.manifest_metadata()
+
+    assert metadata["training_code_identity"] == {"status": "unavailable"}
+    assert metadata["artifact_writer_code_identity"] == {"status": "unavailable"}
+    assert metadata["validator_code_identity"] == {"status": "unavailable"}
+
+
 _REAL_CHECKPOINT = Path("/home/bywang/code/UQ/upet/pet-omatpes-l-v0.1.0.ckpt")
 _REAL_N20 = Path("/home/bywang/code/UQ/upet_new/data/dataset/matpes_n20.extxyz")
 

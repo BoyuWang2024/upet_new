@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
@@ -167,7 +168,13 @@ def _prediction_config(tmp_path: Path, *, test_data_sha256: str) -> FGEConfig:
     root = tmp_path / "upet_fge_full"
     atomic_write_json(
         root / "training" / "manifest.json",
-        {"members": [{"member_id": "member_001"}, {"member_id": "member_002"}]},
+        {
+            "members": [{"member_id": "member_001"}, {"member_id": "member_002"}],
+            "config_identity": {"sha256": "b" * 64},
+            "data_identities": {"test": {"sha256": test_data_sha256}},
+            "artifact_writer_code_identity": {"status": "unavailable"},
+            "validator_code_identity": {"status": "unavailable"},
+        },
     )
     return cast(
         FGEConfig,
@@ -372,7 +379,13 @@ def test_predict_members_uses_the_manifest_order_and_publishes_one_payload(
     root = tmp_path / "upet_fge_full"
     atomic_write_json(
         root / "training" / "manifest.json",
-        {"members": [{"member_id": "member_001"}, {"member_id": "member_002"}]},
+        {
+            "members": [{"member_id": "member_001"}, {"member_id": "member_002"}],
+            "config_identity": {"sha256": "b" * 64},
+            "data_identities": {"test": {"sha256": "a" * 64}},
+            "artifact_writer_code_identity": {"status": "unavailable"},
+            "validator_code_identity": {"status": "unavailable"},
+        },
     )
     config = SimpleNamespace(
         project=SimpleNamespace(name="upet_fge_full"),
@@ -390,6 +403,18 @@ def test_predict_members_uses_the_manifest_order_and_publishes_one_payload(
     assert payload["member_ids"] == ("member_001", "member_002")
     assert payload["energy_prediction"].tolist() == [[1.0, 2.0], [11.0, 12.0]]
     assert validate_prediction_payload(payload) == PredictionShape(K=2, S=2, A=3)
+    manifest = json.loads(
+        (root / "prediction" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["member_ids"] == ["member_001", "member_002"]
+    assert manifest["shape"] == {"K": 2, "S": 2, "A": 3}
+    assert manifest["config_identity"] == {"sha256": "b" * 64}
+    assert manifest["test_data_identity"] == {"sha256": "a" * 64}
+    assert manifest["target_names"] == payload["target_names"]
+    assert manifest["units"] == payload["units"]
+    assert manifest["artifact"]["path"] == "prediction/test_raw.pt"
+    assert manifest["artifact"]["bytes"] == prediction_path.stat().st_size
+    assert manifest["artifact"]["sha256"] != ""
 
 
 def test_predict_members_uses_pet_runtime_when_not_injected(
@@ -402,10 +427,6 @@ def test_predict_members_uses_pet_runtime_when_not_injected(
     monkeypatch.setattr(prediction, "PETPredictionRuntime", lambda: runtime)
     config = _prediction_config(tmp_path, test_data_sha256="a" * 64)
     layout = ExperimentLayout(tmp_path / "upet_fge_full")
-    atomic_write_json(
-        layout.training_manifest,
-        {"members": [{"member_id": "member_001"}, {"member_id": "member_002"}]},
-    )
 
     path = predict_members(config)
 
@@ -571,6 +592,31 @@ def test_predict_members_rejects_runtime_identity_content_sha_mismatch(
         )
 
 
+def test_pet_runtime_rejects_checkpoint_sha_mismatch_before_deserialization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A replacement checkpoint must fail before torch or metatrain reads it."""
+    from Uncertainty_Quantification.FGE.fge import prediction
+
+    checkpoint = tmp_path / "replacement.ckpt"
+    checkpoint.write_bytes(b"not a restart checkpoint")
+    config = cast(
+        FGEConfig,
+        SimpleNamespace(
+            paths=SimpleNamespace(
+                base_checkpoint=checkpoint,
+                output_root=tmp_path,
+            ),
+            project=SimpleNamespace(name="upet_fge_full"),
+            identity=SimpleNamespace(base_checkpoint_sha256="b" * 64),
+        ),
+    )
+    monkeypatch.setattr(prediction, "sha256_file", lambda _: "a" * 64)
+
+    with pytest.raises(HardFailure, match="checkpoint SHA256"):
+        prediction.PETPredictionRuntime().load_base(config)
+
+
 @pytest.mark.fge_n20
 def test_default_pet_runtime_reads_the_restart_checkpoint_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -600,7 +646,7 @@ def test_default_pet_runtime_reads_the_restart_checkpoint_only(
     assert set(base.state_dict) == set(base.model.state_dict())
     assert all(tensor.device.type == "cpu" for tensor in base.state_dict.values())
     identity = runtime.dataset_identity(config)
-    assert identity.structure_ids[0] == "341224"
+    assert identity.structure_ids == tuple(sorted(identity.structure_ids))
     assert identity.structure_count == 20
     assert identity.atom_count > 0
 

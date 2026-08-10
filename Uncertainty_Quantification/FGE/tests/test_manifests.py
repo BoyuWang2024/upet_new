@@ -158,8 +158,6 @@ def test_native_and_migrated_training_manifests_share_one_key_tree() -> None:
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("artifact_writer_code_identity", {"status": "unavailable"}),
-        ("validator_code_identity", {"status": "unavailable"}),
         ("dependency_snapshot", {"torch": math.nan}),
         ("config_resolved", {"path": "/absolute/forbidden"}),
         ("members", [{"member_id": "member_001", "sha256": "3" * 64}]),
@@ -176,6 +174,19 @@ def test_training_manifest_rejects_missing_required_identity_or_unsafe_json(
         _build_training(values, _identity("5" * 40))
 
 
+def test_training_manifest_allows_unavailable_code_identities() -> None:
+    """All three unavailable identities remain publishable without fabricated SHAs."""
+    values = _training_inputs()
+    values["artifact_writer_code_identity"] = {"status": "unavailable"}
+    values["validator_code_identity"] = {"status": "unavailable"}
+
+    manifest = _build_training(values, {"status": "unavailable"})
+
+    assert manifest["training_code_identity"] == {"status": "unavailable"}
+    assert manifest["artifact_writer_code_identity"] == {"status": "unavailable"}
+    assert manifest["validator_code_identity"] == {"status": "unavailable"}
+
+
 def test_prediction_manifest_carries_shape_member_order_and_hashed_artifact(
     tmp_path: Path,
 ) -> None:
@@ -189,6 +200,14 @@ def test_prediction_manifest_carries_shape_member_order_and_hashed_artifact(
         prediction_path=prediction,
         member_ids=("member_001", "member_002"),
         shape={"K": 2, "S": 2, "A": 3},
+        config_identity={"sha256": "a" * 64},
+        test_data_identity={"sha256": "b" * 64},
+        target_names={
+            "energy": "energy",
+            "forces": "non_conservative_forces",
+            "stress": "non_conservative_stress",
+        },
+        units={"energy": "eV", "forces": "eV/angstrom", "stress": "eV/angstrom^3"},
         artifact_writer_code_identity=_identity("1" * 40),
         validator_code_identity=_identity("2" * 40),
     )
