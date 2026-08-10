@@ -27,20 +27,33 @@ def _training_inputs() -> dict[str, object]:
         "config_resolved": {
             "paths": {
                 "base_checkpoint": {"role": "base_checkpoint", "sha256": "a" * 64},
-                "test_data": {"role": "test_data", "sha256": "b" * 64},
+                "train_data": {"role": "train_data", "sha256": "b" * 64},
+                "val_data": {"role": "val_data", "sha256": "c" * 64},
+                "test_data": {"role": "test_data", "sha256": "d" * 64},
             }
         },
+        "config_identity": {"sha256": "e" * 64},
         "checkpoint_identity": {"sha256": "a" * 64},
-        "data_identities": {"test": {"sha256": "b" * 64}},
+        "data_identities": {
+            "train": {"sha256": "b" * 64},
+            "val": {"sha256": "c" * 64},
+            "test": {"sha256": "d" * 64},
+        },
         "model_contract": {
             "readout_tensor_count": 12,
             "readout_parameter_count": 13338,
         },
         "frozen_fingerprint_identity": {"sha256": "c" * 64},
         "dependency_snapshot": {"torch": "2.11.0", "metatrain": "2026.3.1"},
-        "scientific_flags": {"path_feasibility_only": True, "split_leakage": True},
+        "scientific_flags": {
+            "path_feasibility_only": True,
+            "split_leakage": True,
+            "scientific_evaluation": False,
+            "inference_only": False,
+        },
         "artifact_writer_code_identity": _identity("1" * 40),
         "validator_code_identity": _identity("2" * 40),
+        "member_count": 2,
         "members": [
             {
                 "member_id": "member_001",
@@ -64,6 +77,7 @@ def _build_training(
     return build_training_manifest(
         project_name=cast(str, values["project_name"]),
         config_resolved=cast(Mapping[str, object], values["config_resolved"]),
+        config_identity=cast(Mapping[str, object], values["config_identity"]),
         checkpoint_identity=cast(Mapping[str, object], values["checkpoint_identity"]),
         data_identities=cast(Mapping[str, object], values["data_identities"]),
         model_contract=cast(Mapping[str, object], values["model_contract"]),
@@ -79,6 +93,7 @@ def _build_training(
             Mapping[str, object], values["validator_code_identity"]
         ),
         training_code_identity=training_code_identity,
+        member_count=cast(int, values["member_count"]),
         members=cast(Sequence[Mapping[str, object]], values["members"]),
     )
 
@@ -220,3 +235,98 @@ def test_result_manifest_rejects_absolute_or_escaping_formal_paths(
             validator_code_identity=_identity("2" * 40),
             formal_artifacts={"escape": outside},
         )
+
+
+def test_training_manifest_rejects_generic_config_and_source_provenance() -> None:
+    """Formal training provenance requires the canonical config identity tree."""
+    values = _training_inputs()
+    values["config_resolved"] = {"source_path": "legacy/run"}
+
+    with pytest.raises(HardFailure):
+        _build_training(values, _identity("5" * 40))
+
+
+def test_result_manifest_ignores_nonformal_runtime_files(tmp_path: Path) -> None:
+    """Only named canonical artifact roles enter the completion inventory."""
+    (tmp_path / "_work").mkdir()
+    (tmp_path / "_work" / "resume.pt").write_bytes(b"work")
+    (tmp_path / ".scratch").write_text("temporary\n", encoding="utf-8")
+    (tmp_path / "config_resolved.yaml").write_text("project: x\n", encoding="utf-8")
+    (tmp_path / "validation.json").write_text('{"status":"PASS"}\n', encoding="utf-8")
+
+    manifest = build_result_manifest(
+        root=tmp_path,
+        project_name="upet_fge_full",
+        artifact_writer_code_identity=_identity("1" * 40),
+        validator_code_identity=_identity("2" * 40),
+    )
+
+    assert [artifact["path"] for artifact in _artifacts(manifest)] == [
+        "config_resolved.yaml",
+        "validation.json",
+    ]
+
+
+def test_training_manifest_emits_explicit_config_and_member_bindings() -> None:
+    """Canonical training provenance binds its config SHA and exact K."""
+    values = _training_inputs()
+
+    manifest = _build_training(values, _identity("5" * 40))
+
+    assert manifest["config_identity"] == {"sha256": "e" * 64}
+    assert manifest["member_count"] == 2
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("config_identity", {}),
+        ("config_identity", {"sha256": "e" * 64, "unexpected": True}),
+        ("member_count", 1),
+        (
+            "config_resolved",
+            {
+                "paths": {
+                    "base_checkpoint": {
+                        "role": "base_checkpoint",
+                        "sha256": "a" * 64,
+                    },
+                    "train_data": {"role": "train_data", "sha256": "b" * 64},
+                    "val_data": {"role": "val_data", "sha256": "c" * 64},
+                }
+            },
+        ),
+        (
+            "data_identities",
+            {
+                "train": {"sha256": "b" * 64},
+                "test": {"sha256": "d" * 64},
+            },
+        ),
+        (
+            "scientific_flags",
+            {
+                "path_feasibility_only": True,
+                "split_leakage": True,
+                "scientific_evaluation": False,
+            },
+        ),
+        (
+            "dependency_snapshot",
+            {
+                "torch": "2.11.0",
+                "metatrain": "2026.3.1",
+                "unexpected": "1",
+            },
+        ),
+    ],
+)
+def test_training_manifest_rejects_incomplete_or_noncanonical_contract_subtrees(
+    field: str, value: object
+) -> None:
+    """Every provenance subtree has one exact, complete canonical shape."""
+    values = _training_inputs()
+    values[field] = value
+
+    with pytest.raises(HardFailure):
+        _build_training(values, _identity("5" * 40))

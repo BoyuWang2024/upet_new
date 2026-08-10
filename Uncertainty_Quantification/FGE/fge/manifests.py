@@ -38,10 +38,76 @@ def _json_safe(value: object, label: str = "manifest") -> None:
     raise HardFailure(f"{label} contains unsupported JSON data")
 
 
+def _forbid_provenance(value: object) -> None:
+    if isinstance(value, Mapping):
+        if {"source", "source_path", "migration", "legacy", "old_member_sha"} & set(
+            value
+        ):
+            raise HardFailure(
+                "manifest contains forbidden source or migration provenance"
+            )
+        for item in value.values():
+            _forbid_provenance(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _forbid_provenance(item)
+
+
 def _sha256(value: object, label: str) -> str:
     if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
         raise HardFailure(f"{label} must be a lowercase SHA256")
     return value
+
+
+def _sha_identity(value: object, label: str) -> None:
+    if not isinstance(value, Mapping) or set(value) != {"sha256"}:
+        raise HardFailure(f"{label} has an invalid schema")
+    _sha256(value["sha256"], f"{label}.sha256")
+
+
+def _config_resolved_identity(value: object) -> None:
+    if not isinstance(value, Mapping) or set(value) != {"paths"}:
+        raise HardFailure("config_resolved has an invalid schema")
+    paths = value["paths"]
+    roles = ("base_checkpoint", "train_data", "val_data", "test_data")
+    if not isinstance(paths, Mapping) or set(paths) != set(roles):
+        raise HardFailure("config_resolved.paths has an invalid schema")
+    for role in roles:
+        identity = paths[role]
+        if not isinstance(identity, Mapping) or set(identity) != {"role", "sha256"}:
+            raise HardFailure("config_resolved path identity has an invalid schema")
+        if identity["role"] != role:
+            raise HardFailure("config_resolved path role is invalid")
+        _sha256(identity["sha256"], f"config_resolved.paths.{role}.sha256")
+
+
+def _data_identities(value: object) -> None:
+    roles = ("train", "val", "test")
+    if not isinstance(value, Mapping) or set(value) != set(roles):
+        raise HardFailure("data_identities has an invalid schema")
+    for role in roles:
+        _sha_identity(value[role], f"data_identities.{role}")
+
+
+def _scientific_flags(value: object) -> None:
+    names = (
+        "path_feasibility_only",
+        "split_leakage",
+        "scientific_evaluation",
+        "inference_only",
+    )
+    if not isinstance(value, Mapping) or set(value) != set(names):
+        raise HardFailure("scientific_flags has an invalid schema")
+    if any(not isinstance(value[name], bool) for name in names):
+        raise HardFailure("scientific_flags must contain booleans")
+
+
+def _dependency_snapshot(value: object) -> None:
+    names = ("torch", "metatrain")
+    if not isinstance(value, Mapping) or set(value) != set(names):
+        raise HardFailure("dependency_snapshot has an invalid schema")
+    if any(not isinstance(value[name], str) or not value[name] for name in names):
+        raise HardFailure("dependency_snapshot must contain non-empty versions")
 
 
 def _code_identity(
@@ -94,6 +160,7 @@ def build_training_manifest(
     *,
     project_name: str,
     config_resolved: Mapping[str, object],
+    config_identity: Mapping[str, object],
     checkpoint_identity: Mapping[str, object],
     data_identities: Mapping[str, object],
     model_contract: Mapping[str, object],
@@ -103,6 +170,7 @@ def build_training_manifest(
     artifact_writer_code_identity: Mapping[str, object],
     validator_code_identity: Mapping[str, object],
     training_code_identity: Mapping[str, object],
+    member_count: int,
     members: Sequence[Mapping[str, object]],
 ) -> dict[str, object]:
     """Build the native/migrated-invariant training provenance key tree."""
@@ -110,6 +178,7 @@ def build_training_manifest(
         raise HardFailure("project_name must be a non-empty string")
     for label, value in (
         ("config_resolved", config_resolved),
+        ("config_identity", config_identity),
         ("checkpoint_identity", checkpoint_identity),
         ("data_identities", data_identities),
         ("model_contract", model_contract),
@@ -118,21 +187,33 @@ def build_training_manifest(
         ("scientific_flags", scientific_flags),
     ):
         _json_safe(value, label)
-    if set(checkpoint_identity) != {"sha256"}:
-        raise HardFailure("checkpoint_identity has an invalid schema")
-    _sha256(checkpoint_identity["sha256"], "checkpoint_identity.sha256")
-    if set(frozen_fingerprint_identity) != {"sha256"}:
-        raise HardFailure("frozen_fingerprint_identity has an invalid schema")
-    _sha256(frozen_fingerprint_identity["sha256"], "frozen_fingerprint_identity.sha256")
+        _forbid_provenance(value)
+    _config_resolved_identity(config_resolved)
+    _sha_identity(config_identity, "config_identity")
+    _sha_identity(checkpoint_identity, "checkpoint_identity")
+    _data_identities(data_identities)
     if model_contract != {
         "readout_tensor_count": 12,
         "readout_parameter_count": 13338,
     }:
         raise HardFailure("model_contract must be the formal 12-tensor/13,338 contract")
+    _sha_identity(frozen_fingerprint_identity, "frozen_fingerprint_identity")
+    _dependency_snapshot(dependency_snapshot)
+    _scientific_flags(scientific_flags)
+    if (
+        isinstance(member_count, bool)
+        or not isinstance(member_count, int)
+        or member_count < 2
+    ):
+        raise HardFailure("member_count must be an integer of at least two")
+    canonical_members = _members(members)
+    if member_count != len(canonical_members):
+        raise HardFailure("member_count must match canonical members")
     return {
         "schema_version": "upet.fge.training.v1",
         "project_name": project_name,
         "config_resolved": deepcopy(dict(config_resolved)),
+        "config_identity": deepcopy(dict(config_identity)),
         "checkpoint_identity": deepcopy(dict(checkpoint_identity)),
         "data_identities": deepcopy(dict(data_identities)),
         "model_contract": deepcopy(dict(model_contract)),
@@ -150,7 +231,8 @@ def build_training_manifest(
         "validator_code_identity": _code_identity(
             validator_code_identity, "validator_code_identity", allow_unavailable=False
         ),
-        "members": _members(members),
+        "member_count": member_count,
+        "members": canonical_members,
     }
 
 
@@ -220,11 +302,9 @@ def _default_formal_artifacts(root: Path) -> dict[str, Path]:
         "validation.json": "validation",
     }
     return {
-        roles.get(
-            path.relative_to(root).as_posix(), path.relative_to(root).as_posix()
-        ): path
-        for path in sorted(root.rglob("*"))
-        if path.is_file() and path.name != "result_manifest.json"
+        role: root / relative
+        for relative, role in roles.items()
+        if (root / relative).is_file()
     }
 
 

@@ -12,6 +12,7 @@ import torch
 
 from .artifacts import ExperimentLayout, atomic_torch_save
 from .config import FGEConfig
+from .data import DatasetIdentity
 from .errors import HardFailure
 
 
@@ -179,6 +180,8 @@ class PredictionRuntime(Protocol):
 
     def restore_and_apply(self, base: object, member_id: str) -> None: ...
 
+    def dataset_identity(self, config: FGEConfig) -> DatasetIdentity: ...
+
     def infer_member(
         self, base: object, member_id: str, config: FGEConfig
     ) -> Mapping[str, object]: ...
@@ -219,7 +222,10 @@ def _manifest_member_ids(path: Path, expected_count: int) -> tuple[str, ...]:
         ):
             raise HardFailure("training manifest has an invalid member entry")
         member_ids.append(member["member_id"])
-    if len(member_ids) != expected_count or len(set(member_ids)) != len(member_ids):
+    expected_ids = tuple(
+        f"member_{index:03d}" for index in range(1, expected_count + 1)
+    )
+    if tuple(member_ids) != expected_ids:
         raise HardFailure("training manifest member count or order is invalid")
     return tuple(member_ids)
 
@@ -260,11 +266,17 @@ def predict_members(config: object, *, runtime: object | None = None) -> Path:
     load_base = getattr(runtime, "load_base", None)
     restore_and_apply = getattr(runtime, "restore_and_apply", None)
     infer_member = getattr(runtime, "infer_member", None)
+    dataset_identity = getattr(runtime, "dataset_identity", None)
+    if not callable(dataset_identity):
+        raise HardFailure("inference runtime has an invalid seam")
     if not all(
         callable(method) for method in (load_base, restore_and_apply, infer_member)
     ):
         raise HardFailure("inference runtime has an invalid seam")
 
+    expected_identity = dataset_identity(typed_config)
+    if not isinstance(expected_identity, DatasetIdentity):
+        raise HardFailure("inference runtime returned an invalid dataset identity")
     base = typed_runtime.load_base(typed_config)
     member_outputs: list[Mapping[str, object]] = []
     for member_id in member_ids:
@@ -272,6 +284,25 @@ def predict_members(config: object, *, runtime: object | None = None) -> Path:
         output = typed_runtime.infer_member(base, member_id, typed_config)
         if not isinstance(output, Mapping) or set(output) != _MEMBER_OUTPUT_KEYS:
             raise HardFailure("member inference output has an invalid schema")
+        if output["structure_ids"] != expected_identity.structure_ids:
+            raise HardFailure(
+                "member inference structure IDs differ from dataset identity"
+            )
+        if (
+            not isinstance(output["energy_reference"], torch.Tensor)
+            or not isinstance(output["forces_reference"], torch.Tensor)
+            or output["energy_reference"].shape[0] != expected_identity.structure_count
+            or output["forces_reference"].shape[0] != expected_identity.atom_count
+        ):
+            raise HardFailure("member inference shape differs from dataset identity")
+        if output["structure_ids"] != expected_identity.structure_ids:
+            raise HardFailure(
+                "member inference structure IDs differ from dataset identity"
+            )
+        if output["structure_ids"] != expected_identity.structure_ids:
+            raise HardFailure(
+                "member inference structure IDs differ from dataset identity"
+            )
         if member_outputs:
             _same_member_metadata(member_outputs[0], output)
         member_outputs.append(output)

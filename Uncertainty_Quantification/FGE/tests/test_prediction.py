@@ -11,9 +11,11 @@ import pytest
 import torch
 
 from Uncertainty_Quantification.FGE.fge import (
+    DatasetIdentity,
     FGEConfig,
     HardFailure,
     PredictionShape,
+    atomic_write_json,
     canonical_prediction,
     validate_prediction_payload,
 )
@@ -221,6 +223,26 @@ def test_predict_members_uses_the_manifest_order_and_publishes_one_payload(
             assert base is not None
             self.restored.append(member_id)
 
+        def dataset_identity(self, config: object) -> DatasetIdentity:
+            del config
+            return DatasetIdentity(
+                split="test",
+                structure_ids=("structure_000", "structure_001"),
+                structure_count=2,
+                atom_count=3,
+                content_sha256="a" * 64,
+                target_names=(
+                    ("energy", "energy"),
+                    ("forces", "non_conservative_forces"),
+                    ("stress", "non_conservative_stress"),
+                ),
+                units=(
+                    ("energy", "eV"),
+                    ("forces", "eV/angstrom"),
+                    ("stress", "eV/angstrom^3"),
+                ),
+            )
+
         def infer_member(
             self, base: object, member_id: str, config: object
         ) -> dict[str, object]:
@@ -272,3 +294,96 @@ def test_predict_members_uses_the_manifest_order_and_publishes_one_payload(
     assert payload["member_ids"] == ("member_001", "member_002")
     assert payload["energy_prediction"].tolist() == [[1.0, 2.0], [11.0, 12.0]]
     assert validate_prediction_payload(payload) == PredictionShape(K=2, S=2, A=3)
+
+
+def test_manifest_member_ids_rejects_reordered_members(tmp_path: Path) -> None:
+    """Prediction must bind K to the canonical contiguous member order."""
+    from Uncertainty_Quantification.FGE.fge.prediction import _manifest_member_ids
+
+    manifest = tmp_path / "manifest.json"
+    atomic_write_json(
+        manifest,
+        {"members": [{"member_id": "member_002"}, {"member_id": "member_001"}]},
+    )
+
+    with pytest.raises(HardFailure):
+        _manifest_member_ids(manifest, 2)
+
+
+def test_predict_members_rejects_sorted_but_wrong_dataset_identity(
+    tmp_path: Path,
+) -> None:
+    """Runtime output structure IDs must equal the expected dataset identity."""
+    from types import SimpleNamespace
+
+    from Uncertainty_Quantification.FGE.fge import DatasetIdentity, predict_members
+
+    class WrongIdentityRuntime:
+        def load_base(self, config: object) -> object:
+            del config
+            return object()
+
+        def restore_and_apply(self, base: object, member_id: str) -> None:
+            del base, member_id
+
+        def dataset_identity(self, config: object) -> DatasetIdentity:
+            del config
+            return DatasetIdentity(
+                split="test",
+                structure_ids=("structure_000", "structure_001"),
+                structure_count=2,
+                atom_count=3,
+                content_sha256="a" * 64,
+                target_names=(
+                    ("energy", "energy"),
+                    ("forces", "non_conservative_forces"),
+                    ("stress", "non_conservative_stress"),
+                ),
+                units=(
+                    ("energy", "eV"),
+                    ("forces", "eV/angstrom"),
+                    ("stress", "eV/angstrom^3"),
+                ),
+            )
+
+        def infer_member(
+            self, base: object, member_id: str, config: object
+        ) -> dict[str, object]:
+            del base, member_id, config
+            return {
+                "energy": torch.zeros(2, dtype=torch.float32),
+                "forces": torch.zeros((3, 3), dtype=torch.float32),
+                "stress": torch.zeros((2, 3, 3), dtype=torch.float32),
+                "energy_reference": torch.zeros(2, dtype=torch.float32),
+                "forces_reference": torch.zeros((3, 3), dtype=torch.float32),
+                "stress_reference": torch.zeros((2, 3, 3), dtype=torch.float32),
+                "n_atoms": torch.tensor([2, 1], dtype=torch.int64),
+                "structure_offsets": torch.tensor([0, 2, 3], dtype=torch.int64),
+                "structure_ids": ("structure_000", "structure_002"),
+                "atomic_numbers": torch.tensor([1, 6, 8], dtype=torch.int64),
+                "structure_mapping": torch.tensor([0, 0, 1], dtype=torch.int64),
+                "target_names": {
+                    "energy": "energy",
+                    "forces": "non_conservative_forces",
+                    "stress": "non_conservative_stress",
+                },
+                "units": {
+                    "energy": "eV",
+                    "forces": "eV/angstrom",
+                    "stress": "eV/angstrom^3",
+                },
+            }
+
+    root = tmp_path / "upet_fge_full"
+    atomic_write_json(
+        root / "training" / "manifest.json",
+        {"members": [{"member_id": "member_001"}, {"member_id": "member_002"}]},
+    )
+    config = SimpleNamespace(
+        project=SimpleNamespace(name="upet_fge_full"),
+        paths=SimpleNamespace(output_root=tmp_path),
+        fge=SimpleNamespace(member_count=2),
+    )
+
+    with pytest.raises(HardFailure):
+        predict_members(cast(FGEConfig, config), runtime=WrongIdentityRuntime())
