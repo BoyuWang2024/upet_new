@@ -1,0 +1,227 @@
+"""Contract tests for native FGE training orchestration.
+
+Each test names the production regression it protects.  The fake runtime uses
+real ``torch.nn.Parameter`` values so optimizer and frozen-state behavior is
+observable without an external PET checkpoint or dataset.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+import torch
+
+from Uncertainty_Quantification.FGE.fge import HardFailure, asymmetric_triangular_lr
+from Uncertainty_Quantification.FGE.tests.conftest import SHA_BASE, SHA_TEST, SHA_TRAIN
+
+# RED contract: Task 6 supplies this native orchestration module.  Do not add
+# production code until this import has failed once on the remote test checkout.
+from Uncertainty_Quantification.FGE.fge.training import (  # noqa: F401
+    TrainingBatchResult,
+    TrainingRuntime,
+    train_fge,
+)
+
+
+class _ReadoutModel(torch.nn.Module):
+    """Exactly 12 readout tensors / 13,338 trainable scalars plus frozen state."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.node_last_layers = torch.nn.ParameterList(
+            [torch.nn.Parameter(torch.ones(1)) for _ in range(11)]
+            + [torch.nn.Parameter(torch.ones(13_327))]
+        )
+        self.frozen = torch.nn.Parameter(torch.tensor([3.0]), requires_grad=False)
+        self.register_buffer("frozen_buffer", torch.tensor([5.0]))
+
+
+class _TorchRuntime:
+    """Small real-torch boundary for the orchestration contract.
+
+    A missing optimizer step, skipped loss term, incorrectly applied EMA, or
+    absent endpoint reload check changes these externally visible records.
+    """
+
+    def __init__(self, batches: int = 5) -> None:
+        self.model = _ReadoutModel()
+        # Runtime loaders yield already-collated batches.  This fixture makes
+        # the incomplete tail absent before the orchestration loop begins.
+        self.train_loader = tuple(range(batches // 4))
+        self.lrs: list[float] = []
+        self.loss_term_sets: list[tuple[str, ...]] = []
+        self.frozen_checks = 0
+        self.ema_validations = 0
+        self.raw_validations = 0
+        self.endpoint_paths: list[Path] = []
+        self.resume_identity_value = {
+            "config": "c" * 64,
+            "code": "d" * 64,
+            "base": SHA_BASE,
+            "data": SHA_TRAIN,
+        }
+
+    def train_batch(self, batch: int, *, lr: float) -> TrainingBatchResult:
+        del batch
+        self.lrs.append(lr)
+        self.loss_term_sets.append(
+            (
+                "energy",
+                "forces",
+                "virial",
+                "non_conservative_forces",
+                "non_conservative_stress",
+            )
+        )
+        loss = sum(parameter.square().sum() for parameter in self.model.parameters())
+        return TrainingBatchResult(loss=loss, loss_terms=self.loss_term_sets[-1])
+
+    def validate(self, *, use_ema: bool) -> dict[str, float]:
+        if use_ema:
+            self.ema_validations += 1
+        else:
+            self.raw_validations += 1
+        return {"loss_total": 0.0}
+
+    def assert_frozen(self) -> None:
+        assert self.model.frozen.item() == 3.0
+        assert self.model.frozen_buffer.item() == 5.0
+        self.frozen_checks += 1
+
+    def reload_and_smoke(self, member_path: Path) -> bool:
+        self.endpoint_paths.append(member_path)
+        return member_path.is_file()
+
+    def resume_identity(self) -> dict[str, str]:
+        return dict(self.resume_identity_value)
+
+
+def _config(tmp_path: Path, *, resume: bool = False) -> Any:
+    """Use a tiny n20-shaped runtime scale with independent on-disk identities."""
+
+    return SimpleNamespace(
+        project=SimpleNamespace(name="upet_fge_n20_cpu"),
+        paths=SimpleNamespace(output_root=tmp_path),
+        identity=SimpleNamespace(
+            base_checkpoint_sha256=SHA_BASE,
+            train_data_sha256=SHA_TRAIN,
+            val_data_sha256=SHA_TRAIN,
+            test_data_sha256=SHA_TEST,
+        ),
+        training=SimpleNamespace(
+            batch_size=4,
+            drop_last=True,
+            weight_decay=0.0,
+            resume=resume,
+            expected_readout_tensor_count=12,
+            expected_readout_parameter_count=13_338,
+        ),
+        fge=SimpleNamespace(
+            member_count=2,
+            cycles=2,
+            epochs_per_cycle=2,
+            lr_min=1e-8,
+            lr_max=1e-7,
+            rise_fraction=0.2,
+        ),
+        ema=SimpleNamespace(enabled=True, decay=0.999, member_source="raw_endpoint"),
+        scientific=SimpleNamespace(
+            training=SimpleNamespace(
+                path_feasibility_only=True,
+                split_leakage=True,
+                scientific_evaluation=False,
+                inference_only=False,
+            )
+        ),
+        sanitized=lambda: {
+            "paths": {
+                "base_checkpoint": {"role": "base_checkpoint", "sha256": SHA_BASE},
+                "train_data": {"role": "train_data", "sha256": SHA_TRAIN},
+                "val_data": {"role": "val_data", "sha256": SHA_TRAIN},
+                "test_data": {"role": "test_data", "sha256": SHA_TEST},
+                "output_root": {"role": "output_root"},
+            }
+        },
+    )
+
+
+def test_training_uses_one_optimizer_and_raw_endpoint_members_across_cycles(
+    tmp_path: Path,
+) -> None:
+    """Creating one optimizer per cycle or applying EMA at endpoints is a bug."""
+
+    runtime = _TorchRuntime(batches=5)
+    config = _config(tmp_path)
+
+    manifest_path = train_fge(config, runtime=runtime)
+
+    # floor(5 / 4) * 2 epochs * 2 cycles: exact drop_last update contract.
+    assert len(runtime.lrs) == 4
+    assert runtime.loss_term_sets == [
+        (
+            "energy",
+            "forces",
+            "virial",
+            "non_conservative_forces",
+            "non_conservative_stress",
+        )
+    ] * 4
+    assert runtime.raw_validations == 4
+    assert runtime.ema_validations == 4
+    assert runtime.frozen_checks == 6  # four epochs plus two endpoints
+    assert runtime.endpoint_paths == [
+        tmp_path / "upet_fge_n20_cpu" / "training" / "members" / "member_001.pt",
+        tmp_path / "upet_fge_n20_cpu" / "training" / "members" / "member_002.pt",
+    ]
+    assert manifest_path == tmp_path / "upet_fge_n20_cpu" / "training" / "manifest.json"
+
+
+def test_training_sets_the_cycle_lr_before_every_optimizer_update(tmp_path: Path) -> None:
+    """Applying LR only per epoch would silently alter the legacy trajectory."""
+
+    runtime = _TorchRuntime(batches=8)
+    config = _config(tmp_path)
+
+    train_fge(config, runtime=runtime)
+
+    cycle_steps = 2 * (8 // 4)
+    expected = [
+        asymmetric_triangular_lr(
+            step,
+            cycle_steps,
+            config.fge.lr_min,
+            config.fge.lr_max,
+            config.fge.rise_fraction,
+        )
+        for _cycle in range(2)
+        for step in range(cycle_steps)
+    ]
+    assert runtime.lrs == expected
+
+
+def test_resume_rejects_any_identity_mismatch_before_training(tmp_path: Path) -> None:
+    """Resuming against a different config/code/base/data identity is forbidden."""
+
+    runtime = _TorchRuntime(batches=4)
+    config = _config(tmp_path, resume=True)
+    work = tmp_path / "upet_fge_n20_cpu" / "_work"
+    work.mkdir(parents=True)
+    torch.save(
+        {
+            "resume_identity": {
+                "config": "0" * 64,
+                "code": "d" * 64,
+                "base": SHA_BASE,
+                "data": SHA_TRAIN,
+            }
+        },
+        work / "native_resume.pt",
+    )
+
+    with pytest.raises(HardFailure, match="resume identity"):
+        train_fge(config, runtime=runtime)
+
+    assert runtime.lrs == []
