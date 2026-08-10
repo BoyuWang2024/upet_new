@@ -42,6 +42,7 @@ from .prediction import (
     predict_members,
     validate_prediction_payload,
 )
+from .preflight import run_preflight
 from .schedule import asymmetric_triangular_lr
 from .uncertainty import (
     FORMULA_VERSION,
@@ -50,6 +51,7 @@ from .uncertainty import (
     scalar_gmd,
     vector_gmd,
 )
+from .validation import ValidationReport, schema_signature, validate_result
 
 
 __all__ = [
@@ -60,6 +62,7 @@ __all__ = [
     "PredictionShape",
     "ReadoutAudit",
     "TensorFingerprint",
+    "ValidationReport",
     "ExperimentLayout",
     "FGEConfig",
     "HardFailure",
@@ -84,6 +87,9 @@ __all__ = [
     "recover_loss_contract",
     "sha256_file",
     "sibling_staging",
+    "run_preflight",
+    "schema_signature",
+    "validate_result",
     "EvaluationArtifacts",
     "FORMULA_VERSION",
     "asymmetric_triangular_lr",
