@@ -7,6 +7,7 @@ import importlib.metadata
 import io
 import json
 import os
+import pickle
 import re
 import stat
 import subprocess
@@ -52,6 +53,7 @@ _DEFAULT_MEMBER_SHA256 = {
 _UNAVAILABLE = {"status": "unavailable"}
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_MAX_CHECKPOINT_BYTES = 2 * 1024**3
 
 
 def _migration_code_identity(value: Mapping[str, object]) -> dict[str, str]:
@@ -171,30 +173,6 @@ def _config_identity(config_resolved: Mapping[str, object]) -> dict[str, str]:
     return {"sha256": hashlib.sha256(encoded).hexdigest()}
 
 
-def _state(path: Path) -> dict[str, torch.Tensor]:
-    try:
-        import metatomic.torch  # noqa: F401
-
-        raw = torch.load(path, map_location="cpu", weights_only=False)
-    except (OSError, RuntimeError, ValueError, TypeError, ImportError) as exc:
-        raise HardFailure(
-            f"unable to load authenticated checkpoint: {path.name}"
-        ) from exc
-    if not isinstance(raw, Mapping):
-        raise HardFailure("legacy checkpoint must be a mapping")
-    state = raw.get("model_state_dict")
-    if not isinstance(state, Mapping) or not state:
-        raise HardFailure("legacy checkpoint has no model_state_dict")
-    result: dict[str, torch.Tensor] = {}
-    for name, value in state.items():
-        if name == "finetune_config" and isinstance(value, Mapping):
-            continue
-        if not isinstance(name, str) or not isinstance(value, torch.Tensor):
-            raise HardFailure("legacy checkpoint state contains unsupported data")
-        result[name] = value.detach().cpu()
-    return result
-
-
 def _restart_materialized_state(
     path: Path, expected_sha256: str
 ) -> dict[str, torch.Tensor]:
@@ -209,21 +187,34 @@ def _restart_materialized_state(
 
         descriptor = os.open(candidate, os.O_RDONLY | os.O_NOFOLLOW)
         with os.fdopen(descriptor, "rb") as handle:
-            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            metadata = os.fstat(handle.fileno())
+            if not stat.S_ISREG(metadata.st_mode):
                 raise HardFailure("checkpoint is not a regular file")
-            snapshot = handle.read()
+            if metadata.st_size > _MAX_CHECKPOINT_BYTES:
+                raise HardFailure("checkpoint exceeds the safe size limit")
+            snapshot = handle.read(_MAX_CHECKPOINT_BYTES + 1)
+            if len(snapshot) > _MAX_CHECKPOINT_BYTES:
+                raise HardFailure("checkpoint exceeds the safe size limit")
         if hashlib.sha256(snapshot).hexdigest() != expected_sha256:
             raise HardFailure("checkpoint SHA256 differs from authenticated identity")
         raw = torch.load(io.BytesIO(snapshot), map_location="cpu", weights_only=False)
         if not isinstance(raw, Mapping):
             raise HardFailure("legacy checkpoint must be a mapping")
-        model = model_from_checkpoint(raw, context="restart").to(
-            device="cpu", dtype=torch.float32
-        )
+        model = model_from_checkpoint(raw, context="restart")
         state = model.state_dict()
     except HardFailure:
         raise
-    except (OSError, RuntimeError, ValueError, TypeError, ImportError) as exc:
+    except (
+        OSError,
+        RuntimeError,
+        ValueError,
+        TypeError,
+        ImportError,
+        EOFError,
+        pickle.UnpicklingError,
+        KeyError,
+        AttributeError,
+    ) as exc:
         raise HardFailure(
             f"unable to materialize authenticated restart: {path.name}"
         ) from exc
@@ -232,7 +223,9 @@ def _restart_materialized_state(
         for name, value in state.items()
     ):
         raise HardFailure("materialized restart state contains unsupported data")
-    return {name: value.detach().cpu() for name, value in state.items()}
+    if any(value.device.type != "cpu" for value in state.values()):
+        raise HardFailure("materialized restart state must already be on CPU")
+    return {name: value.detach() for name, value in state.items()}
 
 
 def _readout_names(state: Mapping[str, torch.Tensor]) -> tuple[str, ...]:

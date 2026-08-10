@@ -25,8 +25,7 @@ def test_restart_materializer_consumes_open_authenticated_snapshot(
             self.raw = raw
 
         def to(self, **kwargs):
-            assert kwargs == {"device": "cpu", "dtype": torch.float32}
-            return self
+            raise AssertionError(f"materializer called model.to: {kwargs}")
 
         def state_dict(self):
             return {"frozen.weight": self.raw["trusted"]}
