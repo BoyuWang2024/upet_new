@@ -21,14 +21,24 @@ def test_audit_is_durable_before_final_rename(
     destination = tmp_path / "published"
     audit_root = tmp_path / "audit"
     real_rename = artifacts._rename_directory_noreplace
+    real_fsync = artifacts.os.fsync
+    durable_directories: set[Path] = set()
+
+    def record_fsync(descriptor: int) -> None:
+        resolved = (Path("/proc/self/fd") / str(descriptor)).resolve()
+        if resolved.is_dir():
+            durable_directories.add(resolved)
+        real_fsync(descriptor)
 
     def fail_final(parent_fd: int, source_name: str, destination_name: str) -> None:
         bound_parent = (Path("/proc/self/fd") / str(parent_fd)).resolve()
         if bound_parent == destination.parent:
             assert (audit_root / "published/audit.json").is_file()
+            assert audit_root in durable_directories
             raise OSError("injected final rename failure")
         real_rename(parent_fd, source_name, destination_name)
 
+    monkeypatch.setattr(artifacts.os, "fsync", record_fsync)
     monkeypatch.setattr(artifacts, "_rename_directory_noreplace", fail_final)
     with pytest.raises(HardFailure, match="publish"):
         converter.convert_legacy_run(

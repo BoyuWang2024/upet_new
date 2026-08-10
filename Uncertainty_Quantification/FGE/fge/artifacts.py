@@ -71,6 +71,8 @@ def _open_directory_component(parent_fd: int, component: str, *, create: bool) -
             os.mkdir(component, 0o700, dir_fd=parent_fd)
         except FileExistsError:
             pass
+        else:
+            os.fsync(parent_fd)
         return os.open(component, _DIRECTORY_FLAGS, dir_fd=parent_fd)
 
 
@@ -230,6 +232,7 @@ def _atomic_store(destination: Path, payload: bytes) -> None:
         expected = os.fstat(descriptor)
         _link_open_file(descriptor, parent_fd, destination_name)
         _verify_entry_binding(parent_fd, destination_name, expected, directory=False)
+        os.fsync(parent_fd)
         _verify_parent_binding(destination.parent, parent_fd)
     except FileExistsError as exc:
         raise HardFailure("immutable artifact destination already exists") from exc
@@ -380,8 +383,10 @@ def sibling_staging(destination: str | Path) -> Iterator[Path]:
         else:
             raise HardFailure(f"artifact destination already exists: {final_path}")
         try:
+            os.fsync(staging_fd)
             _rename_directory_noreplace(parent_fd, staging_name, final_name)
             _verify_entry_binding(parent_fd, final_name, expected, directory=True)
+            os.fsync(parent_fd)
             _verify_parent_binding(final_path.parent, parent_fd)
         except OSError as exc:
             raise HardFailure(
