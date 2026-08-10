@@ -292,3 +292,30 @@ def test_evaluation_keeps_finite_extreme_energy_mae() -> None:
     assert math.isfinite(energy_per_atom)
     assert energy_total == pytest.approx(2.0 * float(maximum))
     assert energy_per_atom == pytest.approx((5.0 / 3.0) * float(maximum))
+
+
+def test_evaluate_fge_reopens_only_canonical_prediction_and_publishes_artifacts(
+    tmp_path,
+) -> None:
+    """The formal stage must evaluate the stored prediction without model/data I/O."""
+    from types import SimpleNamespace
+
+    from Uncertainty_Quantification.FGE.fge.evaluation import evaluate_fge
+
+    root = tmp_path / "upet_fge_n20_cpu"
+    prediction = root / "prediction" / "test_raw.pt"
+    prediction.parent.mkdir(parents=True)
+    torch.save(_payload(), prediction)
+    config = SimpleNamespace(
+        project=SimpleNamespace(name="upet_fge_n20_cpu"),
+        paths=SimpleNamespace(output_root=tmp_path),
+        evaluation=SimpleNamespace(risk_coverages=(1.0, 0.5), constant_tolerance=1e-12),
+    )
+
+    directory = evaluate_fge(config)
+
+    assert directory == root / "evaluation" / "legacy_equal_weight"
+    assert (directory / "ensemble.pt").is_file()
+    assert (directory / "uncertainty.pt").is_file()
+    assert (directory / "metrics.json").is_file()
+    assert (directory / "report.md").is_file()

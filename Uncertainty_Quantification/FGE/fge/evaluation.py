@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import torch
 
+from .artifacts import (
+    ExperimentLayout,
+    atomic_torch_save,
+    atomic_write_json,
+    sibling_staging,
+)
+from .errors import HardFailure
 from .uncertainty import (
     FORMULA_VERSION,
     population_std,
@@ -472,3 +481,40 @@ def evaluate_prediction(
         metrics=metrics,
         report_inputs=report_inputs,
     )
+
+
+def evaluate_fge(config: object) -> Path:
+    """Evaluate only the stored canonical prediction and publish formal artifacts."""
+    try:
+        layout = ExperimentLayout(Path(config.paths.output_root) / config.project.name)
+        coverages = config.evaluation.risk_coverages
+        tolerance = config.evaluation.constant_tolerance
+    except AttributeError as exc:
+        raise HardFailure("evaluation requires an FGE configuration") from exc
+    try:
+        payload = torch.load(
+            layout.prediction_tensor, weights_only=True, map_location="cpu"
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise HardFailure("canonical prediction cannot be loaded") from exc
+    if not isinstance(payload, Mapping):
+        raise HardFailure("canonical prediction is not a mapping")
+    try:
+        result = evaluate_prediction(payload, coverages, tolerance)
+    except (TypeError, ValueError) as exc:
+        raise HardFailure("canonical prediction cannot be evaluated") from exc
+    directory = layout.evaluation_dir / "legacy_equal_weight"
+    if directory.exists():
+        raise HardFailure("formal evaluation output is immutable")
+    with sibling_staging(directory) as staging:
+        atomic_torch_save(staging / "ensemble.pt", dict(result.ensemble))
+        atomic_torch_save(staging / "uncertainty.pt", dict(result.uncertainty))
+        atomic_write_json(staging / "metrics.json", dict(result.metrics))
+        (staging / "report.md").write_text(
+            "# Canonical FGE report\n"
+            + json.dumps(dict(result.report_inputs), sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+    return directory
