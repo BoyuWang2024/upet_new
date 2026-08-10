@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -119,3 +120,23 @@ def test_schema_signature_keeps_formal_versions_and_fixed_a3_dimensions(
     assert isinstance(entries, list)
     assert isinstance(entries[0], dict)
     assert entries[0]["shape"] == [2]
+
+
+def test_schema_signature_distinguishes_result_manifest_schema_versions(
+    tmp_path: Path,
+) -> None:
+    """Completion schema version is a semantic contract, not just a string type."""
+    from Uncertainty_Quantification.FGE.fge.validation import (
+        schema_signature,
+        validate_result,
+    )
+
+    config, root = make_canonical_result(tmp_path)
+    validate_result(config, root)
+    baseline = schema_signature(root)
+    manifest_path = root / "result_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = "upet.fge.result.v999"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    assert schema_signature(root) != baseline

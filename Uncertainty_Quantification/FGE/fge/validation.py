@@ -187,6 +187,22 @@ def _identity(
         training.get("config_identity") == _config_identity(sanitized),
         "training config identity does not match configuration",
     )
+    try:
+        expected_training_flags = {
+            name: getattr(config.scientific.training, name)
+            for name in (
+                "path_feasibility_only",
+                "split_leakage",
+                "scientific_evaluation",
+                "inference_only",
+            )
+        }
+    except AttributeError as exc:
+        raise HardFailure("validation scientific flags are invalid") from exc
+    _fail_unless(
+        training.get("scientific_flags") == expected_training_flags,
+        "training scientific flags do not match configuration",
+    )
     members = training.get("members")
     if not isinstance(members, list) or len(members) < 2:
         raise HardFailure("training members are invalid")
@@ -563,12 +579,25 @@ def _validate_formal_tree(
         expected.remove("validation.json")
     if completion_exists:
         expected.add("result_manifest.json")
+    allowed_directories = {
+        "preflight",
+        "training",
+        "training/members",
+        "prediction",
+        "evaluation",
+        "evaluation/legacy_equal_weight",
+    }
     actual: set[str] = set()
     for path in root.rglob("*"):
+        relative = path.relative_to(root).as_posix()
         if path.is_dir():
+            _fail_unless(
+                not path.is_symlink() and relative in allowed_directories,
+                "formal tree contains unallowed directory residue",
+            )
             continue
         _regular(path, "formal tree artifact")
-        actual.add(path.relative_to(root).as_posix())
+        actual.add(relative)
     _fail_unless(actual == expected, "formal tree contains unallowed residue")
 
 
@@ -808,7 +837,7 @@ def _result_manifest_signature(document: Mapping[str, Any]) -> dict[str, object]
             path = "training/members/member_NNN.pt"
         references.append({"role": role, "path": path})
     return {
-        "schema_version": type(document.get("schema_version")).__name__,
+        "schema_version": document.get("schema_version"),
         "project_name": type(document.get("project_name")).__name__,
         "status": type(document.get("status")).__name__,
         "artifact_writer_code_identity": _key_tree(

@@ -247,6 +247,7 @@ def _write_predict_prior(config: Any) -> Path:
     resolved = config.sanitized()
     resolved["ema"] = {"member_source": "raw_endpoint"}
     config.sanitized = lambda: dict(resolved)
+    (root / "config_resolved.yaml").write_text(json.dumps(resolved), encoding="utf-8")
     members: list[dict[str, object]] = []
     for index in range(1, 3):
         path = root / "training" / "members" / f"member_{index:03d}.pt"
@@ -389,3 +390,24 @@ def test_evaluate_canonical_preflight_reopens_payload_and_checks_metadata(
 
     with pytest.raises(HardFailure):
         run_preflight(config, "evaluate", basis="canonical_artifacts")
+
+
+def test_canonical_preflight_binds_disk_resolved_configuration(
+    tmp_path: Path,
+) -> None:
+    """Prior manifest cannot substitute for the canonical config file on disk."""
+    from Uncertainty_Quantification.FGE.fge.preflight import run_preflight
+
+    config = _config(tmp_path)
+    run_preflight(config, "train")
+    _write_predict_prior(config)
+    root = config.paths.output_root / config.project.name
+    resolved = root / "config_resolved.yaml"
+    resolved.unlink()
+
+    with pytest.raises(HardFailure):
+        run_preflight(config, "predict", basis="canonical_artifacts")
+
+    resolved.write_text(json.dumps({"paths": {}}), encoding="utf-8")
+    with pytest.raises(HardFailure):
+        run_preflight(config, "predict", basis="canonical_artifacts")

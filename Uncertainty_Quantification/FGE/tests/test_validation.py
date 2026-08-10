@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
@@ -542,6 +543,44 @@ def test_validation_rejects_preflight_report_identity_or_config_drift(
     report = json.loads(report_path.read_text(encoding="utf-8"))
     report["identity"] = {"member_count": 99}
     _write_json(report_path, report)
+
+    with pytest.raises(HardFailure):
+        validate_result(config, root, publish_completion=False)
+
+
+@pytest.mark.parametrize("kind", ["empty_logs", "wandb_symlink"])
+def test_first_validation_rejects_unallowed_directory_residue(
+    tmp_path: Path, kind: str
+) -> None:
+    """Directories are part of the formal tree and cannot hide residue."""
+    from Uncertainty_Quantification.FGE.fge.errors import HardFailure
+    from Uncertainty_Quantification.FGE.fge.validation import validate_result
+
+    config, root = make_canonical_result(tmp_path)
+    if kind == "empty_logs":
+        (root / "logs").mkdir()
+    else:
+        outside = tmp_path / "outside_wandb"
+        outside.mkdir()
+        os.symlink(outside, root / "wandb", target_is_directory=True)
+
+    with pytest.raises(HardFailure):
+        validate_result(config, root, publish_completion=False)
+
+
+def test_validation_binds_training_scientific_flags_to_configuration(
+    tmp_path: Path,
+) -> None:
+    """Training flags in manifest are formal scientific identity, not decoration."""
+    from Uncertainty_Quantification.FGE.fge.errors import HardFailure
+    from Uncertainty_Quantification.FGE.fge.validation import validate_result
+
+    config, root = make_canonical_result(tmp_path)
+    training = _training(root)
+    flags = training["scientific_flags"]
+    assert isinstance(flags, dict)
+    flags["split_leakage"] = False
+    _write_training(root, training)
 
     with pytest.raises(HardFailure):
         validate_result(config, root, publish_completion=False)

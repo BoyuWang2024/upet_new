@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import yaml
 
 from .artifacts import (
     ExperimentLayout,
@@ -283,6 +284,21 @@ def _validate_training_prior(
 def _canonical_documents(
     config: FGEConfig, layout: ExperimentLayout, stage: str
 ) -> None:
+    config_path = layout.root / "config_resolved.yaml"
+    _fail_unless(
+        config_path.is_file() and not config_path.is_symlink(),
+        f"canonical artifact is missing: {config_path}",
+    )
+    try:
+        resolved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise HardFailure("canonical resolved config is invalid") from exc
+    _assert_source_independent(resolved)
+    _fail_unless(
+        isinstance(resolved, Mapping)
+        and resolved == _canonical_config(config.sanitized()),
+        "canonical resolved config identity is invalid",
+    )
     path = layout.training_manifest
     _fail_unless(
         path.is_file() and not path.is_symlink(),
