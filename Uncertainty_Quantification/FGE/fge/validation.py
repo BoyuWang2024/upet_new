@@ -17,7 +17,7 @@ from .artifacts import atomic_write_json, sha256_file
 from .config import FGEConfig
 from .errors import HardFailure
 from .evaluation import evaluate_prediction
-from .manifests import build_result_manifest
+from .manifests import _code_identity, build_result_manifest
 from .members import ReadoutAudit, load_member
 from .prediction import validate_prediction_payload
 
@@ -673,6 +673,15 @@ def _validate_completed_manifest(root: Path, config: FGEConfig) -> int:
     if not isinstance(artifacts, list) or not artifacts:
         raise HardFailure("result manifest inventory is invalid")
     training = _load_json(root / "training" / "manifest.json")
+    for key in ("artifact_writer_code_identity", "validator_code_identity"):
+        expected_identity = _code_identity(
+            training.get(key), key, allow_unavailable=True
+        )
+        actual_identity = _code_identity(manifest.get(key), key, allow_unavailable=True)
+        _fail_unless(
+            actual_identity == expected_identity,
+            f"result manifest {key} differs from training manifest",
+        )
     member_count = training.get("member_count")
     if isinstance(member_count, bool) or not isinstance(member_count, int):
         raise HardFailure("training member count is invalid")
