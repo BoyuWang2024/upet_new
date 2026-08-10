@@ -99,6 +99,20 @@ def _json(path: Path, label: str) -> Mapping[str, object]:
     return value
 
 
+def _canonical_source_member(
+    source_files: Mapping[str, Path], member_id: str
+) -> tuple[str, Path]:
+    expected_name = f"{member_id}.ckpt"
+    matches = [
+        (relative, candidate)
+        for relative, candidate in source_files.items()
+        if Path(relative).name == expected_name
+    ]
+    if len(matches) != 1:
+        raise HardFailure("source checkpoint inventory is not unique for member")
+    return matches[0]
+
+
 def audit(destination: Path, audit_root: Path) -> None:
     final = _safe_absolute(destination, "destination")
     root = _safe_absolute(audit_root, "audit root")
@@ -167,20 +181,19 @@ def audit(destination: Path, audit_root: Path) -> None:
             or formal_member.get("member_id") != expected_id
         ):
             raise HardFailure("external audit member order is invalid")
+        source_relative, expected_source = _canonical_source_member(
+            source_files, expected_id
+        )
         source_checkpoint = item.get("source_checkpoint")
-        if not isinstance(source_checkpoint, str):
-            raise HardFailure("external audit source checkpoint is invalid")
-        source_path = _safe_absolute(Path(source_checkpoint), "source checkpoint")
-        try:
-            source_relative = source_path.relative_to(source).as_posix()
-        except ValueError as exc:
-            raise HardFailure("source checkpoint escapes source root") from exc
-        if source_files.get(source_relative) != source_path:
-            raise HardFailure("source checkpoint is absent from source inventory")
-        if sha256_file(source_path) != _sha(
-            item.get("source_sha256"), "source checkpoint"
+        if source_checkpoint != str(expected_source):
+            raise HardFailure("source checkpoint path differs from canonical member")
+        source_path = _safe_absolute(expected_source, "source checkpoint")
+        expected_source_sha = _sha(before[source_relative], "source checkpoint")
+        if (
+            _sha(item.get("source_sha256"), "source checkpoint") != expected_source_sha
+            or sha256_file(source_path) != expected_source_sha
         ):
-            raise HardFailure("source checkpoint SHA differs")
+            raise HardFailure("source checkpoint SHA differs from canonical member")
         expected_a3 = f"training/members/member_{index:03d}.pt"
         if item.get("a3_path") != expected_a3:
             raise HardFailure("external audit A3 path is not canonical")

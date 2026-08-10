@@ -136,3 +136,29 @@ def test_standalone_audit_rejects_containment_before_reading(
 
     with pytest.raises(HardFailure, match="separate"):
         audit_results.audit(destination, audit_root)
+
+
+@pytest.mark.parametrize("mutation", ["swap", "duplicate"])
+def test_audit_binds_each_member_to_its_unique_legacy_checkpoint(
+    legacy_tree, config_payload, tmp_path: Path, mutation: str
+) -> None:
+    _, destination, audit_root = _converted(legacy_tree, config_payload, tmp_path)
+    path = audit_root / "published/audit.json"
+    document = json.loads(path.read_text())
+    first, second = document["source_to_a3"]
+    if mutation == "swap":
+        first["source_checkpoint"], second["source_checkpoint"] = (
+            second["source_checkpoint"],
+            first["source_checkpoint"],
+        )
+        first["source_sha256"], second["source_sha256"] = (
+            second["source_sha256"],
+            first["source_sha256"],
+        )
+    else:
+        second["source_checkpoint"] = first["source_checkpoint"]
+        second["source_sha256"] = first["source_sha256"]
+    path.write_text(json.dumps(document) + "\n")
+
+    with pytest.raises(HardFailure, match="source checkpoint"):
+        audit_results.audit(destination, audit_root)
