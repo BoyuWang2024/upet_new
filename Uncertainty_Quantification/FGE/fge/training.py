@@ -196,6 +196,8 @@ def _open_directory_component(parent_fd: int, component: str, *, create: bool) -
             os.mkdir(component, 0o700, dir_fd=parent_fd)
         except FileExistsError:
             pass
+        else:
+            os.fsync(parent_fd)
         return os.open(component, _WORK_DIRECTORY_FLAGS, dir_fd=parent_fd)
 
 

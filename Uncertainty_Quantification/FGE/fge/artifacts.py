@@ -254,6 +254,13 @@ def atomic_write_json(path: str | Path, payload: Mapping[str, Any] | list[Any]) 
     _atomic_store(destination, document.encode("utf-8"))
 
 
+def atomic_write_text(path: str | Path, document: str) -> None:
+    """Atomically store UTF-8 text through an inode-bound no-clobber link."""
+    if not isinstance(document, str):
+        raise HardFailure("artifact text payload must be a string")
+    _atomic_store(Path(path), document.encode("utf-8"))
+
+
 def atomic_write_yaml(path: str | Path, payload: Mapping[str, Any]) -> None:
     """Atomically write deterministic UTF-8 YAML through a bound sibling."""
     destination = Path(path)
@@ -370,6 +377,7 @@ def sibling_staging(destination: str | Path) -> Iterator[Path]:
                 os.mkdir(staging_name, 0o700, dir_fd=parent_fd)
             except FileExistsError:
                 continue
+            os.fsync(parent_fd)
             break
         else:
             raise HardFailure("unable to allocate a unique staging directory")

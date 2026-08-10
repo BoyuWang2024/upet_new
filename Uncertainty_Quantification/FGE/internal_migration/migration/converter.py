@@ -17,6 +17,7 @@ import torch
 from ...fge.artifacts import (
     atomic_torch_save,
     atomic_write_json,
+    atomic_write_text,
     atomic_write_yaml,
     sha256_file,
     sibling_staging,
@@ -235,7 +236,6 @@ def _extract_members(
 ) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, str]]:
     readout_names = _readout_names(base_state)
     members_dir = staging / "training" / "members"
-    members_dir.mkdir(parents=True, exist_ok=True)
     manifest_members: list[dict[str, object]] = []
     audit_mapping: list[dict[str, object]] = []
     for member in run.members:
@@ -434,13 +434,11 @@ def _write_formal_tree(
     atomic_torch_save(evaluation / "ensemble.pt", ensemble)
     atomic_torch_save(evaluation / "uncertainty.pt", dict(uncertainty))
     atomic_write_json(evaluation / "metrics.json", metrics)
-    evaluation.mkdir(parents=True, exist_ok=True)
-    (evaluation / "report.md").write_text(
+    atomic_write_text(
+        evaluation / "report.md",
         "# Canonical FGE report\n"
         + json.dumps(dict(report_inputs), sort_keys=True)
         + "\n",
-        encoding="utf-8",
-        newline="\n",
     )
     validate_result(config, staging, publish_completion=True)
     completed = validate_result(config, staging)

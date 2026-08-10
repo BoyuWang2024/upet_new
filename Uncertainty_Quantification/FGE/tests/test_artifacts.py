@@ -14,6 +14,7 @@ from Uncertainty_Quantification.FGE.fge.artifacts import (
     assert_safe_result_path,
     atomic_torch_save,
     atomic_write_json,
+    atomic_write_text,
     atomic_write_yaml,
     normalize_artifact_path,
     sha256_file,
@@ -354,3 +355,51 @@ def test_sibling_staging_rejects_source_basename_substitution(
     assert (tmp_path / observed["owned"] / "result.txt").read_text(
         encoding="utf-8"
     ) == "complete"
+
+
+def test_file_directory_fsync_failure_never_returns_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "partial.json"
+    original_fsync = os.fsync
+
+    def fail_containing_directory(descriptor: int) -> None:
+        resolved = (Path("/proc/self/fd") / str(descriptor)).resolve()
+        if resolved == tmp_path and target.exists():
+            raise OSError("injected containing-directory fsync failure")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(artifacts.os, "fsync", fail_containing_directory)
+    with pytest.raises(HardFailure, match="descriptor-bound artifact"):
+        atomic_write_json(target, {"status": "PASS"})
+
+    assert target.is_file()
+    assert json.loads(target.read_text(encoding="utf-8")) == {"status": "PASS"}
+    assert not (tmp_path / "result_manifest.json").exists()
+
+
+def test_staging_directory_fsync_failure_never_publishes_final(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "published"
+    original_fsync = os.fsync
+    staging_directory_fsyncs = 0
+
+    def fail_final_staging_fsync(descriptor: int) -> None:
+        nonlocal staging_directory_fsyncs
+        resolved = (Path("/proc/self/fd") / str(descriptor)).resolve()
+        if resolved.is_dir() and resolved.name.startswith(".published.staging-"):
+            staging_directory_fsyncs += 1
+            if staging_directory_fsyncs == 2:
+                raise OSError("injected staging-directory fsync failure")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(artifacts.os, "fsync", fail_final_staging_fsync)
+    with pytest.raises(HardFailure, match="descriptor-bound staging"):
+        with sibling_staging(destination) as staging:
+            atomic_write_text(staging / "result_manifest.json", '{"status":"PASS"}\n')
+
+    assert not destination.exists()
+    retained = tuple(tmp_path.glob(".published.staging-*"))
+    assert len(retained) == 1
+    assert (retained[0] / "result_manifest.json").is_file()

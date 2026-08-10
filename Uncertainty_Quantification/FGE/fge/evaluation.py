@@ -16,6 +16,7 @@ from .artifacts import (
     assert_safe_result_path,
     atomic_torch_save,
     atomic_write_json,
+    atomic_write_text,
     sibling_staging,
 )
 from .config import FGEConfig
@@ -513,11 +514,10 @@ def evaluate_fge(config: FGEConfig) -> Path:
         atomic_torch_save(staging / "ensemble.pt", dict(result.ensemble))
         atomic_torch_save(staging / "uncertainty.pt", dict(result.uncertainty))
         atomic_write_json(staging / "metrics.json", dict(result.metrics))
-        (staging / "report.md").write_text(
+        atomic_write_text(
+            staging / "report.md",
             "# Canonical FGE report\n"
             + json.dumps(dict(result.report_inputs), sort_keys=True)
             + "\n",
-            encoding="utf-8",
-            newline="\n",
         )
     return directory

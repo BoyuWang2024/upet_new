@@ -437,9 +437,11 @@ def _layout(config: FGEConfig) -> ExperimentLayout:
         not output_root.exists() or output_root.is_dir(),
         "output_root is not a directory",
     )
-    output_root.mkdir(parents=True, exist_ok=True)
+    disk_probe = output_root
+    while not disk_probe.exists() and disk_probe != disk_probe.parent:
+        disk_probe = disk_probe.parent
     _fail_unless(
-        shutil.disk_usage(output_root).free > 0, "output filesystem has no free space"
+        shutil.disk_usage(disk_probe).free > 0, "output filesystem has no free space"
     )
     return ExperimentLayout(output_root / project.name)
 
