@@ -140,3 +140,71 @@ def test_schema_signature_distinguishes_result_manifest_schema_versions(
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     assert schema_signature(root) != baseline
+
+
+def test_evaluation_signature_symbolizes_dataset_dimensions() -> None:
+    """Evaluation tensors use symbolic S/A dimensions, not instance sizes."""
+    from Uncertainty_Quantification.FGE.fge.validation import (
+        _evaluation_tensor_signature,
+    )
+
+    ensemble = {
+        "energy": torch.zeros(20),
+        "forces": torch.zeros((143, 3)),
+        "stress": torch.zeros((20, 3, 3)),
+    }
+
+    signature = _evaluation_tensor_signature(
+        ensemble, "evaluation/legacy_equal_weight/ensemble.pt", 2, 20, 143
+    )
+
+    assert signature["energy"]["shape"] == ["S"]
+    assert signature["forces"]["shape"] == ["A", 3]
+    assert signature["stress"]["shape"] == ["S", 3, 3]
+
+    uncertainty = {
+        "energy_total": {"std": torch.zeros(20), "gmd": torch.zeros(20)},
+        "energy_per_atom": {"std": torch.zeros(20), "gmd": torch.zeros(20)},
+        "force_component": {
+            "std": torch.zeros((143, 3)),
+            "gmd": torch.zeros((143, 3)),
+        },
+        "force_atom_vector": {"std": torch.zeros(143), "gmd": torch.zeros(143)},
+        "force_structure": {
+            "std": {
+                "mean": torch.zeros(20),
+                "max": torch.zeros(20),
+                "q95": torch.zeros(20),
+            }
+        },
+    }
+    nested = _evaluation_tensor_signature(
+        uncertainty,
+        "evaluation/legacy_equal_weight/uncertainty.pt",
+        2,
+        20,
+        143,
+    )
+
+    assert nested["energy_total"]["std"]["shape"] == ["S"]
+    assert nested["force_component"]["gmd"]["shape"] == ["A", 3]
+    assert nested["force_structure"]["std"]["q95"]["shape"] == ["S"]
+
+
+def test_document_signature_ignores_values_and_code_identity_availability() -> None:
+    """Normalized JSON/YAML signatures retain key trees, not run identities."""
+    from Uncertainty_Quantification.FGE.fge.validation import _key_tree
+
+    available = {
+        "metric": 1.0,
+        "artifact_writer_code_identity": {
+            "commit": "a" * 40,
+            "dirty_sha256": "b" * 64,
+        },
+    }
+    unavailable = {
+        "metric": None,
+        "artifact_writer_code_identity": {"status": "unavailable"},
+    }
+
+    assert _key_tree(available) == _key_tree(unavailable)

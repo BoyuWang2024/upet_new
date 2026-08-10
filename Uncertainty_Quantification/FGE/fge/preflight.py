@@ -140,8 +140,10 @@ def _identity(config: FGEConfig) -> dict[str, Any]:
 
 def _restart_state(path: Path) -> None:
     try:
-        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-    except (OSError, RuntimeError, ValueError, TypeError) as exc:
+        import metatomic.torch  # noqa: F401
+
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    except (OSError, RuntimeError, ValueError, TypeError, ImportError) as exc:
         raise HardFailure(f"unable to parse restart checkpoint: {path}") from exc
     _fail_unless(
         isinstance(checkpoint, Mapping)

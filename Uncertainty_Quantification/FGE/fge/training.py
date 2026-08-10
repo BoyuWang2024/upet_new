@@ -180,6 +180,30 @@ def _save_resume(
     )
 
 
+def _consume_resume_after_success(
+    layout: ExperimentLayout, runtime: TrainingRuntime
+) -> None:
+    """Remove only this successful run's authenticated private resume state."""
+    path = _resume_path(layout)
+    if path.is_symlink() or not path.is_file():
+        raise HardFailure("successful training resume state is missing or unsafe")
+    try:
+        state = torch.load(path, map_location="cpu", weights_only=True)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise HardFailure("successful training resume state cannot be read") from exc
+    if not isinstance(state, Mapping) or state.get(
+        "resume_identity"
+    ) != _resume_identity(runtime):
+        raise HardFailure("successful training resume identity differs")
+    try:
+        path.unlink()
+        work = path.parent
+        if not any(work.iterdir()):
+            work.rmdir()
+    except OSError as exc:
+        raise HardFailure("successful training resume state cannot be removed") from exc
+
+
 def _assert_batch(result: object) -> TrainingBatchResult:
     if not isinstance(result, TrainingBatchResult):
         raise HardFailure("training runtime returned an invalid batch result")
@@ -655,7 +679,6 @@ class PETTrainingRuntime:
             "dependency_snapshot": {
                 "torch": torch.__version__,
                 "metatrain": "runtime",
-                "metatomic": "runtime",
             },
             "training_code_identity": {"status": "unavailable"},
             "artifact_writer_code_identity": {"status": "unavailable"},
@@ -748,4 +771,5 @@ def train_fge(config: FGEConfig, *, runtime: TrainingRuntime | None = None) -> P
     )
     assert_safe_result_path(layout.root, layout.training_manifest)
     atomic_write_json(layout.training_manifest, manifest)
+    _consume_resume_after_success(layout, runtime)
     return layout.training_manifest

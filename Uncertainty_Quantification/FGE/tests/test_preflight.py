@@ -163,6 +163,29 @@ def test_native_train_preflight_checks_runtime_basis_without_compute(
     assert train_report.is_file()
 
 
+def test_restart_preflight_uses_trusted_full_checkpoint_deserialization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Authenticated metatrain checkpoints may contain TorchScript metadata."""
+    from Uncertainty_Quantification.FGE.fge import preflight
+
+    checkpoint = tmp_path / "base.ckpt"
+    checkpoint.write_bytes(b"authenticated by the caller")
+    calls: list[tuple[Path, object, bool]] = []
+
+    def load(path: Path, *, map_location: object, weights_only: bool) -> object:
+        calls.append((path, map_location, weights_only))
+        if weights_only:
+            raise AssertionError("real UPET checkpoints are not weights-only archives")
+        return {"model_state_dict": {}}
+
+    monkeypatch.setattr(preflight.torch, "load", load)
+
+    preflight._restart_state(checkpoint)
+
+    assert calls == [(checkpoint, "cpu", False)]
+
+
 @pytest.mark.parametrize(
     "mutate",
     [

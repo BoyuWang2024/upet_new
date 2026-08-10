@@ -148,6 +148,11 @@ def test_full_and_n20_configs_match_their_scientific_contract(
     assert n20.training.device == "cpu"
     assert n20.scientific.training.path_feasibility_only is True
     assert n20.scientific.evaluation.scientific_evaluation is False
+    assert n20.identity.train_data_sha256 == (
+        "c92161329aab539064a2c2438a395cb01e38bfc91211c558aebbc1ff94702e3d"
+    )
+    assert n20.identity.val_data_sha256 == n20.identity.train_data_sha256
+    assert n20.identity.test_data_sha256 == n20.identity.train_data_sha256
 
 
 def test_sanitized_config_contains_logical_path_roles_and_no_runtime_paths(

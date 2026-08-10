@@ -243,6 +243,7 @@ def test_training_uses_one_optimizer_and_raw_endpoint_members_across_cycles(
         tmp_path / "upet_fge_n20_cpu" / "training" / "members" / "member_002.pt",
     ]
     assert manifest_path == tmp_path / "upet_fge_n20_cpu" / "training" / "manifest.json"
+    assert not (tmp_path / "upet_fge_n20_cpu" / "_work").exists()
     manifest = json.loads(manifest_path.read_text())
     resolved = config.sanitized()
     canonical = json.dumps(resolved, sort_keys=True, separators=(",", ":")).encode(
@@ -325,6 +326,18 @@ def test_resume_rejects_any_identity_mismatch_before_training(tmp_path: Path) ->
         train_fge(config, runtime=runtime)
 
     assert runtime.lrs == []
+    assert (work / "native_resume.pt").is_file()
+
+
+def test_failed_training_retains_identity_matched_resume_state(tmp_path: Path) -> None:
+    """Only successful training publication may consume its own resume state."""
+    runtime = _TorchRuntime(batches=4)
+    runtime.reload_and_smoke = lambda _: False  # type: ignore[method-assign]
+
+    with pytest.raises(HardFailure, match="reload smoke"):
+        train_fge(_config(tmp_path), runtime=runtime)
+
+    assert (tmp_path / "upet_fge_n20_cpu" / "_work" / "native_resume.pt").is_file()
 
 
 def test_training_constructs_the_native_pet_runtime_when_not_injected(
@@ -354,6 +367,7 @@ def test_pet_runtime_marks_unavailable_code_identities() -> None:
 
     metadata = runtime.manifest_metadata()
 
+    assert set(metadata["dependency_snapshot"]) == {"torch", "metatrain"}
     assert metadata["training_code_identity"] == {"status": "unavailable"}
     assert metadata["artifact_writer_code_identity"] == {"status": "unavailable"}
     assert metadata["validator_code_identity"] == {"status": "unavailable"}

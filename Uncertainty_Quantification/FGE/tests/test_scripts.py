@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import importlib
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -17,6 +20,25 @@ def test_each_formal_cli_exposes_one_required_config_option(name: str) -> None:
     parser = module.build_parser()
 
     assert [action.dest for action in parser._actions].count("config") == 1
+
+
+@pytest.mark.parametrize(
+    "name",
+    ("preflight", "train", "predict", "evaluate", "validate"),
+)
+def test_each_formal_cli_supports_direct_script_execution(name: str) -> None:
+    """The documented direct script form must be executable."""
+    script = Path(__file__).parents[1] / "scripts" / f"{name}.py"
+
+    completed = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "usage:" in completed.stdout
 
 
 @pytest.mark.parametrize("stage", ("run-all", "uq", "plot", "unknown"))

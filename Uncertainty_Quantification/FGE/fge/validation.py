@@ -41,6 +41,28 @@ _PREDICTION_FIELD_SHAPES: dict[str, list[int | str]] = {
 }
 
 
+_EVALUATION_FIELD_SHAPES: dict[str, dict[tuple[str, ...], list[int | str]]] = {
+    "evaluation/legacy_equal_weight/ensemble.pt": {
+        ("energy",): ["S"],
+        ("forces",): ["A", 3],
+        ("stress",): ["S", 3, 3],
+    },
+    "evaluation/legacy_equal_weight/uncertainty.pt": {
+        ("energy_total", "std"): ["S"],
+        ("energy_total", "gmd"): ["S"],
+        ("energy_per_atom", "std"): ["S"],
+        ("energy_per_atom", "gmd"): ["S"],
+        ("force_component", "std"): ["A", 3],
+        ("force_component", "gmd"): ["A", 3],
+        ("force_atom_vector", "std"): ["A"],
+        ("force_atom_vector", "gmd"): ["A"],
+        ("force_structure", "std", "mean"): ["S"],
+        ("force_structure", "std", "max"): ["S"],
+        ("force_structure", "std", "q95"): ["S"],
+    },
+}
+
+
 @dataclass(frozen=True)
 class ValidationReport:
     """The durable outcome of a canonical FGE result validation."""
@@ -883,11 +905,47 @@ def _prediction_signature(value: Mapping[str, Any], K: int, S: int, A: int) -> o
     return signature
 
 
+def _evaluation_tensor_signature(
+    value: Mapping[str, Any], relative: str, K: int, S: int, A: int
+) -> dict[str, object]:
+    signature = _string_key_mapping(
+        _tensor_signature(value, K, S, A), "evaluation signature is invalid"
+    )
+    fields = _EVALUATION_FIELD_SHAPES.get(relative)
+    if fields is None:
+        return signature
+
+    def set_shape(
+        current: dict[str, Any],
+        path: tuple[str, ...],
+        symbolic_shape: list[int | str],
+    ) -> None:
+        part = path[0]
+        child = _string_key_mapping(
+            current.get(part), f"evaluation signature field is invalid: {part}"
+        )
+        if len(path) == 1:
+            if "shape" not in child:
+                raise HardFailure(
+                    f"evaluation signature field is invalid: {'.'.join(path)}"
+                )
+            child["shape"] = symbolic_shape
+        else:
+            set_shape(child, path[1:], symbolic_shape)
+        current[part] = child
+
+    for path, symbolic_shape in fields.items():
+        set_shape(signature, path, symbolic_shape)
+    return signature
+
+
 def _key_tree(value: object, key: str | None = None) -> object:
     if key in {"schema_version", "formula_version", "metric_schema_version"}:
         if isinstance(value, (str, int)) and not isinstance(value, bool):
             return value
         raise HardFailure("formal version field is invalid")
+    if key is not None and key.endswith("_code_identity"):
+        return "code_identity"
     if isinstance(value, Mapping):
         return {
             str(nested_key): _key_tree(nested, str(nested_key))
@@ -895,7 +953,7 @@ def _key_tree(value: object, key: str | None = None) -> object:
         }
     if isinstance(value, list):
         return [_key_tree(value[0])] if value else []
-    return type(value).__name__
+    return "value"
 
 
 def _result_manifest_signature(document: Mapping[str, Any]) -> dict[str, object]:
@@ -918,9 +976,13 @@ def _result_manifest_signature(document: Mapping[str, Any]) -> dict[str, object]
         "project_name": type(document.get("project_name")).__name__,
         "status": type(document.get("status")).__name__,
         "artifact_writer_code_identity": _key_tree(
-            document.get("artifact_writer_code_identity")
+            document.get("artifact_writer_code_identity"),
+            "artifact_writer_code_identity",
         ),
-        "validator_code_identity": _key_tree(document.get("validator_code_identity")),
+        "validator_code_identity": _key_tree(
+            document.get("validator_code_identity"),
+            "validator_code_identity",
+        ),
         "artifacts": [
             {"role": role, "path": path}
             for path, role in sorted(
@@ -966,6 +1028,10 @@ def schema_signature(root: str | Path) -> dict[str, object]:
                         "training member tensor schemas differ",
                     )
                 tensors["training/members/member_NNN.pt"] = member_signature
+            elif relative in _EVALUATION_FIELD_SHAPES:
+                tensors[relative] = _evaluation_tensor_signature(
+                    payload, relative, shape.K, shape.S, shape.A
+                )
             else:
                 tensors[relative] = _tensor_signature(
                     payload, shape.K, shape.S, shape.A
