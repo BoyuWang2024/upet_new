@@ -13,8 +13,14 @@ from typing import Any, Protocol, runtime_checkable
 
 import torch
 
-from .artifacts import ExperimentLayout, atomic_torch_save, atomic_write_json, sha256_file
+from .artifacts import (
+    ExperimentLayout,
+    atomic_torch_save,
+    atomic_write_json,
+    sha256_file,
+)
 from .errors import HardFailure
+from .manifests import build_training_manifest
 from .members import (
     assert_frozen_unchanged,
     assert_readout_contract,
@@ -63,6 +69,9 @@ class TrainingRuntime(Protocol):
     def resume_identity(self) -> Mapping[str, str]:
         """Return exact config/code/base/data identities for native resume."""
 
+    def manifest_metadata(self) -> Mapping[str, Mapping[str, str]]:
+        """Return formal dependency and code identities for publication."""
+
 
 class _ReadoutEMA:
     """Raw-model preserving EMA that owns only currently trainable readout values."""
@@ -85,7 +94,9 @@ class _ReadoutEMA:
             raise HardFailure("EMA trainable tensors changed")
         with torch.no_grad():
             for name, value in self.shadow.items():
-                value.mul_(self.decay).add_(parameters[name].detach(), alpha=1.0 - self.decay)
+                value.mul_(self.decay).add_(
+                    parameters[name].detach(), alpha=1.0 - self.decay
+                )
 
     @contextmanager
     def applied(self, model: torch.nn.Module):
@@ -102,7 +113,7 @@ class _ReadoutEMA:
                     parameters[name].copy_(value)
 
 
-def _layout(config: object) -> ExperimentLayout:
+def _layout(config: Any) -> ExperimentLayout:
     try:
         root = Path(config.paths.output_root) / config.project.name
     except AttributeError as exc:
@@ -137,7 +148,9 @@ def _resume_identity(runtime: TrainingRuntime) -> dict[str, str]:
     return identity
 
 
-def _assert_resume_identity(layout: ExperimentLayout, runtime: TrainingRuntime, enabled: bool) -> None:
+def _assert_resume_identity(
+    layout: ExperimentLayout, runtime: TrainingRuntime, enabled: bool
+) -> None:
     if not enabled:
         return
     path = _resume_path(layout)
@@ -147,11 +160,15 @@ def _assert_resume_identity(layout: ExperimentLayout, runtime: TrainingRuntime, 
         state = torch.load(path, map_location="cpu", weights_only=True)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise HardFailure("native resume state cannot be read") from exc
-    if not isinstance(state, Mapping) or state.get("resume_identity") != _resume_identity(runtime):
+    if not isinstance(state, Mapping) or state.get(
+        "resume_identity"
+    ) != _resume_identity(runtime):
         raise HardFailure("resume identity does not match config/code/base/data")
 
 
-def _save_resume(layout: ExperimentLayout, runtime: TrainingRuntime, global_step: int) -> None:
+def _save_resume(
+    layout: ExperimentLayout, runtime: TrainingRuntime, global_step: int
+) -> None:
     atomic_torch_save(
         _resume_path(layout),
         {"resume_identity": _resume_identity(runtime), "global_step": global_step},
@@ -171,11 +188,48 @@ def _assert_batch(result: object) -> TrainingBatchResult:
 
 
 def _assert_validation(values: Mapping[str, float]) -> None:
-    if not values or any(not isinstance(value, (int, float)) or not math.isfinite(value) for value in values.values()):
+    if not values or any(
+        not isinstance(value, (int, float)) or not math.isfinite(value)
+        for value in values.values()
+    ):
         raise HardFailure("validation metrics are empty or non-finite")
 
 
-def _manifest_identity(config: object, runtime: TrainingRuntime) -> dict[str, object]:
+def _canonical_sha256(value: object) -> str:
+    """Hash a JSON-safe value with the one canonical FGE encoding."""
+
+    try:
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    except (TypeError, ValueError) as exc:
+        raise HardFailure("manifest identity is not canonical JSON") from exc
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _frozen_identity(frozen: Sequence[Any]) -> dict[str, str]:
+    """Bind publication to the full ordered frozen model fingerprint."""
+
+    records: list[dict[str, object]] = []
+    for item in frozen:
+        try:
+            records.append(
+                {
+                    "kind": item.kind,
+                    "name": item.name,
+                    "dtype": item.dtype,
+                    "shape": list(item.shape),
+                    "sha256": item.sha256,
+                }
+            )
+        except AttributeError as exc:
+            raise HardFailure("frozen fingerprint has an invalid record") from exc
+    return {"sha256": _canonical_sha256(records)}
+
+
+def _manifest_identity(
+    config: Any, runtime: TrainingRuntime, frozen: Sequence[Any]
+) -> dict[str, object]:
     sanitized = getattr(config, "sanitized", None)
     if not callable(sanitized):
         raise HardFailure("training configuration has no sanitized identity")
@@ -183,25 +237,37 @@ def _manifest_identity(config: object, runtime: TrainingRuntime) -> dict[str, ob
     try:
         identity = config.identity
         project = config.project
+        scientific_flags = vars(config.scientific.training)
     except AttributeError as exc:
         raise HardFailure("training configuration identity is incomplete") from exc
-    canonical = json.dumps(resolved, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    metadata = runtime.manifest_metadata()
+    if set(metadata) != {
+        "dependency_snapshot",
+        "training_code_identity",
+        "artifact_writer_code_identity",
+        "validator_code_identity",
+    }:
+        raise HardFailure("runtime manifest metadata has an invalid schema")
     return {
-        "schema_version": "upet.fge.training.v1",
         "project_name": project.name,
         "config_resolved": resolved,
-        "config_identity": {"sha256": hashlib.sha256(canonical).hexdigest()},
+        "config_identity": {"sha256": _canonical_sha256(resolved)},
         "checkpoint_identity": {"sha256": identity.base_checkpoint_sha256},
         "data_identities": {
             "train": {"sha256": identity.train_data_sha256},
             "val": {"sha256": identity.val_data_sha256},
             "test": {"sha256": identity.test_data_sha256},
         },
-        "runtime_resume_identity": _resume_identity(runtime),
+        "frozen_fingerprint_identity": _frozen_identity(frozen),
+        "dependency_snapshot": metadata["dependency_snapshot"],
+        "scientific_flags": scientific_flags,
+        "training_code_identity": metadata["training_code_identity"],
+        "artifact_writer_code_identity": metadata["artifact_writer_code_identity"],
+        "validator_code_identity": metadata["validator_code_identity"],
     }
 
 
-def train_fge(config: object, *, runtime: TrainingRuntime | None = None) -> Path:
+def train_fge(config: Any, *, runtime: TrainingRuntime | None = None) -> Path:
     """Train raw endpoint A3 members with one optimizer and validation-only EMA."""
     if runtime is None:
         raise HardFailure("native PET runtime is unavailable")
@@ -212,7 +278,9 @@ def train_fge(config: object, *, runtime: TrainingRuntime | None = None) -> Path
     audit = assert_readout_contract(runtime.model)
     frozen = frozen_fingerprint(runtime.model)
     trainable = [value for value in runtime.model.parameters() if value.requires_grad]
-    optimizer = torch.optim.Adam(trainable, lr=config.fge.lr_min, weight_decay=config.training.weight_decay)
+    optimizer = torch.optim.Adam(
+        trainable, lr=config.fge.lr_min, weight_decay=config.training.weight_decay
+    )
     ema = _ReadoutEMA(runtime.model, config.ema.decay)
     steps_per_epoch = _loader_length(runtime.train_loader)
     updates_per_cycle = steps_per_epoch * config.fge.epochs_per_cycle
@@ -270,7 +338,14 @@ def train_fge(config: object, *, runtime: TrainingRuntime | None = None) -> Path
             }
         )
 
-    manifest = _manifest_identity(config, runtime)
-    manifest.update({"member_count": len(accepted), "members": accepted, "model_contract": {"readout_tensor_count": audit.tensor_count, "readout_parameter_count": audit.scalar_count}})
+    manifest = build_training_manifest(
+        **_manifest_identity(config, runtime, frozen),
+        model_contract={
+            "readout_tensor_count": audit.tensor_count,
+            "readout_parameter_count": audit.scalar_count,
+        },
+        member_count=len(accepted),
+        members=accepted,
+    )
     atomic_write_json(layout.training_manifest, manifest)
     return layout.training_manifest

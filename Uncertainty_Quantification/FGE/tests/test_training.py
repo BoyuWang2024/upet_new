@@ -7,6 +7,9 @@ observable without an external PET checkpoint or dataset.
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Iterable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -15,7 +18,6 @@ import pytest
 import torch
 
 from Uncertainty_Quantification.FGE.fge import HardFailure, asymmetric_triangular_lr
-from Uncertainty_Quantification.FGE.tests.conftest import SHA_BASE, SHA_TEST, SHA_TRAIN
 
 # RED contract: Task 6 supplies this native orchestration module.  Do not add
 # production code until this import has failed once on the remote test checkout.
@@ -24,6 +26,7 @@ from Uncertainty_Quantification.FGE.fge.training import (  # noqa: F401
     TrainingRuntime,
     train_fge,
 )
+from Uncertainty_Quantification.FGE.tests.conftest import SHA_BASE, SHA_TEST, SHA_TRAIN
 
 
 class _ReadoutModel(torch.nn.Module):
@@ -50,7 +53,7 @@ class _TorchRuntime:
         self.model = _ReadoutModel()
         # Runtime loaders yield already-collated batches.  This fixture makes
         # the incomplete tail absent before the orchestration loop begins.
-        self.train_loader = tuple(range(batches // 4))
+        self.train_loader: Iterable[object] = tuple(range(batches // 4))
         self.lrs: list[float] = []
         self.loss_term_sets: list[tuple[str, ...]] = []
         self.frozen_checks = 0
@@ -64,7 +67,7 @@ class _TorchRuntime:
             "data": SHA_TRAIN,
         }
 
-    def train_batch(self, batch: int, *, lr: float) -> TrainingBatchResult:
+    def train_batch(self, batch: object, *, lr: float) -> TrainingBatchResult:
         del batch
         self.lrs.append(lr)
         self.loss_term_sets.append(
@@ -97,6 +100,26 @@ class _TorchRuntime:
 
     def resume_identity(self) -> dict[str, str]:
         return dict(self.resume_identity_value)
+
+    def manifest_metadata(self) -> dict[str, dict[str, str]]:
+        return {
+            "dependency_snapshot": {
+                "torch": "test-torch",
+                "metatrain": "test-metatrain",
+            },
+            "training_code_identity": {
+                "commit": "a" * 40,
+                "dirty_sha256": "b" * 64,
+            },
+            "artifact_writer_code_identity": {
+                "commit": "c" * 40,
+                "dirty_sha256": "d" * 64,
+            },
+            "validator_code_identity": {
+                "commit": "e" * 40,
+                "dirty_sha256": "f" * 64,
+            },
+        }
 
 
 def _config(tmp_path: Path, *, resume: bool = False) -> Any:
@@ -137,13 +160,45 @@ def _config(tmp_path: Path, *, resume: bool = False) -> Any:
             )
         ),
         sanitized=lambda: {
+            "schema_version": "upet.fge.v1",
+            "project": {
+                "name": "upet_fge_n20_cpu",
+                "method": "FGE",
+                "backend": "upet",
+            },
             "paths": {
                 "base_checkpoint": {"role": "base_checkpoint", "sha256": SHA_BASE},
                 "train_data": {"role": "train_data", "sha256": SHA_TRAIN},
                 "val_data": {"role": "val_data", "sha256": SHA_TRAIN},
                 "test_data": {"role": "test_data", "sha256": SHA_TEST},
                 "output_root": {"role": "output_root"},
-            }
+            },
+            "identity": {
+                "base_checkpoint_sha256": SHA_BASE,
+                "train_data_sha256": SHA_TRAIN,
+                "val_data_sha256": SHA_TRAIN,
+                "test_data_sha256": SHA_TEST,
+            },
+            "data": {"format": "extxyz"},
+            "training": {"mode": "readout_only_official_upet"},
+            "fge": {"member_count": 2},
+            "ema": {"member_source": "raw_endpoint"},
+            "prediction": {"split": "test"},
+            "evaluation": {"formula_version": "legacy_upet_fge_v1"},
+            "scientific": {
+                "training": {
+                    "path_feasibility_only": True,
+                    "split_leakage": True,
+                    "scientific_evaluation": False,
+                    "inference_only": False,
+                },
+                "evaluation": {
+                    "path_feasibility_only": True,
+                    "split_leakage": True,
+                    "scientific_evaluation": False,
+                    "inference_only": False,
+                },
+            },
         },
     )
 
@@ -160,15 +215,19 @@ def test_training_uses_one_optimizer_and_raw_endpoint_members_across_cycles(
 
     # floor(5 / 4) * 2 epochs * 2 cycles: exact drop_last update contract.
     assert len(runtime.lrs) == 4
-    assert runtime.loss_term_sets == [
-        (
-            "energy",
-            "forces",
-            "virial",
-            "non_conservative_forces",
-            "non_conservative_stress",
-        )
-    ] * 4
+    assert (
+        runtime.loss_term_sets
+        == [
+            (
+                "energy",
+                "forces",
+                "virial",
+                "non_conservative_forces",
+                "non_conservative_stress",
+            )
+        ]
+        * 4
+    )
     assert runtime.raw_validations == 4
     assert runtime.ema_validations == 4
     assert runtime.frozen_checks == 6  # four epochs plus two endpoints
@@ -177,9 +236,43 @@ def test_training_uses_one_optimizer_and_raw_endpoint_members_across_cycles(
         tmp_path / "upet_fge_n20_cpu" / "training" / "members" / "member_002.pt",
     ]
     assert manifest_path == tmp_path / "upet_fge_n20_cpu" / "training" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    resolved = config.sanitized()
+    canonical = json.dumps(resolved, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    assert "runtime_resume_identity" not in manifest
+    assert set(manifest) == {
+        "schema_version",
+        "project_name",
+        "config_resolved",
+        "config_identity",
+        "checkpoint_identity",
+        "data_identities",
+        "model_contract",
+        "frozen_fingerprint_identity",
+        "dependency_snapshot",
+        "scientific_flags",
+        "training_code_identity",
+        "artifact_writer_code_identity",
+        "validator_code_identity",
+        "member_count",
+        "members",
+    }
+    assert manifest["config_resolved"] == resolved
+    assert manifest["config_identity"] == {
+        "sha256": hashlib.sha256(canonical).hexdigest()
+    }
+    assert manifest["model_contract"] == {
+        "readout_tensor_count": 12,
+        "readout_parameter_count": 13_338,
+    }
+    assert manifest["scientific_flags"] == vars(config.scientific.training)
 
 
-def test_training_sets_the_cycle_lr_before_every_optimizer_update(tmp_path: Path) -> None:
+def test_training_sets_the_cycle_lr_before_every_optimizer_update(
+    tmp_path: Path,
+) -> None:
     """Applying LR only per epoch would silently alter the legacy trajectory."""
 
     runtime = _TorchRuntime(batches=8)
