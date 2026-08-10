@@ -13,6 +13,7 @@ import torch
 
 from Uncertainty_Quantification.FGE.fge import (
     DatasetIdentity,
+    ExperimentLayout,
     FGEConfig,
     HardFailure,
     PredictionShape,
@@ -390,6 +391,26 @@ def test_predict_members_uses_the_manifest_order_and_publishes_one_payload(
     assert validate_prediction_payload(payload) == PredictionShape(K=2, S=2, A=3)
 
 
+def test_predict_members_uses_pet_runtime_when_not_injected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The public prediction stage must bind its official PET runtime by default."""
+    from Uncertainty_Quantification.FGE.fge import prediction
+
+    runtime = _LiteralRuntime(_standard_dataset_identity())
+    monkeypatch.setattr(prediction, "PETPredictionRuntime", lambda: runtime)
+    config = _prediction_config(tmp_path, test_data_sha256="a" * 64)
+    layout = ExperimentLayout(tmp_path / "upet_fge_full")
+    atomic_write_json(
+        layout.training_manifest,
+        {"members": [{"member_id": "member_001"}, {"member_id": "member_002"}]},
+    )
+
+    path = predict_members(config)
+
+    assert path == layout.prediction_tensor
+
+
 def test_manifest_member_ids_rejects_reordered_members(tmp_path: Path) -> None:
     """Prediction must bind K to the canonical contiguous member order."""
     from Uncertainty_Quantification.FGE.fge.prediction import _manifest_member_ids
@@ -559,7 +580,27 @@ def test_default_pet_runtime_reads_the_restart_checkpoint_only(tmp_path: Path) -
 
     config = cast(
         FGEConfig,
-        SimpleNamespace(paths=SimpleNamespace(base_checkpoint=checkpoint, output_root=tmp_path), identity=SimpleNamespace(base_checkpoint_sha256="879b1045391d88869522605a8b8b3cedeed74668e7062fdd7487548ab7b08004"), project=SimpleNamespace(name="upet_fge_n20_cpu")),
+        SimpleNamespace(
+            paths=SimpleNamespace(
+                base_checkpoint=checkpoint,
+                test_data=Path(
+                    "/home/bywang/code/UQ/upet_new/data/dataset/matpes_n20.extxyz"
+                ),
+                output_root=tmp_path,
+            ),
+            identity=SimpleNamespace(
+                base_checkpoint_sha256="879b1045391d88869522605a8b8b3cedeed74668e7062fdd7487548ab7b08004"
+            ),
+            project=SimpleNamespace(name="upet_fge_n20_cpu"),
+            data=SimpleNamespace(
+                energy_target="energy",
+                forces_target="non_conservative_forces",
+                stress_target="non_conservative_stress",
+                energy_unit="eV",
+                forces_unit="eV/angstrom",
+                stress_unit="eV/angstrom^3",
+            ),
+        ),
     )
     runtime = PETPredictionRuntime()
     base = runtime.load_base(config)
@@ -567,3 +608,45 @@ def test_default_pet_runtime_reads_the_restart_checkpoint_only(tmp_path: Path) -
     assert base.model is not None
     assert set(base.state_dict) == set(base.model.state_dict())
     assert all(tensor.device.type == "cpu" for tensor in base.state_dict.values())
+    identity = runtime.dataset_identity(config)
+    assert identity.structure_ids[0] == "341224"
+    assert identity.structure_count == 20
+    assert identity.atom_count > 0
+
+    output = runtime.infer_member(base, "member_001", config)
+
+    assert set(output) == {
+        "energy",
+        "forces",
+        "stress",
+        "energy_reference",
+        "forces_reference",
+        "stress_reference",
+        "n_atoms",
+        "structure_offsets",
+        "structure_ids",
+        "atomic_numbers",
+        "structure_mapping",
+        "target_names",
+        "units",
+    }
+    assert output["energy"].shape == (20,)
+    assert output["forces"].shape == (identity.atom_count, 3)
+    assert output["stress"].shape == (20, 3, 3)
+    from ase import Atoms
+    from ase.calculators.singlepoint import SinglePointCalculator
+    from ase.io import write
+
+    missing_forces = Atoms(
+        "H", positions=[[0.0, 0.0, 0.0]], cell=[5.0, 5.0, 5.0], pbc=True
+    )
+    missing_forces.info["structure_id"] = "missing_forces"
+    missing_forces.calc = SinglePointCalculator(
+        missing_forces, energy=0.0, stress=torch.zeros((3, 3)).numpy()
+    )
+    bad_path = tmp_path / "missing_forces.extxyz"
+    write(bad_path, missing_forces, format="extxyz")
+    config.paths.test_data = bad_path
+
+    with pytest.raises(HardFailure, match="extxyz energy/forces/stress"):
+        runtime.infer_member(base, "member_001", config)

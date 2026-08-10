@@ -10,7 +10,7 @@ from typing import Protocol, cast
 
 import torch
 
-from .artifacts import ExperimentLayout, atomic_torch_save
+from .artifacts import ExperimentLayout, atomic_torch_save, sha256_file
 from .config import FGEConfig
 from .data import DatasetIdentity
 from .errors import HardFailure
@@ -254,7 +254,7 @@ def predict_members(config: object, *, runtime: object | None = None) -> Path:
     loads the base and applies A3 members, while tests inject literal batch output.
     """
     if runtime is None:
-        raise HardFailure("predict_members requires an inference runtime")
+        runtime = PETPredictionRuntime()
     typed_config = cast(FGEConfig, config)
     typed_runtime = cast(PredictionRuntime, runtime)
     try:
@@ -431,3 +431,162 @@ class PETPredictionRuntime:
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             raise HardFailure(f"unable to load PET member: {member_id}") from exc
         apply_member(base.model, base.state_dict, member)
+
+    def dataset_identity(self, config: FGEConfig) -> DatasetIdentity:
+        try:
+            from ase.io import read
+
+            systems = read(str(config.paths.test_data), ":")
+        except (ImportError, OSError, ValueError) as exc:
+            raise HardFailure("unable to read PET prediction dataset") from exc
+        if not isinstance(systems, list) or not systems:
+            raise HardFailure("PET prediction dataset is empty")
+        try:
+            structure_ids = tuple(
+                str(system.info["structure_id"]) for system in systems
+            )
+        except (KeyError, AttributeError) as exc:
+            raise HardFailure("PET prediction dataset lacks structure_id") from exc
+        return DatasetIdentity(
+            split="test",
+            structure_ids=structure_ids,
+            structure_count=len(systems),
+            atom_count=sum(len(system) for system in systems),
+            content_sha256=sha256_file(config.paths.test_data),
+            target_names=(
+                ("energy", config.data.energy_target),
+                ("forces", config.data.forces_target),
+                ("stress", config.data.stress_target),
+            ),
+            units=(
+                ("energy", config.data.energy_unit),
+                ("forces", config.data.forces_unit),
+                ("stress", config.data.stress_unit),
+            ),
+        )
+
+    def infer_member(
+        self, base: object, member_id: str, config: FGEConfig
+    ) -> Mapping[str, object]:
+        """Infer one already-applied A3 member on the formal test split."""
+        del member_id
+        if not isinstance(base, PETBase):
+            raise HardFailure("PET prediction base is invalid")
+        try:
+            from ase.io import read
+            from metatrain.utils.data import read_systems
+            from metatrain.utils.evaluate_model import evaluate_model
+            from metatrain.utils.neighbor_lists import (
+                get_requested_neighbor_lists,
+                get_system_with_neighbor_lists,
+            )
+
+            ase_systems = read(str(config.paths.test_data), ":")
+            model_systems = read_systems(str(config.paths.test_data))
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise HardFailure("unable to prepare PET prediction inputs") from exc
+        if (
+            not isinstance(ase_systems, list)
+            or not ase_systems
+            or len(ase_systems) != len(model_systems)
+        ):
+            raise HardFailure("PET prediction datasets are empty or inconsistent")
+        try:
+            requested = get_requested_neighbor_lists(base.model)
+            prepared_systems = [
+                get_system_with_neighbor_lists(
+                    system.to(dtype=torch.float32), requested
+                )
+                for system in model_systems
+            ]
+            targets = {
+                name: base.model.dataset_info.targets[name]
+                for name in (
+                    "energy",
+                    "non_conservative_forces",
+                    "non_conservative_stress",
+                )
+            }
+            base.model.eval()
+            prediction = evaluate_model(
+                base.model, prepared_systems, targets, is_training=False
+            )
+            energy = (
+                prediction["energy"]
+                .block()
+                .values.reshape(-1)
+                .to(dtype=torch.float32, device="cpu")
+            )
+            forces = (
+                prediction["non_conservative_forces"]
+                .block()
+                .values.squeeze(-1)
+                .to(dtype=torch.float32, device="cpu")
+            )
+            stress = (
+                prediction["non_conservative_stress"]
+                .block()
+                .values.squeeze(-1)
+                .to(dtype=torch.float32, device="cpu")
+            )
+            structure_ids = tuple(
+                str(system.info["structure_id"]) for system in ase_systems
+            )
+            n_atoms = torch.tensor(
+                [len(system) for system in ase_systems], dtype=torch.int64
+            )
+            structure_offsets = torch.cat(
+                (torch.zeros(1, dtype=torch.int64), n_atoms.cumsum(dim=0))
+            )
+            atomic_numbers = torch.cat(
+                [
+                    torch.as_tensor(system.numbers, dtype=torch.int64)
+                    for system in ase_systems
+                ]
+            )
+            structure_mapping = torch.repeat_interleave(
+                torch.arange(len(ase_systems), dtype=torch.int64), n_atoms
+            )
+            energy_reference = torch.tensor(
+                [system.get_potential_energy() for system in ase_systems],
+                dtype=torch.float32,
+            )
+            forces_reference = torch.cat(
+                [
+                    torch.as_tensor(system.get_forces(), dtype=torch.float32)
+                    for system in ase_systems
+                ]
+            )
+            stress_reference = torch.stack(
+                [
+                    torch.as_tensor(system.get_stress(voigt=False), dtype=torch.float32)
+                    for system in ase_systems
+                ]
+            )
+        except (KeyError, AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            raise HardFailure(
+                "PET prediction dataset lacks required extxyz energy/forces/stress"
+            ) from exc
+        return {
+            "energy": energy,
+            "forces": forces,
+            "stress": stress,
+            "energy_reference": energy_reference,
+            "forces_reference": forces_reference,
+            "stress_reference": stress_reference,
+            "n_atoms": n_atoms,
+            "structure_offsets": structure_offsets,
+            "structure_ids": structure_ids,
+            "atomic_numbers": atomic_numbers,
+            "structure_mapping": structure_mapping,
+            "target_names": {
+                "energy": config.data.energy_target,
+                "forces": config.data.forces_target,
+                "stress": config.data.stress_target,
+            },
+            "units": {
+                "energy": config.data.energy_unit,
+                "forces": config.data.forces_unit,
+                "stress": config.data.stress_unit,
+            },
+        }
