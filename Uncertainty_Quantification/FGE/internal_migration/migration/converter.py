@@ -479,7 +479,6 @@ def convert_legacy_run(
     base_checkpoint: Path,
     *,
     expected: LegacyExpectations | None = None,
-    code_identity: Mapping[str, object] | None = None,
 ) -> Path:
     """Validate, stage, audit and atomically publish one legacy result."""
 
@@ -495,7 +494,7 @@ def convert_legacy_run(
         raise HardFailure("artifact destination and audit must be separate trees")
     if final.exists():
         raise HardFailure(f"artifact destination already exists: {final}")
-    identity = _migration_code_identity(code_identity or _repo_code_identity())
+    identity = _migration_code_identity(_repo_code_identity())
     run = read_legacy_run(Path(source), expected or _default_expectations())
     final.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{final.name}.staging-", dir=final.parent))

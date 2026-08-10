@@ -14,9 +14,6 @@ from Uncertainty_Quantification.FGE.internal_migration.scripts import audit_resu
 from .helpers import build_conversion_case
 
 
-_IDENTITY = {"commit": "a" * 40, "dirty_sha256": "b" * 64}
-
-
 def _converted(legacy_tree, config_payload, tmp_path: Path):
     source, base, config, expected = build_conversion_case(
         legacy_tree, config_payload, tmp_path
@@ -30,7 +27,6 @@ def _converted(legacy_tree, config_payload, tmp_path: Path):
         config,
         base,
         expected=expected,
-        code_identity=_IDENTITY,
     )
     return source, destination, audit_root
 
@@ -96,4 +92,47 @@ def test_audit_rejects_source_file_replaced_by_symlink(
     original.symlink_to(replacement)
 
     with pytest.raises(HardFailure, match="symbolic link|source"):
+        audit_results.audit(destination, audit_root)
+
+
+@pytest.mark.parametrize("mutation", ["truncate", "duplicate", "extra", "wrong_path"])
+def test_audit_mapping_exactly_matches_validated_training_members(
+    legacy_tree, config_payload, tmp_path: Path, mutation: str
+) -> None:
+    _, destination, audit_root = _converted(legacy_tree, config_payload, tmp_path)
+    path = audit_root / "published/audit.json"
+    document = json.loads(path.read_text())
+    mapping = document["source_to_a3"]
+    if mutation == "truncate":
+        mapping.pop()
+    elif mutation == "duplicate":
+        mapping[1] = dict(mapping[0])
+    elif mutation == "extra":
+        extra = dict(mapping[-1])
+        extra["member_id"] = "member_003"
+        extra["a3_path"] = "training/members/member_003.pt"
+        mapping.append(extra)
+    else:
+        mapping[0]["a3_path"] = mapping[1]["a3_path"]
+        mapping[0]["a3_sha256"] = mapping[1]["a3_sha256"]
+    path.write_text(json.dumps(document) + "\n")
+
+    with pytest.raises(HardFailure):
+        audit_results.audit(destination, audit_root)
+
+
+@pytest.mark.parametrize("layout", ["equal", "audit_ancestor", "destination_ancestor"])
+def test_standalone_audit_rejects_containment_before_reading(
+    tmp_path: Path, layout: str
+) -> None:
+    if layout == "equal":
+        destination = audit_root = tmp_path / "same"
+    elif layout == "audit_ancestor":
+        audit_root = tmp_path / "outer"
+        destination = audit_root / "result"
+    else:
+        destination = tmp_path / "outer"
+        audit_root = destination / "audit"
+
+    with pytest.raises(HardFailure, match="separate"):
         audit_results.audit(destination, audit_root)

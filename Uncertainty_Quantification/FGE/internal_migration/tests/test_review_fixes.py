@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 import torch
@@ -17,6 +18,7 @@ from .helpers import build_conversion_case
 
 
 _IDENTITY = {"commit": "a" * 40, "dirty_sha256": "b" * 64}
+_convert_with_override = cast(Any, converter.convert_legacy_run)
 
 
 def _unsorted_payload() -> dict[str, object]:
@@ -61,6 +63,7 @@ def test_converter_reopens_completed_staging_and_uses_current_identity(
         return report
 
     monkeypatch.setattr(converter, "validate_result", recording_validate)
+    monkeypatch.setattr(converter, "_repo_code_identity", lambda: dict(_IDENTITY))
     destination = tmp_path / "published"
     audit_root = tmp_path / "audit"
     converter.convert_legacy_run(
@@ -70,7 +73,6 @@ def test_converter_reopens_completed_staging_and_uses_current_identity(
         config,
         base,
         expected=expected,
-        code_identity=_IDENTITY,
     )
 
     assert modes == ["published", "read_only"]
@@ -106,7 +108,6 @@ def test_converter_rejects_symlink_ancestor_without_pollution(
             config,
             base,
             expected=expected,
-            code_identity=_IDENTITY,
         )
     assert not destination.exists()
 
@@ -136,7 +137,6 @@ def test_converter_rejects_overlapping_audit_and_result_paths_without_pollution(
             config,
             base,
             expected=expected,
-            code_identity=_IDENTITY,
         )
     assert not destination.exists()
 
@@ -148,8 +148,8 @@ def test_converter_rejects_unavailable_migration_identity(
         legacy_tree, config_payload, tmp_path
     )
 
-    with pytest.raises(HardFailure, match="code identity"):
-        converter.convert_legacy_run(
+    with pytest.raises(TypeError):
+        _convert_with_override(
             source,
             tmp_path / "published",
             tmp_path / "audit",
@@ -157,4 +157,23 @@ def test_converter_rejects_unavailable_migration_identity(
             base,
             expected=expected,
             code_identity={"status": "unavailable"},
+        )
+
+
+def test_converter_rejects_legal_but_forged_code_identity_override(
+    legacy_tree, config_payload, tmp_path: Path
+) -> None:
+    source, base, config, expected = build_conversion_case(
+        legacy_tree, config_payload, tmp_path
+    )
+
+    with pytest.raises(TypeError):
+        _convert_with_override(
+            source,
+            tmp_path / "published",
+            tmp_path / "audit",
+            config,
+            base,
+            expected=expected,
+            code_identity={"commit": "c" * 40, "dirty_sha256": "d" * 64},
         )

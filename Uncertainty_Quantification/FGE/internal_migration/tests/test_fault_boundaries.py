@@ -63,7 +63,6 @@ def test_every_formal_write_boundary_cleans_staging_and_final(
             config,
             base,
             expected=expected,
-            code_identity={"commit": "a" * 40, "dirty_sha256": "b" * 64},
         )
 
     assert not destination.exists()

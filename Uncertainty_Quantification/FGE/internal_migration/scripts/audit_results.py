@@ -16,11 +16,16 @@ if not __package__:
         schema_signature,
         validate_completed_result,
     )
+    from Uncertainty_Quantification.FGE.internal_migration.migration.converter import (
+        _contains,
+        _safe_absolute,
+    )
     from Uncertainty_Quantification.FGE.internal_migration.scripts._cli import run
 else:
     from ...fge.artifacts import sha256_file
     from ...fge.errors import HardFailure
     from ...fge.validation import schema_signature, validate_completed_result
+    from ..migration.converter import _contains, _safe_absolute
     from ._cli import run
 
 
@@ -45,14 +50,6 @@ _MAPPING_KEYS = {
 }
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
-
-
-def _safe_absolute(path: Path, label: str) -> Path:
-    candidate = Path(path).absolute()
-    for item in (candidate, *candidate.parents):
-        if item.is_symlink():
-            raise HardFailure(f"{label} must not contain a symbolic link")
-    return candidate.resolve()
 
 
 def _safe_relative(root: Path, value: object, label: str) -> Path:
@@ -105,6 +102,8 @@ def _json(path: Path, label: str) -> Mapping[str, object]:
 def audit(destination: Path, audit_root: Path) -> None:
     final = _safe_absolute(destination, "destination")
     root = _safe_absolute(audit_root, "audit root")
+    if _contains(final, root) or _contains(root, final):
+        raise HardFailure("destination and audit root must be separate trees")
     path = _safe_relative(root, f"{final.name}/audit.json", "external audit")
     document = _json(path, "external audit")
     if set(document) != _AUDIT_KEYS:
@@ -115,6 +114,18 @@ def audit(destination: Path, audit_root: Path) -> None:
         or document.get("expected_final_destination") != str(final)
     ):
         raise HardFailure("external audit is not bound to this destination")
+
+    validate_completed_result(final)
+    training = _json(final / "training/manifest.json", "training manifest")
+    formal_members = training.get("members")
+    member_count = training.get("member_count")
+    if (
+        isinstance(member_count, bool)
+        or not isinstance(member_count, int)
+        or not isinstance(formal_members, list)
+        or len(formal_members) != member_count
+    ):
+        raise HardFailure("validated training member inventory is invalid")
 
     source_value = document.get("source_root")
     if not isinstance(source_value, str) or not Path(source_value).is_absolute():
@@ -136,12 +147,25 @@ def audit(destination: Path, audit_root: Path) -> None:
         source_files[relative] = candidate
 
     mapping = document.get("source_to_a3")
-    if not isinstance(mapping, list) or not mapping:
-        raise HardFailure("external audit A3 mapping is invalid")
-    for index, item in enumerate(mapping, start=1):
+    if not isinstance(mapping, list) or len(mapping) != member_count:
+        raise HardFailure("external audit A3 mapping length is invalid")
+    for index, (item, formal_member) in enumerate(
+        zip(mapping, formal_members, strict=True), start=1
+    ):
         if not isinstance(item, Mapping) or set(item) != _MAPPING_KEYS:
             raise HardFailure("external audit A3 mapping schema is invalid")
-        if item.get("member_id") != f"member_{index:03d}":
+        if not isinstance(formal_member, Mapping) or set(formal_member) != {
+            "member_id",
+            "sha256",
+            "cycle",
+            "endpoint_global_step",
+        }:
+            raise HardFailure("validated training member entry is invalid")
+        expected_id = f"member_{index:03d}"
+        if (
+            item.get("member_id") != expected_id
+            or formal_member.get("member_id") != expected_id
+        ):
             raise HardFailure("external audit member order is invalid")
         source_checkpoint = item.get("source_checkpoint")
         if not isinstance(source_checkpoint, str):
@@ -161,13 +185,12 @@ def audit(destination: Path, audit_root: Path) -> None:
         if item.get("a3_path") != expected_a3:
             raise HardFailure("external audit A3 path is not canonical")
         a3 = _safe_relative(final, item.get("a3_path"), "A3 artifact")
-        if sha256_file(a3) != _sha(item.get("a3_sha256"), "A3 artifact"):
-            raise HardFailure("A3 artifact SHA differs")
+        a3_sha = _sha(item.get("a3_sha256"), "A3 artifact")
+        if formal_member.get("sha256") != a3_sha or sha256_file(a3) != a3_sha:
+            raise HardFailure("A3 artifact SHA differs from validated training member")
 
     writer = _identity(document.get("artifact_writer_code_identity"), "writer identity")
     validator = _identity(document.get("validator_code_identity"), "validator identity")
-    validate_completed_result(final)
-    training = _json(final / "training/manifest.json", "training manifest")
     prediction = _json(final / "prediction/manifest.json", "prediction manifest")
     result = _json(final / "result_manifest.json", "result manifest")
     for formal in (training, prediction, result):

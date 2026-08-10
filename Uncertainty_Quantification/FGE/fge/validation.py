@@ -729,6 +729,7 @@ def validate_completed_result(root: str | Path) -> ValidationReport:
     member_count = training.get("member_count")
     if isinstance(member_count, bool) or not isinstance(member_count, int):
         raise HardFailure("training member count is invalid")
+    _validate_members(result_root, training)
     _validate_formal_tree(
         result_root,
         member_count,
