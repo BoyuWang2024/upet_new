@@ -17,7 +17,12 @@ from typing import Any
 import pytest
 import torch
 
-from Uncertainty_Quantification.FGE.fge import HardFailure, asymmetric_triangular_lr
+from Uncertainty_Quantification.FGE.fge import (
+    FGEConfig,
+    HardFailure,
+    asymmetric_triangular_lr,
+    load_config,
+)
 from Uncertainty_Quantification.FGE.fge.members import pack_member
 
 # RED contract: Task 6 supplies this native orchestration module.  Do not add
@@ -328,9 +333,9 @@ def test_training_constructs_the_native_pet_runtime_when_not_injected(
     """The public train path must bind the real PET runtime by default."""
 
     runtime = _TorchRuntime(batches=4)
-    seen: dict[str, object] = {}
+    seen: dict[str, FGEConfig] = {}
 
-    def build(config: Any) -> _TorchRuntime:
+    def build(config: FGEConfig) -> _TorchRuntime:
         seen["config"] = config
         return runtime
 
@@ -351,36 +356,20 @@ _REAL_N20 = Path("/home/bywang/code/UQ/upet_new/data/dataset/matpes_n20.extxyz")
     reason="requires the remote UPET n20 PET fixture",
 )
 def test_native_pet_runtime_runs_one_n20_batch_validation_and_member_reload(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Real PET API compatibility: batch, validation, and weights-only reload."""
 
-    config = SimpleNamespace(
-        paths=SimpleNamespace(
-            base_checkpoint=_REAL_CHECKPOINT, train_data=_REAL_N20, val_data=_REAL_N20
-        ),
-        data=SimpleNamespace(
-            energy_target="energy",
-            forces_target="non_conservative_forces",
-            stress_target="non_conservative_stress",
-            energy_unit="eV",
-            forces_unit="eV/angstrom",
-            stress_unit="eV/angstrom^3",
-        ),
-        training=SimpleNamespace(
-            device="cpu",
-            dtype="float32",
-            batch_size=4,
-            validation_batch_size=4,
-            drop_last=True,
-            num_workers=0,
-        ),
-        identity=SimpleNamespace(
-            base_checkpoint_sha256=SHA_BASE,
-            train_data_sha256=SHA_TRAIN,
-            val_data_sha256=SHA_TRAIN,
-        ),
-        sanitized=lambda: {"remote_n20": True},
+    for name, value in {
+        "UPET_FGE_BASE_CHECKPOINT": _REAL_CHECKPOINT,
+        "UPET_FGE_TRAIN_DATA": _REAL_N20,
+        "UPET_FGE_VAL_DATA": _REAL_N20,
+        "UPET_FGE_TEST_DATA": _REAL_N20,
+        "UPET_FGE_OUTPUT_ROOT": tmp_path,
+    }.items():
+        monkeypatch.setenv(name, str(value))
+    config = load_config(
+        Path(__file__).parents[1] / "configs" / "upet_fge_n20_cpu.yaml"
     )
     runtime = PETTrainingRuntime.from_config(config)
     result = runtime.train_batch(next(iter(runtime.train_loader)), lr=1e-8)

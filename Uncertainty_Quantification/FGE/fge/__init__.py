@@ -18,7 +18,12 @@ from .checkpoint import (
 from .config import FGEConfig, load_config
 from .data import DatasetIdentity
 from .errors import HardFailure
-from .evaluation import EvaluationArtifacts, evaluate_prediction, global_mae
+from .evaluation import (
+    EvaluationArtifacts,
+    evaluate_fge,
+    evaluate_prediction,
+    global_mae,
+)
 from .manifests import (
     build_prediction_manifest,
     build_result_manifest,
@@ -44,6 +49,7 @@ from .prediction import (
 )
 from .preflight import run_preflight
 from .schedule import asymmetric_triangular_lr
+from .training import PETTrainingRuntime, train_fge
 from .uncertainty import (
     FORMULA_VERSION,
     population_std,
@@ -93,11 +99,14 @@ __all__ = [
     "EvaluationArtifacts",
     "FORMULA_VERSION",
     "asymmetric_triangular_lr",
+    "evaluate_fge",
     "evaluate_prediction",
     "global_mae",
     "population_std",
     "reduce_force_by_structure",
     "scalar_gmd",
     "vector_gmd",
+    "train_fge",
+    "PETTrainingRuntime",
     "validate_prediction_payload",
 ]

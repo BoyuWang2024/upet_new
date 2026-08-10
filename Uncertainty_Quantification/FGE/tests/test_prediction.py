@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -19,6 +19,7 @@ from Uncertainty_Quantification.FGE.fge import (
     PredictionShape,
     atomic_write_json,
     canonical_prediction,
+    load_config,
     predict_members,
     validate_prediction_payload,
 )
@@ -571,36 +572,26 @@ def test_predict_members_rejects_runtime_identity_content_sha_mismatch(
 
 
 @pytest.mark.fge_n20
-def test_default_pet_runtime_reads_the_restart_checkpoint_only(tmp_path: Path) -> None:
+def test_default_pet_runtime_reads_the_restart_checkpoint_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The default runtime must use metatrain's restart loader, not export state."""
     checkpoint = Path("/home/bywang/code/UQ/upet/pet-omatpes-l-v0.1.0.ckpt")
     if not checkpoint.is_file():
         pytest.skip("remote PET checkpoint is not available")
     from Uncertainty_Quantification.FGE.fge.prediction import PETPredictionRuntime
 
-    config = cast(
-        FGEConfig,
-        SimpleNamespace(
-            paths=SimpleNamespace(
-                base_checkpoint=checkpoint,
-                test_data=Path(
-                    "/home/bywang/code/UQ/upet_new/data/dataset/matpes_n20.extxyz"
-                ),
-                output_root=tmp_path,
-            ),
-            identity=SimpleNamespace(
-                base_checkpoint_sha256="879b1045391d88869522605a8b8b3cedeed74668e7062fdd7487548ab7b08004"
-            ),
-            project=SimpleNamespace(name="upet_fge_n20_cpu"),
-            data=SimpleNamespace(
-                energy_target="energy",
-                forces_target="non_conservative_forces",
-                stress_target="non_conservative_stress",
-                energy_unit="eV",
-                forces_unit="eV/angstrom",
-                stress_unit="eV/angstrom^3",
-            ),
-        ),
+    n20_data = Path("/home/bywang/code/UQ/upet_new/data/dataset/matpes_n20.extxyz")
+    for name, value in {
+        "UPET_FGE_BASE_CHECKPOINT": checkpoint,
+        "UPET_FGE_TRAIN_DATA": n20_data,
+        "UPET_FGE_VAL_DATA": n20_data,
+        "UPET_FGE_TEST_DATA": n20_data,
+        "UPET_FGE_OUTPUT_ROOT": tmp_path,
+    }.items():
+        monkeypatch.setenv(name, str(value))
+    config = load_config(
+        Path(__file__).parents[1] / "configs" / "upet_fge_n20_cpu.yaml"
     )
     runtime = PETPredictionRuntime()
     base = runtime.load_base(config)
@@ -630,9 +621,15 @@ def test_default_pet_runtime_reads_the_restart_checkpoint_only(tmp_path: Path) -
         "target_names",
         "units",
     }
-    assert output["energy"].shape == (20,)
-    assert output["forces"].shape == (identity.atom_count, 3)
-    assert output["stress"].shape == (20, 3, 3)
+    energy = output["energy"]
+    forces = output["forces"]
+    stress = output["stress"]
+    assert isinstance(energy, torch.Tensor)
+    assert isinstance(forces, torch.Tensor)
+    assert isinstance(stress, torch.Tensor)
+    assert energy.shape == (20,)
+    assert forces.shape == (identity.atom_count, 3)
+    assert stress.shape == (20, 3, 3)
     from ase import Atoms
     from ase.calculators.singlepoint import SinglePointCalculator
     from ase.io import write
@@ -646,7 +643,7 @@ def test_default_pet_runtime_reads_the_restart_checkpoint_only(tmp_path: Path) -
     )
     bad_path = tmp_path / "missing_forces.extxyz"
     write(bad_path, missing_forces, format="extxyz")
-    config.paths.test_data = bad_path
+    bad_config = replace(config, paths=replace(config.paths, test_data=bad_path))
 
     with pytest.raises(HardFailure, match="extxyz energy/forces/stress"):
-        runtime.infer_member(base, "member_001", config)
+        runtime.infer_member(base, "member_001", bad_config)

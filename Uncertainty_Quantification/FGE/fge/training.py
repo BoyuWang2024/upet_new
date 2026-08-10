@@ -9,7 +9,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, TypedDict, runtime_checkable
 
 import torch
 
@@ -19,6 +19,7 @@ from .artifacts import (
     atomic_write_json,
     sha256_file,
 )
+from .config import FGEConfig
 from .errors import HardFailure
 from .manifests import build_training_manifest
 from .members import (
@@ -115,7 +116,7 @@ class _ReadoutEMA:
                     parameters[name].copy_(value)
 
 
-def _layout(config: Any) -> ExperimentLayout:
+def _layout(config: FGEConfig) -> ExperimentLayout:
     try:
         root = Path(config.paths.output_root) / config.project.name
     except AttributeError as exc:
@@ -229,9 +230,23 @@ def _frozen_identity(frozen: Sequence[Any]) -> dict[str, str]:
     return {"sha256": _canonical_sha256(records)}
 
 
+class _TrainingManifestIdentity(TypedDict):
+    project_name: str
+    config_resolved: Mapping[str, object]
+    config_identity: Mapping[str, object]
+    checkpoint_identity: Mapping[str, object]
+    data_identities: Mapping[str, object]
+    frozen_fingerprint_identity: Mapping[str, object]
+    dependency_snapshot: Mapping[str, object]
+    scientific_flags: Mapping[str, object]
+    training_code_identity: Mapping[str, object]
+    artifact_writer_code_identity: Mapping[str, object]
+    validator_code_identity: Mapping[str, object]
+
+
 def _manifest_identity(
-    config: Any, runtime: TrainingRuntime, frozen: Sequence[Any]
-) -> dict[str, object]:
+    config: FGEConfig, runtime: TrainingRuntime, frozen: Sequence[Any]
+) -> _TrainingManifestIdentity:
     sanitized = getattr(config, "sanitized", None)
     if not callable(sanitized):
         raise HardFailure("training configuration has no sanitized identity")
@@ -277,10 +292,10 @@ class PETTrainingRuntime:
         model: torch.nn.Module,
         raw: Mapping[str, object],
         base_state: Mapping[str, torch.Tensor],
-        loss_fn: object,
+        loss_fn: Callable[[object, object, object], object],
         train_loader: Iterable[object],
         val_loader: Iterable[object],
-        config: Any,
+        config: FGEConfig,
         unpack_batch: Any,
         batch_to: Any,
         evaluate_model: Any,
@@ -304,7 +319,7 @@ class PETTrainingRuntime:
         self._frozen = frozen_fingerprint(model)
 
     @staticmethod
-    def _targets(config: Any, path: Path) -> dict[str, object]:
+    def _targets(config: FGEConfig, path: Path) -> dict[str, object]:
         source = str(path)
         return {
             "energy": {
@@ -346,7 +361,7 @@ class PETTrainingRuntime:
         }
 
     @classmethod
-    def from_config(cls, config: Any) -> "PETTrainingRuntime":
+    def from_config(cls, config: FGEConfig) -> "PETTrainingRuntime":
         """Construct only the official data/model/loss path; never refit transforms."""
         try:
             import copy
@@ -653,7 +668,7 @@ class PETTrainingRuntime:
         }
 
 
-def train_fge(config: Any, *, runtime: TrainingRuntime | None = None) -> Path:
+def train_fge(config: FGEConfig, *, runtime: TrainingRuntime | None = None) -> Path:
     """Train raw endpoint A3 members with one optimizer and validation-only EMA."""
     if runtime is None:
         runtime = PETTrainingRuntime.from_config(config)

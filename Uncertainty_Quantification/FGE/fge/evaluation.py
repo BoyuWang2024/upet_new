@@ -17,6 +17,7 @@ from .artifacts import (
     atomic_write_json,
     sibling_staging,
 )
+from .config import FGEConfig
 from .errors import HardFailure
 from .uncertainty import (
     FORMULA_VERSION,
@@ -483,7 +484,7 @@ def evaluate_prediction(
     )
 
 
-def evaluate_fge(config: object) -> Path:
+def evaluate_fge(config: FGEConfig) -> Path:
     """Evaluate only the stored canonical prediction and publish formal artifacts."""
     try:
         layout = ExperimentLayout(Path(config.paths.output_root) / config.project.name)
