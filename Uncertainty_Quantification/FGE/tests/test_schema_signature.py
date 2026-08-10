@@ -82,3 +82,40 @@ def test_schema_signature_rejects_a3_member_schema_drift(
 
     with pytest.raises(HardFailure):
         schema_signature(root)
+
+
+def test_schema_signature_keeps_formal_versions_and_fixed_a3_dimensions(
+    tmp_path: Path,
+) -> None:
+    """Versions are semantic constants; A3 shapes are not dataset dimensions."""
+    from Uncertainty_Quantification.FGE.fge.validation import schema_signature
+
+    _, root = make_canonical_result(tmp_path)
+    for name in ("member_001.pt", "member_002.pt"):
+        member = root / "training" / "members" / name
+        payload = torch.load(member, weights_only=True)
+        assert isinstance(payload, dict)
+        tensors = payload["tensors"]
+        assert isinstance(tensors, list)
+        assert isinstance(tensors[0], dict)
+        tensors[0]["shape"] = [2]
+        tensors[0]["value"] = torch.zeros((2,), dtype=torch.float32)
+        torch.save(payload, member)
+
+    signature = schema_signature(root)
+    documents = signature["documents"]
+    tensors_signature = signature["tensors"]
+    assert isinstance(documents, dict)
+    assert isinstance(tensors_signature, dict)
+    training = documents["training/manifest.json"]
+    uncertainty = tensors_signature["evaluation/legacy_equal_weight/uncertainty.pt"]
+    a3 = tensors_signature["training/members/member_NNN.pt"]
+    assert isinstance(training, dict)
+    assert isinstance(uncertainty, dict)
+    assert isinstance(a3, dict)
+    assert training["schema_version"] == "upet.fge.training.v1"
+    assert uncertainty["formula_version"] == "legacy_upet_fge_v1"
+    entries = a3["tensors"]
+    assert isinstance(entries, list)
+    assert isinstance(entries[0], dict)
+    assert entries[0]["shape"] == [2]

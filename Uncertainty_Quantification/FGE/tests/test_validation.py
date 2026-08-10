@@ -88,6 +88,35 @@ def _config(
     config = SimpleNamespace(
         project=SimpleNamespace(name=project_name),
         fge=SimpleNamespace(member_count=member_count),
+        identity=SimpleNamespace(
+            base_checkpoint_sha256="a" * 64,
+            train_data_sha256="b" * 64,
+            val_data_sha256="c" * 64,
+            test_data_sha256="d" * 64,
+        ),
+        data=SimpleNamespace(
+            energy_target="energy",
+            forces_target="non_conservative_forces",
+            stress_target="non_conservative_stress",
+            energy_unit="eV",
+            forces_unit="eV/angstrom",
+            stress_unit="eV/angstrom^3",
+        ),
+        training=SimpleNamespace(device="cpu", dtype="float32"),
+        scientific=SimpleNamespace(
+            training=SimpleNamespace(
+                path_feasibility_only=True,
+                split_leakage=True,
+                scientific_evaluation=False,
+                inference_only=False,
+            ),
+            evaluation=SimpleNamespace(
+                path_feasibility_only=True,
+                split_leakage=True,
+                scientific_evaluation=False,
+                inference_only=True,
+            ),
+        ),
         evaluation=SimpleNamespace(
             formula_version="legacy_upet_fge_v1",
             metric_schema_version=4,
@@ -170,8 +199,34 @@ def make_canonical_result(
                 "stage": stage,
                 "status": "PASS",
                 "basis": "runtime_inputs",
-                "identity": {"member_count": member_count},
-                "scientific_flags": flags,
+                "identity": {
+                    "inputs": path_hashes,
+                    "targets": {
+                        "energy": "energy",
+                        "forces": "non_conservative_forces",
+                        "stress": "non_conservative_stress",
+                    },
+                    "units": {
+                        "energy": "eV",
+                        "forces": "eV/angstrom",
+                        "stress": "eV/angstrom^3",
+                    },
+                    "model_contract": {
+                        "readout_tensor_count": 12,
+                        "readout_parameter_count": 13338,
+                    },
+                    "member_count": member_count,
+                    "runtime": {"device": "cpu", "dtype": "float32"},
+                },
+                "scientific_flags": (
+                    flags
+                    if stage == "train"
+                    else {
+                        **flags,
+                        "inference_only": True,
+                    }
+                ),
+                "config_identity": _config_identity(config_resolved),
             },
         )
     members: list[dict[str, object]] = []
@@ -444,3 +499,49 @@ def test_completed_manifest_rejects_noncanonical_role_even_with_valid_hash(
 
     with pytest.raises(HardFailure):
         validate_result(config, root)
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "training/members/member_003.pt",
+        "wandb/run.json",
+        "logs/train.log",
+        "plots/summary.png",
+        "_work/run_state.pt",
+    ],
+)
+def test_first_validation_rejects_unallowed_residue_before_publication(
+    tmp_path: Path, relative: str
+) -> None:
+    """First publication scans the formal tree instead of inventorying a subset."""
+    from Uncertainty_Quantification.FGE.fge.errors import HardFailure
+    from Uncertainty_Quantification.FGE.fge.validation import validate_result
+
+    config, root = make_canonical_result(tmp_path)
+    residue = root / relative
+    residue.parent.mkdir(parents=True, exist_ok=True)
+    if residue.suffix == ".pt":
+        residue.write_bytes(_member_path(root).read_bytes())
+    else:
+        residue.write_text("residue\n", encoding="utf-8")
+
+    with pytest.raises(HardFailure):
+        validate_result(config, root, publish_completion=False)
+
+
+def test_validation_rejects_preflight_report_identity_or_config_drift(
+    tmp_path: Path,
+) -> None:
+    """Every durable preflight report binds its full formal identity."""
+    from Uncertainty_Quantification.FGE.fge.errors import HardFailure
+    from Uncertainty_Quantification.FGE.fge.validation import validate_result
+
+    config, root = make_canonical_result(tmp_path)
+    report_path = root / "preflight" / "evaluate.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["identity"] = {"member_count": 99}
+    _write_json(report_path, report)
+
+    with pytest.raises(HardFailure):
+        validate_result(config, root, publish_completion=False)

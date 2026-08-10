@@ -19,6 +19,7 @@ from .artifacts import (
 )
 from .config import FGEConfig
 from .errors import HardFailure
+from .prediction import validate_prediction_payload
 
 
 _STAGES = frozenset({"train", "predict", "evaluate"})
@@ -323,6 +324,34 @@ def _canonical_documents(
         and artifact.get("bytes") == artifact_path.stat().st_size,
         "prediction artifact identity is invalid",
     )
+    try:
+        payload = torch.load(artifact_path, map_location="cpu", weights_only=True)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise HardFailure("prediction artifact cannot be loaded") from exc
+    if not isinstance(payload, Mapping):
+        raise HardFailure("prediction artifact has an invalid schema")
+    try:
+        shape = validate_prediction_payload(payload)
+    except (TypeError, ValueError) as exc:
+        raise HardFailure("prediction payload is invalid") from exc
+    expected_targets = {
+        "energy": config.data.energy_target,
+        "forces": config.data.forces_target,
+        "stress": config.data.stress_target,
+    }
+    expected_units = {
+        "energy": config.data.energy_unit,
+        "forces": config.data.forces_unit,
+        "stress": config.data.stress_unit,
+    }
+    _fail_unless(
+        prediction_mapping.get("shape") == {"K": shape.K, "S": shape.S, "A": shape.A}
+        and payload.get("member_ids") == tuple(member_ids)
+        and payload.get("statistics") == {"K": shape.K, "S": shape.S, "A": shape.A}
+        and payload.get("target_names") == expected_targets
+        and payload.get("units") == expected_units,
+        "prediction payload metadata is invalid",
+    )
 
 
 def _assert_source_independent(value: object) -> None:
@@ -396,6 +425,7 @@ def run_preflight(
         "basis": basis,
         "identity": identity,
         "scientific_flags": scientific_flags,
+        "config_identity": _canonical_config_identity(config.sanitized()),
     }
     atomic_write_json(layout.preflight_dir / f"{stage}.json", report)
     return report

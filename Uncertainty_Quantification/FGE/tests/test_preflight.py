@@ -139,7 +139,14 @@ def test_native_train_preflight_checks_runtime_basis_without_compute(
     assert report["stage"] == "train"
     assert report["status"] == "PASS"
     assert report["basis"] == "runtime_inputs"
-    assert set(report) == {"stage", "status", "basis", "identity", "scientific_flags"}
+    assert set(report) == {
+        "stage",
+        "status",
+        "basis",
+        "identity",
+        "scientific_flags",
+        "config_identity",
+    }
     assert report["identity"]["model_contract"] == {
         "readout_tensor_count": 12,
         "readout_parameter_count": 13338,
@@ -335,3 +342,50 @@ def test_predict_canonical_preflight_rejects_training_identity_or_provenance_dri
     prior.write_text(json.dumps(training), encoding="utf-8")
     with pytest.raises(HardFailure):
         run_preflight(config, "predict", basis="canonical_artifacts")
+
+
+def test_evaluate_canonical_preflight_reopens_payload_and_checks_metadata(
+    tmp_path: Path,
+) -> None:
+    """Evaluate cannot trust a self-consistent hash for invalid prediction metadata."""
+    from Uncertainty_Quantification.FGE.fge.preflight import run_preflight
+    from Uncertainty_Quantification.FGE.tests.test_validation import _payload
+
+    config = _config(tmp_path)
+    run_preflight(config, "train")
+    _write_predict_prior(config)
+    root = config.paths.output_root / config.project.name
+    payload = _payload(2)
+    prediction_path = root / "prediction" / "test_raw.pt"
+    prediction_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(payload, prediction_path)
+    manifest_path = root / "prediction" / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "upet.fge.prediction.v1",
+                "member_ids": ["member_001", "member_002"],
+                "shape": {"K": 2, "S": 1, "A": 1},
+                "artifact": {
+                    "role": "prediction",
+                    "path": "prediction/test_raw.pt",
+                    "bytes": prediction_path.stat().st_size,
+                    "sha256": _sha256(prediction_path),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    run_preflight(config, "evaluate", basis="canonical_artifacts")
+
+    payload["target_names"]["energy"] = "wrong"
+    torch.save(payload, prediction_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    artifact = manifest["artifact"]
+    assert isinstance(artifact, dict)
+    artifact["bytes"] = prediction_path.stat().st_size
+    artifact["sha256"] = _sha256(prediction_path)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(HardFailure):
+        run_preflight(config, "evaluate", basis="canonical_artifacts")

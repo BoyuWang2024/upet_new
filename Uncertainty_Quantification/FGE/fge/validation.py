@@ -426,13 +426,107 @@ def _validate_evaluation(
     )
 
 
-def _validate_preflight(root: Path) -> None:
+def _preflight_identity(
+    config: FGEConfig, training: Mapping[str, Any]
+) -> dict[str, object]:
+    data = _string_key_mapping(
+        training.get("data_identities"), "training data identities are invalid"
+    )
+    checkpoint = _string_key_mapping(
+        training.get("checkpoint_identity"), "checkpoint identity is invalid"
+    )
+    contract = training.get("model_contract")
+    try:
+        targets = {
+            "energy": config.data.energy_target,
+            "forces": config.data.forces_target,
+            "stress": config.data.stress_target,
+        }
+        units = {
+            "energy": config.data.energy_unit,
+            "forces": config.data.forces_unit,
+            "stress": config.data.stress_unit,
+        }
+        runtime = {
+            "device": config.training.device,
+            "dtype": config.training.dtype,
+        }
+    except AttributeError as exc:
+        raise HardFailure("validation configuration is incomplete") from exc
+    return {
+        "inputs": {
+            "base_checkpoint": checkpoint.get("sha256"),
+            "train_data": _string_key_mapping(data.get("train"), "data identity").get(
+                "sha256"
+            ),
+            "val_data": _string_key_mapping(data.get("val"), "data identity").get(
+                "sha256"
+            ),
+            "test_data": _string_key_mapping(data.get("test"), "data identity").get(
+                "sha256"
+            ),
+        },
+        "targets": targets,
+        "units": units,
+        "model_contract": contract,
+        "member_count": training.get("member_count"),
+        "runtime": runtime,
+    }
+
+
+def _preflight_flags(config: FGEConfig, stage: str) -> dict[str, bool]:
+    try:
+        selected = (
+            config.scientific.training
+            if stage == "train"
+            else config.scientific.evaluation
+        )
+        return {
+            name: getattr(selected, name)
+            for name in (
+                "path_feasibility_only",
+                "split_leakage",
+                "scientific_evaluation",
+                "inference_only",
+            )
+        }
+    except AttributeError as exc:
+        raise HardFailure("validation scientific flags are invalid") from exc
+
+
+def _validate_preflight(
+    root: Path,
+    config: FGEConfig,
+    training: Mapping[str, Any],
+    config_resolved: Mapping[str, object],
+) -> None:
+    expected_identity = _preflight_identity(config, training)
+    expected_config = _config_identity(config_resolved)
+    bases: set[str] = set()
     for stage in ("train", "predict", "evaluate"):
         report = _load_json(root / "preflight" / f"{stage}.json")
         _fail_unless(
-            report.get("stage") == stage and report.get("status") == "PASS",
+            set(report)
+            == {
+                "stage",
+                "status",
+                "basis",
+                "identity",
+                "scientific_flags",
+                "config_identity",
+            }
+            and report.get("stage") == stage
+            and report.get("status") == "PASS"
+            and report.get("identity") == expected_identity
+            and report.get("scientific_flags") == _preflight_flags(config, stage)
+            and report.get("config_identity") == expected_config,
             "preflight report is invalid",
         )
+        basis = report.get("basis")
+        if basis not in {"runtime_inputs", "canonical_artifacts"}:
+            raise HardFailure("preflight basis is invalid")
+        bases.add(basis)
+    _fail_unless(len(bases) == 1, "preflight bases are inconsistent")
 
 
 def _expected_manifest_roles(member_count: int) -> dict[str, str]:
@@ -455,6 +549,27 @@ def _expected_manifest_roles(member_count: int) -> dict[str, str]:
             f"training_member_{index:03d}"
         )
     return expected
+
+
+def _validate_formal_tree(
+    root: Path,
+    member_count: int,
+    *,
+    validation_exists: bool,
+    completion_exists: bool,
+) -> None:
+    expected = set(_expected_manifest_roles(member_count))
+    if not validation_exists:
+        expected.remove("validation.json")
+    if completion_exists:
+        expected.add("result_manifest.json")
+    actual: set[str] = set()
+    for path in root.rglob("*"):
+        if path.is_dir():
+            continue
+        _regular(path, "formal tree artifact")
+        actual.add(path.relative_to(root).as_posix())
+    _fail_unless(actual == expected, "formal tree contains unallowed residue")
 
 
 def _manifest_artifact_path(root: Path, path_text: object) -> Path:
@@ -530,7 +645,6 @@ def validate_result(
         result_root.is_dir() and not result_root.is_symlink(), "result root is invalid"
     )
     completed = result_root / "result_manifest.json"
-    _validate_preflight(result_root)
     config_resolved = _load_yaml(result_root / "config_resolved.yaml")
     sanitized = config.sanitized()
     _fail_unless(isinstance(sanitized, Mapping), "validation configuration is invalid")
@@ -539,6 +653,7 @@ def validate_result(
         "resolved config differs from validation configuration",
     )
     training = _load_json(result_root / "training" / "manifest.json")
+    _validate_preflight(result_root, config, training, config_resolved)
     _fail_unless(
         training.get("config_resolved") == config_resolved,
         "resolved config differs from training manifest",
@@ -548,6 +663,16 @@ def validate_result(
     _validate_members(result_root, training)
     payload = _validate_prediction(result_root, prediction_manifest)
     _validate_evaluation(result_root, config, payload)
+    member_count = training.get("member_count")
+    if isinstance(member_count, bool) or not isinstance(member_count, int):
+        raise HardFailure("training member count is invalid")
+    _validate_formal_tree(
+        result_root,
+        member_count,
+        validation_exists=completed.exists()
+        or (result_root / "validation.json").exists(),
+        completion_exists=completed.exists(),
+    )
     if completed.exists():
         return ValidationReport(
             "PASS", "read_only", _validate_completed_manifest(result_root, config)
@@ -558,6 +683,9 @@ def validate_result(
     if not publish_completion:
         return report
     atomic_write_json(result_root / "validation.json", report.as_json())
+    _validate_formal_tree(
+        result_root, member_count, validation_exists=True, completion_exists=False
+    )
     manifest = build_result_manifest(
         root=result_root,
         project_name=config.project.name,
@@ -589,7 +717,7 @@ def _tensor_signature(value: object, K: int, S: int, A: int) -> object:
     if isinstance(value, torch.Tensor):
         return {
             "dtype": str(value.dtype).removeprefix("torch."),
-            "shape": _shape(value.shape, K, S, A),
+            "shape": list(value.shape),
         }
     if isinstance(value, Mapping):
         if set(value) == {"name", "dtype", "shape", "value"}:
@@ -609,13 +737,23 @@ def _tensor_signature(value: object, K: int, S: int, A: int) -> object:
             return {
                 "name": name,
                 "dtype": dtype,
-                "shape": _shape(torch.Size(shape), K, S, A),
-                "value": _tensor_signature(tensor, K, S, A),
+                "shape": list(shape),
+                "value": {
+                    "dtype": str(tensor.dtype).removeprefix("torch."),
+                    "shape": list(tensor.shape),
+                },
             }
-        return {
+        signature = {
             str(key): _tensor_signature(nested, K, S, A)
             for key, nested in sorted(value.items())
         }
+        for key in ("schema_version", "formula_version", "metric_schema_version"):
+            literal = value.get(key)
+            if literal is not None:
+                if isinstance(literal, bool) or not isinstance(literal, (str, int)):
+                    raise HardFailure("formal version field is invalid")
+                signature[key] = literal
+        return signature
     if isinstance(value, tuple) and all(isinstance(item, str) for item in value):
         return ["string"]
     if isinstance(value, (list, tuple)):
@@ -639,9 +777,16 @@ def _prediction_signature(value: Mapping[str, Any], K: int, S: int, A: int) -> o
     return signature
 
 
-def _key_tree(value: object) -> object:
+def _key_tree(value: object, key: str | None = None) -> object:
+    if key in {"schema_version", "formula_version", "metric_schema_version"}:
+        if isinstance(value, (str, int)) and not isinstance(value, bool):
+            return value
+        raise HardFailure("formal version field is invalid")
     if isinstance(value, Mapping):
-        return {str(key): _key_tree(nested) for key, nested in sorted(value.items())}
+        return {
+            str(nested_key): _key_tree(nested, str(nested_key))
+            for nested_key, nested in sorted(value.items())
+        }
     if isinstance(value, list):
         return [_key_tree(value[0])] if value else []
     return type(value).__name__
