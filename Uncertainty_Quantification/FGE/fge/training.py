@@ -876,7 +876,6 @@ def train_fge(config: FGEConfig, *, runtime: TrainingRuntime | None = None) -> P
         assert_safe_result_path(layout.root, member_path)
         atomic_torch_save(member_path, payload)
         if not runtime.reload_and_smoke(member_path):
-            member_path.unlink(missing_ok=True)
             raise HardFailure(f"member reload smoke failed: member_{cycle:03d}")
         accepted.append(
             {

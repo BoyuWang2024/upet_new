@@ -343,6 +343,37 @@ def test_failed_training_retains_identity_matched_resume_state(tmp_path: Path) -
     assert not (tmp_path / "upet_fge_n20_cpu" / "_work").exists()
 
 
+def test_failed_member_smoke_never_deletes_through_swapped_ancestor(
+    tmp_path: Path,
+) -> None:
+    """A smoke failure retains the unpublished member without path-based cleanup."""
+    runtime = _TorchRuntime(batches=4)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    external = outside / "member_001.pt"
+    external.write_bytes(b"outside")
+    swapped = False
+
+    def swap_member_ancestor(member_path: Path) -> bool:
+        nonlocal swapped
+        members = member_path.parent
+        os.rename(members, members.parent / ".owned_members")
+        members.symlink_to(outside, target_is_directory=True)
+        swapped = True
+        return False
+
+    runtime.reload_and_smoke = swap_member_ancestor  # type: ignore[assignment]
+
+    with pytest.raises(HardFailure, match="reload smoke"):
+        train_fge(_config(tmp_path), runtime=runtime)
+
+    assert swapped
+    assert external.read_bytes() == b"outside"
+    assert (
+        tmp_path / "upet_fge_n20_cpu" / "training" / ".owned_members" / "member_001.pt"
+    ).is_file()
+
+
 def test_training_constructs_the_native_pet_runtime_when_not_injected(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
