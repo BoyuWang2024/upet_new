@@ -25,12 +25,28 @@ def _training_inputs() -> dict[str, object]:
     return {
         "project_name": "upet_fge_full",
         "config_resolved": {
+            "schema_version": "upet.fge.v1",
+            "project": {"name": "upet_fge_full", "method": "FGE", "backend": "upet"},
             "paths": {
                 "base_checkpoint": {"role": "base_checkpoint", "sha256": "a" * 64},
                 "train_data": {"role": "train_data", "sha256": "b" * 64},
                 "val_data": {"role": "val_data", "sha256": "c" * 64},
                 "test_data": {"role": "test_data", "sha256": "d" * 64},
-            }
+                "output_root": {"role": "output_root"},
+            },
+            "identity": {
+                "base_checkpoint_sha256": "a" * 64,
+                "train_data_sha256": "b" * 64,
+                "val_data_sha256": "c" * 64,
+                "test_data_sha256": "d" * 64,
+            },
+            "data": {"format": "extxyz"},
+            "training": {"mode": "readout_only_official_upet"},
+            "fge": {"member_count": 2},
+            "ema": {"member_source": "raw_endpoint"},
+            "prediction": {"split": "test"},
+            "evaluation": {"formula_version": "legacy_upet_fge_v1"},
+            "scientific": {"training": {}, "evaluation": {}},
         },
         "config_identity": {"sha256": "e" * 64},
         "checkpoint_identity": {"sha256": "a" * 64},
@@ -401,3 +417,40 @@ def test_result_manifest_inventories_the_complete_canonical_formal_tree(
     assert [artifact["path"] for artifact in _artifacts(manifest)] == sorted(
         formal_paths
     )
+
+
+def test_training_manifest_accepts_only_the_complete_sanitized_config() -> None:
+    """A truncated config must not bypass formal runtime identity binding."""
+    values = _training_inputs()
+    values["config_resolved"] = {
+        "schema_version": "upet.fge.v1",
+        "project": {"name": "upet_fge_full", "method": "FGE", "backend": "upet"},
+        "paths": {
+            "base_checkpoint": {"role": "base_checkpoint", "sha256": "a" * 64},
+            "train_data": {"role": "train_data", "sha256": "b" * 64},
+            "val_data": {"role": "val_data", "sha256": "c" * 64},
+            "test_data": {"role": "test_data", "sha256": "d" * 64},
+            "output_root": {"role": "output_root"},
+        },
+        "identity": {
+            "base_checkpoint_sha256": "a" * 64,
+            "train_data_sha256": "b" * 64,
+            "val_data_sha256": "c" * 64,
+            "test_data_sha256": "d" * 64,
+        },
+        "data": {"format": "extxyz"},
+        "training": {"mode": "readout_only_official_upet"},
+        "fge": {"member_count": 2},
+        "ema": {"member_source": "raw_endpoint"},
+        "prediction": {"split": "test"},
+        "evaluation": {"formula_version": "legacy_upet_fge_v1"},
+        "scientific": {"training": {}, "evaluation": {}},
+    }
+
+    manifest = _build_training(values, _identity("5" * 40))
+
+    assert manifest["config_resolved"] == values["config_resolved"]
+
+    values["config_resolved"] = {"paths": {}}
+    with pytest.raises(HardFailure):
+        _build_training(values, _identity("5" * 40))

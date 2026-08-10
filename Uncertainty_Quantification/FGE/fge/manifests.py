@@ -66,11 +66,24 @@ def _sha_identity(value: object, label: str) -> str:
 
 
 def _config_resolved_identity(value: object) -> dict[str, str]:
-    if not isinstance(value, Mapping) or set(value) != {"paths"}:
+    expected_top_level = {
+        "schema_version",
+        "project",
+        "paths",
+        "identity",
+        "data",
+        "training",
+        "fge",
+        "ema",
+        "prediction",
+        "evaluation",
+        "scientific",
+    }
+    if not isinstance(value, Mapping) or set(value) != expected_top_level:
         raise HardFailure("config_resolved has an invalid schema")
     paths = value["paths"]
     roles = ("base_checkpoint", "train_data", "val_data", "test_data")
-    if not isinstance(paths, Mapping) or set(paths) != set(roles):
+    if not isinstance(paths, Mapping) or set(paths) != {*roles, "output_root"}:
         raise HardFailure("config_resolved.paths has an invalid schema")
     result: dict[str, str] = {}
     for role in roles:
@@ -82,6 +95,11 @@ def _config_resolved_identity(value: object) -> dict[str, str]:
         result[role] = _sha256(
             identity["sha256"], f"config_resolved.paths.{role}.sha256"
         )
+    output_root = paths["output_root"]
+    if not isinstance(output_root, Mapping) or dict(output_root) != {
+        "role": "output_root"
+    }:
+        raise HardFailure("config_resolved output_root identity is invalid")
     return result
 
 
