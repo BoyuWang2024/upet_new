@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import math
 import os
@@ -142,8 +143,99 @@ def _loader_length(loader: Iterable[object]) -> int:
     return length
 
 
-def _resume_path(layout: ExperimentLayout) -> Path:
-    return layout.root / "_work" / "native_resume.pt"
+_WORK_DIRECTORY = ".fge_work"
+_RESUME_NAME = "native_resume.pt"
+_WORK_DIRECTORY_FLAGS = (
+    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+)
+_WORK_FILE_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _assert_safe_project_component(config: FGEConfig) -> str:
+    try:
+        project = config.project.name
+    except AttributeError as exc:
+        raise HardFailure("training project is incomplete") from exc
+    if (
+        not isinstance(project, str)
+        or not project
+        or project in {".", ".."}
+        or Path(project).name != project
+        or "/" in project
+        or "\\" in project
+    ):
+        raise HardFailure("training project name is not a safe path component")
+    return project
+
+
+_SAFE_WORK_PRIMITIVES = (
+    all(operation in os.supports_dir_fd for operation in (os.open, os.mkdir, os.rename))
+    and hasattr(os, "O_DIRECTORY")
+    and hasattr(os, "O_NOFOLLOW")
+)
+
+
+def _assert_work_primitives() -> None:
+    if not _SAFE_WORK_PRIMITIVES:
+        raise HardFailure(
+            "race-safe external work directory operations are unavailable"
+        )
+
+
+def _open_directory_component(parent_fd: int, component: str, *, create: bool) -> int:
+    try:
+        return os.open(component, _WORK_DIRECTORY_FLAGS, dir_fd=parent_fd)
+    except FileNotFoundError:
+        if not create:
+            raise
+        try:
+            os.mkdir(component, 0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+        return os.open(component, _WORK_DIRECTORY_FLAGS, dir_fd=parent_fd)
+
+
+def _open_output_root(config: FGEConfig, *, create: bool) -> int:
+    _assert_work_primitives()
+    try:
+        output_root = Path(config.paths.output_root).absolute()
+    except AttributeError as exc:
+        raise HardFailure("training output root is incomplete") from exc
+    if not output_root.is_absolute():
+        raise HardFailure("training output root must be absolute")
+    parts = output_root.parts
+    if not parts or parts[0] != output_root.anchor:
+        raise HardFailure("training output root has no trusted filesystem anchor")
+    current = os.open(output_root.anchor, _WORK_DIRECTORY_FLAGS)
+    try:
+        for component in parts[1:]:
+            child = _open_directory_component(current, component, create=create)
+            os.close(current)
+            current = child
+        return current
+    except BaseException:
+        os.close(current)
+        raise
+
+
+def _open_work_directory(config: FGEConfig, *, create: bool) -> int:
+    project = _assert_safe_project_component(config)
+    output_fd: int | None = None
+    work_fd: int | None = None
+    try:
+        output_fd = _open_output_root(config, create=create)
+        work_fd = _open_directory_component(output_fd, _WORK_DIRECTORY, create=create)
+        project_fd = _open_directory_component(work_fd, project, create=create)
+        return project_fd
+    except (FileNotFoundError, HardFailure):
+        raise
+    except OSError as exc:
+        raise HardFailure("external FGE work directory is unsafe") from exc
+    finally:
+        if work_fd is not None:
+            os.close(work_fd)
+        if output_fd is not None:
+            os.close(output_fd)
 
 
 def _resume_identity(runtime: TrainingRuntime) -> dict[str, str]:
@@ -156,109 +248,85 @@ def _resume_identity(runtime: TrainingRuntime) -> dict[str, str]:
 
 
 def _assert_resume_identity(
-    layout: ExperimentLayout, runtime: TrainingRuntime, enabled: bool
+    config: FGEConfig, runtime: TrainingRuntime, enabled: bool
 ) -> None:
     if not enabled:
         return
-    path = _resume_path(layout)
-    if not path.exists():
-        return
+    work_fd: int | None = None
+    resume_fd: int | None = None
     try:
-        state = torch.load(path, map_location="cpu", weights_only=True)
+        work_fd = _open_work_directory(config, create=False)
+        resume_fd = os.open(_RESUME_NAME, _WORK_FILE_FLAGS, dir_fd=work_fd)
+        if not stat.S_ISREG(os.fstat(resume_fd).st_mode):
+            raise HardFailure("native resume state is not a regular file")
+        with os.fdopen(resume_fd, "rb", closefd=False) as handle:
+            state = torch.load(handle, map_location="cpu", weights_only=True)
+    except FileNotFoundError:
+        return
+    except HardFailure:
+        raise
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise HardFailure("native resume state cannot be read") from exc
+    finally:
+        if resume_fd is not None:
+            os.close(resume_fd)
+        if work_fd is not None:
+            os.close(work_fd)
     if not isinstance(state, Mapping) or state.get(
         "resume_identity"
     ) != _resume_identity(runtime):
         raise HardFailure("resume identity does not match config/code/base/data")
 
 
-def _save_resume(
-    layout: ExperimentLayout, runtime: TrainingRuntime, global_step: int
-) -> None:
-    assert_safe_result_path(layout.root, _resume_path(layout))
-    atomic_torch_save(
-        _resume_path(layout),
+def _save_resume(config: FGEConfig, runtime: TrainingRuntime, global_step: int) -> None:
+    payload = io.BytesIO()
+    torch.save(
         {"resume_identity": _resume_identity(runtime), "global_step": global_step},
+        payload,
     )
-
-
-_STABLE_CLEANUP_DESCRIPTORS = (
-    all(
-        operation in os.supports_dir_fd
-        for operation in (os.open, os.rename, os.stat, os.unlink, os.rmdir)
-    )
-    and hasattr(os, "O_DIRECTORY")
-    and hasattr(os, "O_NOFOLLOW")
-)
-
-
-def _stable_cleanup_descriptors_available() -> bool:
-    return _STABLE_CLEANUP_DESCRIPTORS
-
-
-def _consume_resume_after_success(
-    layout: ExperimentLayout, runtime: TrainingRuntime
-) -> None:
-    """Remove only this successful run's authenticated private resume state."""
-    path = _resume_path(layout)
-    assert_safe_result_path(layout.root, path)
-    if not _stable_cleanup_descriptors_available():
-        raise HardFailure("race-safe directory descriptor cleanup is unavailable")
-
-    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    file_flags = os.O_RDONLY | os.O_NOFOLLOW
-    root_fd: int | None = None
     work_fd: int | None = None
-    resume_fd: int | None = None
-    consumed = False
+    temporary_fd: int | None = None
+    temporary_name = f".native_resume.{secrets.token_hex(16)}.tmp"
     try:
-        root_fd = os.open(layout.root, directory_flags)
-        work_fd = os.open("_work", directory_flags, dir_fd=root_fd)
-        resume_fd = os.open("native_resume.pt", file_flags, dir_fd=work_fd)
-        authenticated = os.fstat(resume_fd)
-        if not stat.S_ISREG(authenticated.st_mode):
-            raise HardFailure("successful training resume state is missing or unsafe")
-        with os.fdopen(resume_fd, "rb", closefd=False) as handle:
-            state = torch.load(handle, map_location="cpu", weights_only=True)
-        if not isinstance(state, Mapping) or state.get(
-            "resume_identity"
-        ) != _resume_identity(runtime):
-            raise HardFailure("successful training resume identity differs")
-
-        quarantine = f".native_resume.consume.{secrets.token_hex(16)}"
+        work_fd = _open_work_directory(config, create=True)
+        try:
+            existing_fd = os.open(_RESUME_NAME, _WORK_FILE_FLAGS, dir_fd=work_fd)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise HardFailure("external FGE resume path is unsafe") from exc
+        else:
+            try:
+                if not stat.S_ISREG(os.fstat(existing_fd).st_mode):
+                    raise HardFailure("external FGE resume path is unsafe")
+            finally:
+                os.close(existing_fd)
+        temporary_fd = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=work_fd,
+        )
+        with os.fdopen(temporary_fd, "wb", closefd=False) as handle:
+            handle.write(payload.getvalue())
+            handle.flush()
+            os.fsync(temporary_fd)
         os.rename(
-            "native_resume.pt",
-            quarantine,
+            temporary_name,
+            _RESUME_NAME,
             src_dir_fd=work_fd,
             dst_dir_fd=work_fd,
         )
-        moved = os.stat(quarantine, dir_fd=work_fd, follow_symlinks=False)
-        if (moved.st_dev, moved.st_ino) != (
-            authenticated.st_dev,
-            authenticated.st_ino,
-        ):
-            raise HardFailure("successful training resume state changed")
-        os.unlink(quarantine, dir_fd=work_fd)
-        consumed = True
+        os.fsync(work_fd)
     except HardFailure:
         raise
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
-        raise HardFailure(
-            "successful training resume state cannot be consumed"
-        ) from exc
+        raise HardFailure("external FGE resume state cannot be written safely") from exc
     finally:
-        if resume_fd is not None:
-            os.close(resume_fd)
+        if temporary_fd is not None:
+            os.close(temporary_fd)
         if work_fd is not None:
             os.close(work_fd)
-        if consumed and root_fd is not None:
-            try:
-                os.rmdir("_work", dir_fd=root_fd)
-            except OSError:
-                pass
-        if root_fd is not None:
-            os.close(root_fd)
 
 
 def _assert_batch(result: object) -> TrainingBatchResult:
@@ -745,14 +813,14 @@ class PETTrainingRuntime:
 
 def train_fge(config: FGEConfig, *, runtime: TrainingRuntime | None = None) -> Path:
     """Train raw endpoint A3 members with one optimizer and validation-only EMA."""
-    if not _stable_cleanup_descriptors_available():
-        raise HardFailure("race-safe directory descriptor cleanup is unavailable")
+    _assert_safe_project_component(config)
+    _assert_work_primitives()
     if runtime is None:
         runtime = PETTrainingRuntime.from_config(config)
     if not isinstance(runtime, TrainingRuntime):
         raise HardFailure("training runtime does not implement the formal contract")
     layout = _layout(config)
-    _assert_resume_identity(layout, runtime, bool(config.training.resume))
+    _assert_resume_identity(config, runtime, bool(config.training.resume))
     audit = assert_readout_contract(runtime.model)
     frozen = frozen_fingerprint(runtime.model)
     trainable = [value for value in runtime.model.parameters() if value.requires_grad]
@@ -791,7 +859,7 @@ def train_fge(config: FGEConfig, *, runtime: TrainingRuntime | None = None) -> P
             _assert_validation(runtime.validate(use_ema=False))
             with ema.applied(runtime.model):
                 _assert_validation(runtime.validate(use_ema=True))
-            _save_resume(layout, runtime, global_step)
+            _save_resume(config, runtime, global_step)
 
         assert_frozen_unchanged(runtime.model, frozen)
         runtime.assert_frozen()
@@ -830,5 +898,4 @@ def train_fge(config: FGEConfig, *, runtime: TrainingRuntime | None = None) -> P
     )
     assert_safe_result_path(layout.root, layout.training_manifest)
     atomic_write_json(layout.training_manifest, manifest)
-    _consume_resume_after_success(layout, runtime)
     return layout.training_manifest
