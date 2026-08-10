@@ -111,6 +111,9 @@ def validate_prediction_payload(payload: Mapping[str, object]) -> PredictionShap
     K = len(member_ids)
     if K < 2:
         raise HardFailure("canonical prediction requires at least two members")
+    expected_member_ids = tuple(f"member_{index:03d}" for index in range(1, K + 1))
+    if member_ids != expected_member_ids:
+        raise HardFailure("member_ids must be contiguous canonical FGE IDs")
     structure_ids = _ordered_ids(payload["structure_ids"], "structure_ids", S)
     if tuple(sorted(structure_ids)) != structure_ids:
         raise HardFailure("structure_ids must be in canonical order")
@@ -257,9 +260,14 @@ def predict_members(config: object, *, runtime: object | None = None) -> Path:
         project_name = typed_config.project.name
         output_root = Path(typed_config.paths.output_root)
         expected_count = typed_config.fge.member_count
+        expected_test_data_sha256 = typed_config.identity.test_data_sha256
     except AttributeError as exc:
         raise HardFailure("predict_members requires an FGE configuration") from exc
-    if not isinstance(project_name, str) or not isinstance(expected_count, int):
+    if (
+        not isinstance(project_name, str)
+        or not isinstance(expected_count, int)
+        or not isinstance(expected_test_data_sha256, str)
+    ):
         raise HardFailure("predict_members requires a valid FGE configuration")
     layout = ExperimentLayout(output_root / project_name)
     member_ids = _manifest_member_ids(layout.training_manifest, expected_count)
@@ -277,6 +285,10 @@ def predict_members(config: object, *, runtime: object | None = None) -> Path:
     expected_identity = dataset_identity(typed_config)
     if not isinstance(expected_identity, DatasetIdentity):
         raise HardFailure("inference runtime returned an invalid dataset identity")
+    if expected_identity.content_sha256 != expected_test_data_sha256:
+        raise HardFailure("runtime dataset identity differs from configured test data")
+    expected_target_names = dict(expected_identity.target_names)
+    expected_units = dict(expected_identity.units)
     base = typed_runtime.load_base(typed_config)
     member_outputs: list[Mapping[str, object]] = []
     for member_id in member_ids:
@@ -288,6 +300,12 @@ def predict_members(config: object, *, runtime: object | None = None) -> Path:
             raise HardFailure(
                 "member inference structure IDs differ from dataset identity"
             )
+        if output["target_names"] != expected_target_names:
+            raise HardFailure(
+                "member inference target names differ from dataset identity"
+            )
+        if output["units"] != expected_units:
+            raise HardFailure("member inference units differ from dataset identity")
         if (
             not isinstance(output["energy_reference"], torch.Tensor)
             or not isinstance(output["forces_reference"], torch.Tensor)
@@ -295,14 +313,7 @@ def predict_members(config: object, *, runtime: object | None = None) -> Path:
             or output["forces_reference"].shape[0] != expected_identity.atom_count
         ):
             raise HardFailure("member inference shape differs from dataset identity")
-        if output["structure_ids"] != expected_identity.structure_ids:
-            raise HardFailure(
-                "member inference structure IDs differ from dataset identity"
-            )
-        if output["structure_ids"] != expected_identity.structure_ids:
-            raise HardFailure(
-                "member inference structure IDs differ from dataset identity"
-            )
+
         if member_outputs:
             _same_member_metadata(member_outputs[0], output)
         member_outputs.append(output)

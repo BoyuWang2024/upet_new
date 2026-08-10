@@ -59,34 +59,39 @@ def _sha256(value: object, label: str) -> str:
     return value
 
 
-def _sha_identity(value: object, label: str) -> None:
+def _sha_identity(value: object, label: str) -> str:
     if not isinstance(value, Mapping) or set(value) != {"sha256"}:
         raise HardFailure(f"{label} has an invalid schema")
-    _sha256(value["sha256"], f"{label}.sha256")
+    return _sha256(value["sha256"], f"{label}.sha256")
 
 
-def _config_resolved_identity(value: object) -> None:
+def _config_resolved_identity(value: object) -> dict[str, str]:
     if not isinstance(value, Mapping) or set(value) != {"paths"}:
         raise HardFailure("config_resolved has an invalid schema")
     paths = value["paths"]
     roles = ("base_checkpoint", "train_data", "val_data", "test_data")
     if not isinstance(paths, Mapping) or set(paths) != set(roles):
         raise HardFailure("config_resolved.paths has an invalid schema")
+    result: dict[str, str] = {}
     for role in roles:
         identity = paths[role]
         if not isinstance(identity, Mapping) or set(identity) != {"role", "sha256"}:
             raise HardFailure("config_resolved path identity has an invalid schema")
         if identity["role"] != role:
             raise HardFailure("config_resolved path role is invalid")
-        _sha256(identity["sha256"], f"config_resolved.paths.{role}.sha256")
+        result[role] = _sha256(
+            identity["sha256"], f"config_resolved.paths.{role}.sha256"
+        )
+    return result
 
 
-def _data_identities(value: object) -> None:
+def _data_identities(value: object) -> dict[str, str]:
     roles = ("train", "val", "test")
     if not isinstance(value, Mapping) or set(value) != set(roles):
         raise HardFailure("data_identities has an invalid schema")
-    for role in roles:
-        _sha_identity(value[role], f"data_identities.{role}")
+    return {
+        role: _sha_identity(value[role], f"data_identities.{role}") for role in roles
+    }
 
 
 def _scientific_flags(value: object) -> None:
@@ -188,10 +193,15 @@ def build_training_manifest(
     ):
         _json_safe(value, label)
         _forbid_provenance(value)
-    _config_resolved_identity(config_resolved)
+    path_hashes = _config_resolved_identity(config_resolved)
     _sha_identity(config_identity, "config_identity")
-    _sha_identity(checkpoint_identity, "checkpoint_identity")
-    _data_identities(data_identities)
+    checkpoint_sha256 = _sha_identity(checkpoint_identity, "checkpoint_identity")
+    data_sha256 = _data_identities(data_identities)
+    if path_hashes["base_checkpoint"] != checkpoint_sha256:
+        raise HardFailure("base checkpoint path SHA differs from checkpoint identity")
+    for split in ("train", "val", "test"):
+        if path_hashes[f"{split}_data"] != data_sha256[split]:
+            raise HardFailure("data path SHA differs from data identity")
     if model_contract != {
         "readout_tensor_count": 12,
         "readout_parameter_count": 13338,
@@ -298,14 +308,29 @@ def build_prediction_manifest(
 def _default_formal_artifacts(root: Path) -> dict[str, Path]:
     roles = {
         "config_resolved.yaml": "config_resolved",
+        "preflight/train.json": "preflight_train",
+        "preflight/predict.json": "preflight_predict",
+        "preflight/evaluate.json": "preflight_evaluate",
+        "training/manifest.json": "training_manifest",
+        "prediction/manifest.json": "prediction_manifest",
         "prediction/test_raw.pt": "prediction",
+        "evaluation/legacy_equal_weight/ensemble.pt": "ensemble",
+        "evaluation/legacy_equal_weight/uncertainty.pt": "uncertainty",
+        "evaluation/legacy_equal_weight/metrics.json": "metrics",
+        "evaluation/legacy_equal_weight/report.md": "report",
         "validation.json": "validation",
     }
-    return {
+    artifacts = {
         role: root / relative
         for relative, role in roles.items()
         if (root / relative).is_file()
     }
+    members_directory = root / "training" / "members"
+    if members_directory.is_dir():
+        for member in sorted(members_directory.glob("member_*.pt")):
+            if re.fullmatch(r"member_\d{3}\.pt", member.name):
+                artifacts[f"training_{member.stem}"] = member
+    return artifacts
 
 
 def build_result_manifest(

@@ -330,3 +330,74 @@ def test_training_manifest_rejects_incomplete_or_noncanonical_contract_subtrees(
 
     with pytest.raises(HardFailure):
         _build_training(values, _identity("5" * 40))
+
+
+@pytest.mark.parametrize(
+    ("path_role", "identity_role"),
+    [
+        ("base_checkpoint", "checkpoint"),
+        ("train_data", "train"),
+        ("val_data", "val"),
+        ("test_data", "test"),
+    ],
+)
+def test_training_manifest_rejects_path_identity_sha_cross_binding_mismatch(
+    path_role: str, identity_role: str
+) -> None:
+    """Sanitized logical paths must bind to their declared SHA identities."""
+    values = _training_inputs()
+    config = cast(dict[str, object], values["config_resolved"])
+    paths = cast(dict[str, object], config["paths"])
+    path_identity = cast(dict[str, object], paths[path_role])
+    path_identity["sha256"] = "f" * 64
+    if identity_role == "checkpoint":
+        assert path_role == "base_checkpoint"
+    else:
+        data_identities = cast(dict[str, object], values["data_identities"])
+        assert (
+            path_identity["sha256"]
+            != cast(dict[str, object], data_identities[identity_role])["sha256"]
+        )
+
+    with pytest.raises(HardFailure):
+        _build_training(values, _identity("5" * 40))
+
+
+def test_result_manifest_inventories_the_complete_canonical_formal_tree(
+    tmp_path: Path,
+) -> None:
+    """Default inventory includes every formal artifact and no runtime residue."""
+    formal_paths = [
+        "config_resolved.yaml",
+        "preflight/train.json",
+        "preflight/predict.json",
+        "preflight/evaluate.json",
+        "training/manifest.json",
+        "training/members/member_001.pt",
+        "prediction/manifest.json",
+        "prediction/test_raw.pt",
+        "evaluation/legacy_equal_weight/ensemble.pt",
+        "evaluation/legacy_equal_weight/uncertainty.pt",
+        "evaluation/legacy_equal_weight/metrics.json",
+        "evaluation/legacy_equal_weight/report.md",
+        "validation.json",
+    ]
+    for relative in formal_paths:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(relative.encode("utf-8"))
+    (tmp_path / "result_manifest.json").write_text("completion\n", encoding="utf-8")
+    (tmp_path / "_work").mkdir()
+    (tmp_path / "_work" / "resume.pt").write_bytes(b"resume")
+    (tmp_path / ".scratch").write_text("temporary\n", encoding="utf-8")
+
+    manifest = build_result_manifest(
+        root=tmp_path,
+        project_name="upet_fge_full",
+        artifact_writer_code_identity=_identity("1" * 40),
+        validator_code_identity=_identity("2" * 40),
+    )
+
+    assert [artifact["path"] for artifact in _artifacts(manifest)] == sorted(
+        formal_paths
+    )

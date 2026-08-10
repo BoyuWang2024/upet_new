@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -17,6 +18,7 @@ from Uncertainty_Quantification.FGE.fge import (
     PredictionShape,
     atomic_write_json,
     canonical_prediction,
+    predict_members,
     validate_prediction_payload,
 )
 
@@ -83,6 +85,97 @@ def _payload_tensor(payload: dict[str, object], name: str) -> torch.Tensor:
     value = payload[name]
     assert isinstance(value, torch.Tensor)
     return value
+
+
+def _standard_dataset_identity(
+    *,
+    content_sha256: str = "a" * 64,
+    target_names: tuple[tuple[str, str], ...] = (
+        ("energy", "energy"),
+        ("forces", "non_conservative_forces"),
+        ("stress", "non_conservative_stress"),
+    ),
+    units: tuple[tuple[str, str], ...] = (
+        ("energy", "eV"),
+        ("forces", "eV/angstrom"),
+        ("stress", "eV/angstrom^3"),
+    ),
+) -> DatasetIdentity:
+    return DatasetIdentity(
+        split="test",
+        structure_ids=("structure_000", "structure_001"),
+        structure_count=2,
+        atom_count=3,
+        content_sha256=content_sha256,
+        target_names=target_names,
+        units=units,
+    )
+
+
+def _literal_member_output() -> dict[str, object]:
+    payload = _canonical_payload()
+    return {
+        "energy": _payload_tensor(payload, "energy_prediction")[0].clone(),
+        "forces": _payload_tensor(payload, "forces_prediction")[0].clone(),
+        "stress": _payload_tensor(payload, "stress_prediction")[0].clone(),
+        "energy_reference": _payload_tensor(payload, "energy_reference").clone(),
+        "forces_reference": _payload_tensor(payload, "forces_reference").clone(),
+        "stress_reference": _payload_tensor(payload, "stress_reference").clone(),
+        "n_atoms": _payload_tensor(payload, "n_atoms").clone(),
+        "structure_offsets": _payload_tensor(payload, "structure_offsets").clone(),
+        "structure_ids": ("structure_000", "structure_001"),
+        "atomic_numbers": _payload_tensor(payload, "atomic_numbers").clone(),
+        "structure_mapping": _payload_tensor(payload, "structure_mapping").clone(),
+        "target_names": {
+            "energy": "energy",
+            "forces": "non_conservative_forces",
+            "stress": "non_conservative_stress",
+        },
+        "units": {
+            "energy": "eV",
+            "forces": "eV/angstrom",
+            "stress": "eV/angstrom^3",
+        },
+    }
+
+
+class _LiteralRuntime:
+    def __init__(self, identity: DatasetIdentity) -> None:
+        self.identity = identity
+
+    def load_base(self, config: object) -> object:
+        del config
+        return object()
+
+    def restore_and_apply(self, base: object, member_id: str) -> None:
+        del base, member_id
+
+    def dataset_identity(self, config: object) -> DatasetIdentity:
+        del config
+        return self.identity
+
+    def infer_member(
+        self, base: object, member_id: str, config: object
+    ) -> dict[str, object]:
+        del base, member_id, config
+        return _literal_member_output()
+
+
+def _prediction_config(tmp_path: Path, *, test_data_sha256: str) -> FGEConfig:
+    root = tmp_path / "upet_fge_full"
+    atomic_write_json(
+        root / "training" / "manifest.json",
+        {"members": [{"member_id": "member_001"}, {"member_id": "member_002"}]},
+    )
+    return cast(
+        FGEConfig,
+        SimpleNamespace(
+            project=SimpleNamespace(name="upet_fge_full"),
+            paths=SimpleNamespace(output_root=tmp_path),
+            fge=SimpleNamespace(member_count=2),
+            identity=SimpleNamespace(test_data_sha256=test_data_sha256),
+        ),
+    )
 
 
 def test_canonical_prediction_keeps_one_reference_and_exact_member_order() -> None:
@@ -283,6 +376,7 @@ def test_predict_members_uses_the_manifest_order_and_publishes_one_payload(
         project=SimpleNamespace(name="upet_fge_full"),
         paths=SimpleNamespace(output_root=tmp_path),
         fge=SimpleNamespace(member_count=2),
+        identity=SimpleNamespace(test_data_sha256="a" * 64),
     )
     runtime = FakeRuntime()
 
@@ -383,7 +477,73 @@ def test_predict_members_rejects_sorted_but_wrong_dataset_identity(
         project=SimpleNamespace(name="upet_fge_full"),
         paths=SimpleNamespace(output_root=tmp_path),
         fge=SimpleNamespace(member_count=2),
+        identity=SimpleNamespace(test_data_sha256="a" * 64),
     )
 
     with pytest.raises(HardFailure):
         predict_members(cast(FGEConfig, config), runtime=WrongIdentityRuntime())
+
+
+@pytest.mark.parametrize(
+    "member_ids",
+    [("member_002", "member_001"), ("member_001", "member_003")],
+)
+def test_prediction_payload_rejects_noncanonical_member_ids(
+    member_ids: tuple[str, str],
+) -> None:
+    """A standalone payload must use contiguous canonical FGE member IDs."""
+    payload = _canonical_payload()
+    payload["member_ids"] = member_ids
+
+    with pytest.raises(HardFailure):
+        validate_prediction_payload(payload)
+
+
+@pytest.mark.parametrize("mismatch", ["target_names", "units"])
+def test_predict_members_rejects_runtime_identity_metadata_mismatch(
+    tmp_path: Path, mismatch: str
+) -> None:
+    """Runtime output metadata must bind exactly to DatasetIdentity roles."""
+    target_names = (
+        ("energy", "energy"),
+        ("forces", "non_conservative_forces"),
+        ("stress", "non_conservative_stress"),
+    )
+    units = (
+        ("energy", "eV"),
+        ("forces", "eV/angstrom"),
+        ("stress", "eV/angstrom^3"),
+    )
+    if mismatch == "target_names":
+        target_names = (
+            ("energy", "different_energy"),
+            ("forces", "non_conservative_forces"),
+            ("stress", "non_conservative_stress"),
+        )
+    else:
+        units = (
+            ("energy", "kcal/mol"),
+            ("forces", "eV/angstrom"),
+            ("stress", "eV/angstrom^3"),
+        )
+
+    with pytest.raises(HardFailure):
+        predict_members(
+            _prediction_config(tmp_path, test_data_sha256="a" * 64),
+            runtime=_LiteralRuntime(
+                _standard_dataset_identity(target_names=target_names, units=units)
+            ),
+        )
+
+
+def test_predict_members_rejects_runtime_identity_content_sha_mismatch(
+    tmp_path: Path,
+) -> None:
+    """The runtime's expected test identity must match the config test-data SHA."""
+    with pytest.raises(HardFailure):
+        predict_members(
+            _prediction_config(tmp_path, test_data_sha256="a" * 64),
+            runtime=_LiteralRuntime(
+                _standard_dataset_identity(content_sha256="b" * 64)
+            ),
+        )
