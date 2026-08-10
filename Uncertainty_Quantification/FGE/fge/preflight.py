@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
+import stat
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -70,7 +72,10 @@ def _identity(config: FGEConfig) -> dict[str, Any]:
         "val_data": identity.val_data_sha256,
         "test_data": identity.test_data_sha256,
     }
-    for role, path in zip(expected_hashes, (base, train, val, test), strict=True):
+    _restart_state(base, expected_hashes["base_checkpoint"])
+    for role, path in zip(
+        ("train_data", "val_data", "test_data"), (train, val, test), strict=True
+    ):
         _fail_unless(
             path.is_file() and not path.is_symlink(), f"{role} is not a regular file"
         )
@@ -127,7 +132,6 @@ def _identity(config: FGEConfig) -> dict[str, Any]:
         )
     else:
         raise HardFailure("preflight project is invalid")
-    _restart_state(base)
     return {
         "inputs": expected_hashes,
         "targets": dict(_TARGETS),
@@ -138,11 +142,30 @@ def _identity(config: FGEConfig) -> dict[str, Any]:
     }
 
 
-def _restart_state(path: Path) -> None:
+def _restart_state(path: Path, expected_sha256: str) -> None:
+    candidate = Path(path).absolute()
+    for item in (candidate, *candidate.parents):
+        if item.is_symlink():
+            raise HardFailure(f"restart checkpoint path contains a symlink: {path}")
     try:
         import metatomic.torch  # noqa: F401
 
-        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(candidate, flags)
+        with os.fdopen(descriptor, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise HardFailure("restart checkpoint is not a regular file")
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+            if digest.hexdigest() != expected_sha256:
+                raise HardFailure(
+                    "base_checkpoint SHA256 does not match the configuration"
+                )
+            handle.seek(0)
+            checkpoint = torch.load(handle, map_location="cpu", weights_only=False)
+    except HardFailure:
+        raise
     except (OSError, RuntimeError, ValueError, TypeError, ImportError) as exc:
         raise HardFailure(f"unable to parse restart checkpoint: {path}") from exc
     _fail_unless(

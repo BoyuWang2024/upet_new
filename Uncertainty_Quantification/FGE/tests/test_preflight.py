@@ -163,27 +163,53 @@ def test_native_train_preflight_checks_runtime_basis_without_compute(
     assert train_report.is_file()
 
 
-def test_restart_preflight_uses_trusted_full_checkpoint_deserialization(
+def test_restart_preflight_hashes_and_loads_the_same_open_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Authenticated metatrain checkpoints may contain TorchScript metadata."""
+    """A pathname swap after authentication cannot switch the unsafe payload."""
     from Uncertainty_Quantification.FGE.fge import preflight
 
     checkpoint = tmp_path / "base.ckpt"
-    checkpoint.write_bytes(b"authenticated by the caller")
-    calls: list[tuple[Path, object, bool]] = []
+    trusted = b"authenticated checkpoint bytes"
+    checkpoint.write_bytes(trusted)
+    replacement = tmp_path / "replacement.ckpt"
+    replacement.write_bytes(b"unauthenticated replacement")
+    calls: list[tuple[object, object, bool]] = []
 
-    def load(path: Path, *, map_location: object, weights_only: bool) -> object:
-        calls.append((path, map_location, weights_only))
-        if weights_only:
-            raise AssertionError("real UPET checkpoints are not weights-only archives")
+    def load(handle: object, *, map_location: object, weights_only: bool) -> object:
+        calls.append((handle, map_location, weights_only))
+        replacement.replace(checkpoint)
+        assert hasattr(handle, "read")
+        assert handle.read() == trusted  # type: ignore[union-attr]
         return {"model_state_dict": {}}
 
     monkeypatch.setattr(preflight.torch, "load", load)
 
-    preflight._restart_state(checkpoint)
+    preflight._restart_state(checkpoint, hashlib.sha256(trusted).hexdigest())
 
-    assert calls == [(checkpoint, "cpu", False)]
+    assert len(calls) == 1
+    assert calls[0][0] is not checkpoint
+    assert calls[0][1:] == ("cpu", False)
+
+
+def test_restart_preflight_rejects_a_symlinked_input_ancestor(tmp_path: Path) -> None:
+    """Checkpoint authentication never traverses an existing symlink ancestor."""
+    from Uncertainty_Quantification.FGE.fge import preflight
+
+    real = tmp_path / "real"
+    real.mkdir()
+    checkpoint = real / "base.ckpt"
+    checkpoint.write_bytes(b"checkpoint")
+    linked = tmp_path / "linked"
+    try:
+        linked.symlink_to(real, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+
+    with pytest.raises(HardFailure, match="symlink"):
+        preflight._restart_state(
+            linked / "base.ckpt", hashlib.sha256(b"checkpoint").hexdigest()
+        )
 
 
 @pytest.mark.parametrize(

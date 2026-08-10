@@ -411,3 +411,54 @@ def test_native_pet_runtime_runs_one_n20_batch_validation_and_member_reload(
     member_path = tmp_path / "member_001.pt"
     torch.save(pack_member(runtime.model, 1, 1, 1, SHA_BASE), member_path)
     assert runtime.reload_and_smoke(member_path)
+
+
+def test_success_cleanup_rejects_symlinked_work_ancestor(tmp_path: Path) -> None:
+    """Successful cleanup must never unlink a matching file outside the result root."""
+    from Uncertainty_Quantification.FGE.fge.artifacts import ExperimentLayout
+    from Uncertainty_Quantification.FGE.fge.training import (
+        _consume_resume_after_success,
+    )
+
+    root = tmp_path / "result"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    resume = outside / "native_resume.pt"
+    runtime = _TorchRuntime(batches=4)
+    torch.save({"resume_identity": runtime.resume_identity()}, resume)
+    try:
+        (root / "_work").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+
+    with pytest.raises(HardFailure, match="symlink"):
+        _consume_resume_after_success(ExperimentLayout(root), runtime)
+
+    assert resume.is_file()
+
+
+def test_success_cleanup_ignores_empty_directory_removal_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A benign rmdir race cannot reverse an already published training success."""
+    from Uncertainty_Quantification.FGE.fge.artifacts import ExperimentLayout
+    from Uncertainty_Quantification.FGE.fge.training import (
+        _consume_resume_after_success,
+    )
+
+    root = tmp_path / "result"
+    work = root / "_work"
+    work.mkdir(parents=True)
+    resume = work / "native_resume.pt"
+    runtime = _TorchRuntime(batches=4)
+    torch.save({"resume_identity": runtime.resume_identity()}, resume)
+
+    def raced_rmdir(_: Path) -> None:
+        raise OSError("directory changed concurrently")
+
+    monkeypatch.setattr(Path, "rmdir", raced_rmdir)
+
+    _consume_resume_after_success(ExperimentLayout(root), runtime)
+
+    assert not resume.exists()

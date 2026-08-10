@@ -185,9 +185,11 @@ def _consume_resume_after_success(
 ) -> None:
     """Remove only this successful run's authenticated private resume state."""
     path = _resume_path(layout)
+    assert_safe_result_path(layout.root, path)
     if path.is_symlink() or not path.is_file():
         raise HardFailure("successful training resume state is missing or unsafe")
     try:
+        before = path.stat(follow_symlinks=False)
         state = torch.load(path, map_location="cpu", weights_only=True)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise HardFailure("successful training resume state cannot be read") from exc
@@ -195,13 +197,23 @@ def _consume_resume_after_success(
         "resume_identity"
     ) != _resume_identity(runtime):
         raise HardFailure("successful training resume identity differs")
+    assert_safe_result_path(layout.root, path)
+    try:
+        current = path.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise HardFailure("successful training resume state changed") from exc
+    if (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino):
+        raise HardFailure("successful training resume state changed")
     try:
         path.unlink()
-        work = path.parent
-        if not any(work.iterdir()):
-            work.rmdir()
     except OSError as exc:
         raise HardFailure("successful training resume state cannot be removed") from exc
+    work = path.parent
+    try:
+        if not any(work.iterdir()):
+            work.rmdir()
+    except OSError:
+        pass
 
 
 def _assert_batch(result: object) -> TrainingBatchResult:
