@@ -70,6 +70,17 @@ def test_load_bundle_selects_restart_state_and_passes_explicit_load_options(
     assert bundle.model_state_dict is not raw["best_model_state_dict"]
 
 
+def test_load_bundle_round_trips_actual_checkpoint_file(tmp_path: Path) -> None:
+    from Uncertainty_Quantification.FGE.fge.checkpoint import load_checkpoint_bundle
+
+    path = tmp_path / "checkpoint.ckpt"
+    raw = _raw_checkpoint()
+    torch.save(raw, path)
+    bundle = load_checkpoint_bundle(path)
+    assert torch.equal(bundle.model_state_dict["weight"], torch.tensor([1.0]))
+    assert tuple(term.name for term in bundle.loss_contract.terms) == LOSS_NAMES
+
+
 def test_recover_loss_contract_preserves_exact_five_term_configuration() -> None:
     from Uncertainty_Quantification.FGE.fge.checkpoint import recover_loss_contract
 
@@ -128,6 +139,20 @@ def test_loss_contract_requires_exact_term_keys(section: str, mutation: str) -> 
     else:
         mapping["obsolete"] = 1.0
 
+    with pytest.raises(HardFailure, match="loss contract"):
+        recover_loss_contract(raw)
+
+
+@pytest.mark.parametrize("mutation", ["competing_loss", "obsolete_huber_key"])
+def test_loss_contract_rejects_extra_loss_type_and_huber_keys(mutation: str) -> None:
+    from Uncertainty_Quantification.FGE.fge.checkpoint import recover_loss_contract
+
+    raw = _raw_checkpoint()
+    loss_type = raw["train_hypers"]["loss"]["type"]  # type: ignore[index]
+    if mutation == "competing_loss":
+        loss_type["mae"] = {}  # type: ignore[index]
+    else:
+        loss_type["huber"]["legacy_delta"] = 0.1  # type: ignore[index]
     with pytest.raises(HardFailure, match="loss contract"):
         recover_loss_contract(raw)
 

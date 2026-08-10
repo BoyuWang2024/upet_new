@@ -157,7 +157,10 @@ def frozen_fingerprint(model: torch.nn.Module) -> tuple[TensorFingerprint, ...]:
         for name, tensor in _named_parameters(model)
         if not _is_readout(name)
     ]
-    items.extend(("buffer", name, tensor) for name, tensor in model.named_buffers())
+    items.extend(
+        ("buffer", name, tensor)
+        for name, tensor in model.named_buffers(remove_duplicate=False)
+    )
     items.sort(key=lambda item: (item[1], item[0]))
     return tuple(
         TensorFingerprint(
@@ -238,7 +241,7 @@ def _require_mapping(value: object, label: str) -> Mapping[object, object]:
 
 
 def load_member(
-    path: Path, base_sha256: str, expected_names: tuple[str, ...]
+    path: Path, base_sha256: str, expected_names: ReadoutAudit | tuple[str, ...]
 ) -> MemberPayload:
     """Load and strictly validate a CPU A3 payload with safe deserialization."""
 
@@ -260,18 +263,30 @@ def load_member(
     cycle = _positive_int(raw["cycle"], "cycle")
     global_step = _positive_int(raw["global_step"], "global_step", allow_zero=True)
 
-    if len(expected_names) != len(set(expected_names)):
-        raise HardFailure("expected_names contains duplicates")
+    expected_shapes: tuple[tuple[int, ...], ...] | None = None
+    expected_dtypes: tuple[str, ...] | None = None
+    if isinstance(expected_names, ReadoutAudit):
+        expected_shapes = expected_names.shapes
+        expected_dtypes = expected_names.dtypes
+        expected_names = expected_names.names
+    if (
+        len(expected_names) != READOUT_TENSOR_COUNT
+        or len(expected_names) != len(set(expected_names))
+        or any(not _is_readout(name) for name in expected_names)
+    ):
+        raise HardFailure("expected_names is not the formal readout contract")
     entries_object = raw["tensors"]
     if not isinstance(entries_object, Sequence) or isinstance(
         entries_object, (str, bytes)
     ):
         raise HardFailure("member tensors must be a sequence")
-    if len(entries_object) != len(expected_names):
+    if len(entries_object) != READOUT_TENSOR_COUNT:
         raise HardFailure("member tensor count does not match expected_names")
 
     tensors: list[MemberTensor] = []
-    for expected_name, entry_object in zip(expected_names, entries_object, strict=True):
+    for index, (expected_name, entry_object) in enumerate(
+        zip(expected_names, entries_object, strict=True)
+    ):
         entry = _require_mapping(entry_object, "member tensor entry")
         if set(entry) != _TENSOR_KEYS:
             raise HardFailure("member tensor has missing or unexpected schema keys")
@@ -293,16 +308,20 @@ def load_member(
         shape = tuple(shape_object)
         if not isinstance(value, torch.Tensor):
             raise HardFailure(f"member tensor {name} value is not a tensor")
-        if value.device.type != "cpu":
-            raise HardFailure(f"member tensor {name} is not on CPU")
-        if not value.is_floating_point():
-            raise HardFailure(f"member tensor {name} is not floating point")
+        if value.device.type != "cpu" or not value.is_floating_point():
+            raise HardFailure(f"member tensor {name} must be a floating CPU tensor")
         if str(value.dtype) != dtype or tuple(value.shape) != shape:
             raise HardFailure(f"member tensor {name} dtype or shape metadata mismatch")
+        if expected_shapes is not None and shape != expected_shapes[index]:
+            raise HardFailure(f"member tensor {name} shape differs from readout audit")
+        if expected_dtypes is not None and dtype != expected_dtypes[index]:
+            raise HardFailure(f"member tensor {name} dtype differs from readout audit")
         if not bool(torch.isfinite(value).all()):
             raise HardFailure(f"member tensor {name} is not finite")
         tensors.append(MemberTensor(name, dtype, shape, value.detach().clone()))
 
+    if sum(tensor.value.numel() for tensor in tensors) != READOUT_SCALAR_COUNT:
+        raise HardFailure("member tensors do not have the formal scalar count")
     if tuple(tensor.name for tensor in tensors) != expected_names:
         raise HardFailure(
             "member contains missing, duplicate, extra, or reordered names"
@@ -341,6 +360,27 @@ def apply_member(
     if tuple(tensor.name for tensor in member.tensors) != audit.names:
         raise HardFailure("member names do not exactly match model readout names")
     parameters = dict(_named_parameters(model))
+    for replacement in member.tensors:
+        destination = parameters[replacement.name]
+        if replacement.dtype != str(destination.dtype) or replacement.shape != tuple(
+            destination.shape
+        ):
+            raise HardFailure(
+                f"member tensor {replacement.name} dtype or shape mismatch"
+            )
+        if (
+            replacement.value.device.type != "cpu"
+            or replacement.value.dtype != destination.dtype
+        ):
+            raise HardFailure(f"member tensor {replacement.name} value dtype mismatch")
+        if tuple(replacement.value.shape) != tuple(destination.shape):
+            raise HardFailure(f"member tensor {replacement.name} value shape mismatch")
+        if not replacement.value.is_floating_point() or not bool(
+            torch.isfinite(replacement.value).all()
+        ):
+            raise HardFailure(
+                f"member tensor {replacement.name} must be finite floating point"
+            )
     with torch.no_grad():
         for replacement in member.tensors:
             destination = parameters[replacement.name]
@@ -368,7 +408,7 @@ def apply_member(
 
     current_state = model.state_dict()
     for name, base in base_state.items():
-        if not _is_readout(name) and not torch.equal(current_state[name].cpu(), base):
+        if name not in audit.names and not torch.equal(current_state[name].cpu(), base):
             raise HardFailure(
                 f"frozen state {name} differs from base after member apply"
             )

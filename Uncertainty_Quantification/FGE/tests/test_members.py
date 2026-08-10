@@ -8,10 +8,16 @@ import pytest
 import torch
 
 from Uncertainty_Quantification.FGE.fge.errors import HardFailure
+from Uncertainty_Quantification.FGE.fge.members import ReadoutAudit
 
 
 BASE_SHA = "a" * 64
 OTHER_SHA = "b" * 64
+READOUT_NAMES = tuple(
+    [f"node_last_layers.{index}" for index in range(6)]
+    + [f"edge_last_layers.{index}" for index in range(6)]
+)
+READOUT_SHAPES = ((1,),) * 11 + ((13_327,),)
 
 
 def test_task_three_interfaces_are_publicly_exported() -> None:
@@ -60,6 +66,27 @@ class TinyPET(torch.nn.Module):
         self.register_buffer("normalization", torch.tensor([4.0, 5.0]))
 
 
+class BufferAliasedTinyPET(TinyPET):
+    """TinyPET with qualified and aliased buffers that must stay frozen."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        shared = torch.tensor([8.0])
+        self.register_buffer("alias_source", shared)
+        self.register_buffer("alias_copy", shared)
+        self.node_last_layers.register_buffer("cached", torch.tensor([9.0]))
+
+
+class ReadoutBufferAliasedTinyPET(TinyPET):
+    """A frozen readout-qualified buffer sharing a readout tensor's storage."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.node_last_layers.register_buffer(
+            "shadow", self.node_last_layers[0].detach()
+        )
+
+
 def _base_state(model: torch.nn.Module) -> OrderedDict[str, torch.Tensor]:
     return OrderedDict(
         (name, tensor.detach().cpu().clone())
@@ -82,13 +109,34 @@ def _saved_payload(value: float = 7.0) -> dict[str, object]:
     return pack_member(_member_model(value), 1, 1, 40, BASE_SHA)
 
 
-def _load_payload(payload: dict[str, object], names: tuple[str, ...]):
+def _canonical_payload(value: float = 7.0) -> dict[str, object]:
+    """Hand-built A3 wire payload, intentionally independent of pack_member."""
+
+    return {
+        "schema_version": "upet.fge.member-delta.v1",
+        "member_id": 1,
+        "cycle": 1,
+        "global_step": 40,
+        "base_sha256": BASE_SHA,
+        "tensors": [
+            {
+                "name": name,
+                "dtype": "torch.float32",
+                "shape": list(shape),
+                "value": torch.full(shape, value),
+            }
+            for name, shape in zip(READOUT_NAMES, READOUT_SHAPES, strict=True)
+        ],
+    }
+
+
+def _load_payload(payload: dict[str, object], audit: ReadoutAudit | tuple[str, ...]):
     from Uncertainty_Quantification.FGE.fge import members
 
     original_load = torch.load
     try:
         torch.load = lambda *args, **kwargs: payload  # type: ignore[assignment]
-        return members.load_member(Path("literal.pt"), BASE_SHA, names)
+        return members.load_member(Path("literal.pt"), BASE_SHA, audit)
     finally:
         torch.load = original_load
 
@@ -342,3 +390,82 @@ def test_apply_member_rejects_mismatches(mutation: str) -> None:
         object.__setattr__(member.tensors[0], "value", torch.zeros(2))
     with pytest.raises(HardFailure):
         apply_member(model, base, member)
+
+
+def test_load_member_round_trips_actual_weights_only_file(tmp_path: Path) -> None:
+    from Uncertainty_Quantification.FGE.fge.members import load_member
+
+    path = tmp_path / "member.pt"
+    torch.save(_canonical_payload(-3.0), path)
+    member = load_member(path, BASE_SHA, READOUT_NAMES)
+    assert tuple(tensor.name for tensor in member.tensors) == READOUT_NAMES
+    assert torch.equal(member.tensors[-1].value, torch.full((13_327,), -3.0))
+
+
+@pytest.mark.parametrize("mutation", ["eleven_names", "wrong_shapes"])
+def test_load_member_requires_complete_readout_contract(mutation: str) -> None:
+    payload = _canonical_payload()
+    expected: ReadoutAudit | tuple[str, ...]
+    if mutation == "eleven_names":
+        entries = payload["tensors"]
+        assert isinstance(entries, list)
+        entries.pop()
+        expected = READOUT_NAMES[:-1]
+    else:
+        entries = payload["tensors"]
+        assert isinstance(entries, list)
+        entries[0]["shape"] = [2]
+        entries[0]["value"] = torch.full((2,), 7.0)
+        entries[-1]["shape"] = [13_326]
+        entries[-1]["value"] = torch.full((13_326,), 7.0)
+        from Uncertainty_Quantification.FGE.fge.members import assert_readout_contract
+
+        expected = assert_readout_contract(TinyPET())
+    with pytest.raises(HardFailure):
+        _load_payload(payload, expected)
+
+
+def test_apply_member_validates_all_replacements_before_readout_mutation() -> None:
+    from Uncertainty_Quantification.FGE.fge.members import apply_member
+
+    model = TinyPET()
+    base = _base_state(model)
+    member = _load_payload(_canonical_payload(7.0), READOUT_NAMES)
+    object.__setattr__(member.tensors[-1], "value", torch.full((13_327,), float("nan")))
+    with torch.no_grad():
+        model.node_last_layers[0].fill_(99.0)
+    with pytest.raises(HardFailure, match="finite"):
+        apply_member(model, base, member)
+    assert all(
+        torch.equal(value, base[name]) for name, value in model.state_dict().items()
+    )
+
+
+def test_apply_member_checks_readout_qualified_frozen_buffer_drift() -> None:
+    from Uncertainty_Quantification.FGE.fge.members import apply_member
+
+    model = ReadoutBufferAliasedTinyPET()
+    base = _base_state(model)
+    member = _load_payload(_canonical_payload(7.0), READOUT_NAMES)
+    with pytest.raises(HardFailure, match="frozen state"):
+        apply_member(model, base, member)
+
+
+def test_frozen_fingerprint_includes_aliased_and_readout_qualified_buffers() -> None:
+    from Uncertainty_Quantification.FGE.fge.members import (
+        assert_frozen_unchanged,
+        frozen_fingerprint,
+    )
+
+    model = BufferAliasedTinyPET()
+    expected = frozen_fingerprint(model)
+    buffer_names = tuple(item.name for item in expected if item.kind == "buffer")
+    assert buffer_names == (
+        "alias_copy",
+        "alias_source",
+        "node_last_layers.cached",
+        "normalization",
+    )
+    model.node_last_layers.cached.add_(1.0)
+    with pytest.raises(HardFailure, match="frozen state"):
+        assert_frozen_unchanged(model, expected)

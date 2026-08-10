@@ -94,6 +94,15 @@ def _exact_term_mapping(value: object, label: str) -> Mapping[object, object]:
     return mapping
 
 
+def _exact_keys(
+    mapping: Mapping[object, object], expected: set[str], label: str
+) -> None:
+    if set(mapping) != expected:
+        raise HardFailure(
+            f"invalid checkpoint loss contract: {label} has missing or unexpected keys"
+        )
+
+
 def recover_loss_contract(raw_checkpoint: object) -> LossContract:
     """Recover the exact scientific loss settings without defaults."""
 
@@ -103,7 +112,9 @@ def recover_loss_contract(raw_checkpoint: object) -> LossContract:
     )
     loss = _mapping(_required(train_hypers, "loss", "train_hypers"), "loss")
     loss_type = _mapping(_required(loss, "type", "loss"), "loss.type")
+    _exact_keys(loss_type, {"huber"}, "loss.type")
     huber = _mapping(_required(loss_type, "huber", "loss.type"), "loss.type.huber")
+    _exact_keys(huber, {"deltas"}, "loss.type.huber")
     deltas = _exact_term_mapping(
         _required(huber, "deltas", "loss.type.huber"), "loss.type.huber.deltas"
     )
