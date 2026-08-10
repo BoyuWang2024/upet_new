@@ -7,7 +7,7 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from ..fge.config import load_config
+from ..fge.config import FGEConfig, load_config
 from ..fge.errors import HardFailure
 
 
@@ -26,9 +26,9 @@ def build_parser(
 def run_stage(
     parser: argparse.ArgumentParser,
     argv: Sequence[str] | None,
-    stage: Callable[[object], object] | None = None,
+    stage: Callable[[FGEConfig], object] | None = None,
     *,
-    preflight: Callable[[object, str], object] | None = None,
+    preflight: Callable[[FGEConfig, str], object] | None = None,
 ) -> int:
     try:
         args = parser.parse_args(argv)

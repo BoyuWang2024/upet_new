@@ -46,4 +46,3 @@ def test_cli_returns_nonzero_for_a_hard_failure(
 
     assert _cli.run_stage(parser, ["--config", "fge.yaml"], stage=fail) == 2
     assert "intentional failure" in capsys.readouterr().err
-
