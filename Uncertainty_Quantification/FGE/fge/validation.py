@@ -199,8 +199,12 @@ def _identity(
         }
     except AttributeError as exc:
         raise HardFailure("validation scientific flags are invalid") from exc
+    scientific_flags = training.get("scientific_flags")
     _fail_unless(
-        training.get("scientific_flags") == expected_training_flags,
+        isinstance(scientific_flags, Mapping)
+        and set(scientific_flags) == set(expected_training_flags)
+        and all(type(value) is bool for value in scientific_flags.values())
+        and dict(scientific_flags) == expected_training_flags,
         "training scientific flags do not match configuration",
     )
     members = training.get("members")

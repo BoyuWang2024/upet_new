@@ -411,3 +411,22 @@ def test_canonical_preflight_binds_disk_resolved_configuration(
     resolved.write_text(json.dumps({"paths": {}}), encoding="utf-8")
     with pytest.raises(HardFailure):
         run_preflight(config, "predict", basis="canonical_artifacts")
+
+
+def test_canonical_preflight_rejects_non_boolean_training_scientific_flags(
+    tmp_path: Path,
+) -> None:
+    """JSON numeric truth values are not formal boolean scientific flags."""
+    from Uncertainty_Quantification.FGE.fge.preflight import run_preflight
+
+    config = _config(tmp_path)
+    run_preflight(config, "train")
+    prior = _write_predict_prior(config)
+    training = json.loads(prior.read_text(encoding="utf-8"))
+    flags = training["scientific_flags"]
+    assert isinstance(flags, dict)
+    flags["split_leakage"] = 0
+    prior.write_text(json.dumps(training), encoding="utf-8")
+
+    with pytest.raises(HardFailure):
+        run_preflight(config, "predict", basis="canonical_artifacts")

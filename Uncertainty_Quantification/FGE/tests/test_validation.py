@@ -584,3 +584,21 @@ def test_validation_binds_training_scientific_flags_to_configuration(
 
     with pytest.raises(HardFailure):
         validate_result(config, root, publish_completion=False)
+
+
+def test_validation_rejects_numeric_training_scientific_flags(
+    tmp_path: Path,
+) -> None:
+    """A JSON 0 cannot impersonate the boolean False scientific flag."""
+    from Uncertainty_Quantification.FGE.fge.errors import HardFailure
+    from Uncertainty_Quantification.FGE.fge.validation import validate_result
+
+    config, root = make_canonical_result(tmp_path)
+    training = _training(root)
+    flags = training["scientific_flags"]
+    assert isinstance(flags, dict)
+    flags["scientific_evaluation"] = 0
+    _write_training(root, training)
+
+    with pytest.raises(HardFailure):
+        validate_result(config, root, publish_completion=False)

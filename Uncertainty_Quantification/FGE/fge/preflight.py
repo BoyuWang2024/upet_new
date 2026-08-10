@@ -228,6 +228,23 @@ def _validate_training_prior(
         and training.get("config_identity") == _canonical_config_identity(sanitized),
         "training config identity is invalid",
     )
+    expected_flags = {
+        name: getattr(config.scientific.training, name)
+        for name in (
+            "path_feasibility_only",
+            "split_leakage",
+            "scientific_evaluation",
+            "inference_only",
+        )
+    }
+    flags = training.get("scientific_flags")
+    _fail_unless(
+        isinstance(flags, Mapping)
+        and set(flags) == set(expected_flags)
+        and all(type(value) is bool for value in flags.values())
+        and dict(flags) == expected_flags,
+        "training scientific flags are invalid",
+    )
     model_contract = training.get("model_contract")
     _fail_unless(
         model_contract
