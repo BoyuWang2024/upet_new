@@ -32,17 +32,14 @@ def sha256_file(path: str | Path) -> str:
 
 @contextmanager
 def _sibling_temporary_file(destination: Path) -> Iterator[Path]:
-    """Yield a same-filesystem temporary path and remove it on exit."""
+    """Yield a same-filesystem temporary path, retaining failures for audit."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, name = tempfile.mkstemp(
         prefix=f".{destination.name}.", dir=destination.parent
     )
     os.close(descriptor)
     temporary = Path(name)
-    try:
-        yield temporary
-    finally:
-        temporary.unlink(missing_ok=True)
+    yield temporary
 
 
 def _fsync(path: Path) -> None:

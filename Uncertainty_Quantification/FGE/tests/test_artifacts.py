@@ -99,7 +99,9 @@ def test_atomic_write_preserves_existing_destination_when_replace_fails(
         atomic_write_json(target, {"new": True})
 
     assert json.loads(target.read_text(encoding="utf-8")) == {"old": True}
-    assert list(tmp_path.iterdir()) == [target]
+    retained = [path for path in tmp_path.iterdir() if path != target]
+    assert len(retained) == 1
+    assert retained[0].name.startswith(f".{target.name}.")
 
 
 def test_normalize_artifact_path_returns_relative_posix_path(tmp_path: Path) -> None:
@@ -186,3 +188,35 @@ def test_formal_result_path_rejects_a_broken_destination_symlink(
 
     with pytest.raises(HardFailure):
         assert_safe_result_path(root, destination)
+
+
+def test_failed_atomic_write_never_deletes_through_swapped_ancestor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = tmp_path / "formal" / "training"
+    parent.mkdir(parents=True)
+    owned = parent.with_name(".owned_training")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = parent / "manifest.json"
+    observed: dict[str, Path] = {}
+
+    def swap_and_fail(source: os.PathLike[str], _destination: os.PathLike[str]) -> None:
+        temporary = Path(source)
+        os.rename(parent, owned)
+        parent.symlink_to(outside, target_is_directory=True)
+        external = outside / temporary.name
+        external.write_bytes(b"outside")
+        observed["temporary"] = temporary
+        observed["external"] = external
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(os, "replace", swap_and_fail)
+    with pytest.raises(OSError, match="replace failed"):
+        atomic_write_json(target, {"status": "unpublished"})
+
+    temporary = observed["temporary"]
+    external = observed["external"]
+    assert external.read_bytes() == b"outside"
+    assert (owned / temporary.name).is_file()
+    assert not target.exists()

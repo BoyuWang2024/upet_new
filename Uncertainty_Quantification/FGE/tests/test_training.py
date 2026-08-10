@@ -372,6 +372,7 @@ def test_failed_member_smoke_never_deletes_through_swapped_ancestor(
     assert (
         tmp_path / "upet_fge_n20_cpu" / "training" / ".owned_members" / "member_001.pt"
     ).is_file()
+    assert not (tmp_path / "upet_fge_n20_cpu" / "training" / "manifest.json").exists()
 
 
 def test_training_constructs_the_native_pet_runtime_when_not_injected(
