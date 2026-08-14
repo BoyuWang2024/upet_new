@@ -135,3 +135,6 @@ def scalar_rms_reductions(
             raise HardFailure("stress reduction layout mismatch")
         return np.sqrt(np.mean(np.square(array), axis=(1, 2)))
     raise HardFailure("uncertainty field must be energy, forces, or stress")
+
+
+from .uq_publication import UncertaintyPublication, compute_store_uncertainty  # noqa: E402

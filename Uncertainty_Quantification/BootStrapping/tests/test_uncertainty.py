@@ -73,3 +73,9 @@ def test_scalar_rms_reductions_follow_atom_layout() -> None:
     assert energy == pytest.approx(np.array([2.0, 3.0]))
     assert forces == pytest.approx(np.array([np.sqrt(25 / 3), 1.0, np.sqrt(12)]))
     assert stress == pytest.approx(np.array([np.sqrt(1 / 3), 1.0]))
+
+
+def test_compute_store_uncertainty_requires_publication_api() -> None:
+    from Uncertainty_Quantification.BootStrapping.bootstrap import uncertainty
+
+    assert callable(uncertainty.compute_store_uncertainty)
