@@ -42,8 +42,8 @@ def test_best_uses_raw_validation_and_pairs_same_epoch() -> None:
 
     assert result.best_epoch == 2
     assert result.history[1].raw_validation_loss == 0.2
-    assert result.best_raw["epoch"].item() == 2
-    assert result.best_ema["epoch"].item() == 2
+    assert set(result.best_raw) == set(runtime.model.state_dict())
+    assert set(result.best_ema) == set(runtime.model.state_dict())
 
 
 def test_resume_restores_optimizer_epoch_ema_and_rng() -> None:

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
+import pickle
 from pathlib import Path
 from typing import Literal, Mapping, cast
 
@@ -33,15 +35,41 @@ def _load_document(path: str | Path) -> tuple[Path, dict[str, object]]:
     checkpoint_path = Path(path).expanduser().resolve()
     try:
         document = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-    except (OSError, RuntimeError, ValueError, TypeError) as error:
-        raise HardFailure(
-            f"could not load checkpoint {checkpoint_path}: {error}"
-        ) from error
+    except (
+        OSError,
+        RuntimeError,
+        ValueError,
+        TypeError,
+        pickle.UnpicklingError,
+    ) as error:
+        try:
+            document = torch.load(
+                checkpoint_path, map_location="cpu", weights_only=False
+            )
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            TypeError,
+            pickle.UnpicklingError,
+        ) as fallback_error:
+            raise HardFailure(
+                f"could not load checkpoint {checkpoint_path}: {fallback_error}"
+            ) from error
     if not isinstance(document, dict):
         raise HardFailure("checkpoint root must be a mapping")
-    if document.get("schema") != CHECKPOINT_SCHEMA:
-        raise HardFailure(f"checkpoint schema must be {CHECKPOINT_SCHEMA}")
+    canonical = document.get("schema") == CHECKPOINT_SCHEMA
+    legacy = document.get("schema_version") == 1 and "raw_state" in document
+    if not canonical and not legacy:
+        raise HardFailure(
+            f"checkpoint must use {CHECKPOINT_SCHEMA} or the supported v1 PET schema"
+        )
     return checkpoint_path, cast(dict[str, object], document)
+
+
+def _branch_key(document: Mapping[str, object], mode: Literal["raw", "ema"]) -> str:
+    suffix = "state_dict" if document.get("schema") == CHECKPOINT_SCHEMA else "state"
+    return f"{mode}_{suffix}"
 
 
 def _state_dict(document: Mapping[str, object], key: str) -> dict[str, Tensor]:
@@ -53,10 +81,16 @@ def _state_dict(document: Mapping[str, object], key: str) -> dict[str, Tensor]:
         if not isinstance(name, str) or not isinstance(tensor, Tensor):
             raise HardFailure(f"checkpoint {key} must map strings to tensors")
         result[name] = tensor
+        if (torch.is_floating_point(tensor) or torch.is_complex(tensor)) and not bool(
+            torch.isfinite(tensor).all()
+        ):
+            raise HardFailure(f"checkpoint {key} contains non-finite tensor {name}")
     return result
 
 
-def audit_checkpoint(path: str | Path) -> CheckpointAudit:
+def audit_checkpoint(
+    path: str | Path, *, expected_parameter_count: int | None = None
+) -> CheckpointAudit:
     """Validate checkpoint branches and report inference/resume capabilities."""
 
     checkpoint_path, document = _load_document(path)
@@ -65,13 +99,15 @@ def audit_checkpoint(path: str | Path) -> CheckpointAudit:
         raise HardFailure("checkpoint epoch must be a non-negative integer")
     loss_value = document.get("validation_loss")
     if loss_value is not None and (
-        isinstance(loss_value, bool) or not isinstance(loss_value, (int, float))
+        isinstance(loss_value, bool)
+        or not isinstance(loss_value, (int, float))
+        or not math.isfinite(float(loss_value))
     ):
-        raise HardFailure("checkpoint validation_loss must be numeric or null")
+        raise HardFailure("checkpoint validation_loss must be finite numeric or null")
     validation_loss = None if loss_value is None else float(loss_value)
 
-    raw = _state_dict(document, "raw_state_dict")
-    ema = _state_dict(document, "ema_state_dict")
+    raw = _state_dict(document, _branch_key(document, "raw"))
+    ema = _state_dict(document, _branch_key(document, "ema"))
     raw_keys = tuple(sorted(raw))
     ema_keys = tuple(sorted(ema))
     if raw_keys != ema_keys:
@@ -83,7 +119,18 @@ def audit_checkpoint(path: str | Path) -> CheckpointAudit:
             )
     parameter_count = sum(raw[name].numel() for name in raw_keys)
     optimizer = document.get("optimizer_state_dict")
-    resume_ready = isinstance(optimizer, dict)
+    if (
+        expected_parameter_count is not None
+        and parameter_count != expected_parameter_count
+    ):
+        raise HardFailure(
+            "checkpoint trainable parameter count differs: "
+            f"expected {expected_parameter_count}, found {parameter_count}"
+        )
+    resume_ready = isinstance(optimizer, dict) and all(
+        key in document
+        for key in ("python_rng_state", "numpy_rng_state", "torch_rng_state")
+    )
     return CheckpointAudit(
         path=checkpoint_path,
         sha256=sha256_file(checkpoint_path),
@@ -106,5 +153,5 @@ def load_checkpoint_branch(
         raise HardFailure("checkpoint mode must be raw or ema")
     _, document = _load_document(path)
     audit_checkpoint(path)
-    state = _state_dict(document, f"{mode}_state_dict")
+    state = _state_dict(document, _branch_key(document, mode))
     return {name: tensor.detach().clone() for name, tensor in state.items()}

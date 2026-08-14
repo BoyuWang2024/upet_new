@@ -65,12 +65,6 @@ def _clone_state(state: Mapping[str, Tensor]) -> dict[str, Tensor]:
     return {name: tensor.detach().cpu().clone() for name, tensor in state.items()}
 
 
-def _marked_state(state: Mapping[str, Tensor], epoch: int) -> dict[str, Tensor]:
-    result = _clone_state(state)
-    result["epoch"] = torch.tensor(epoch, dtype=torch.int64)
-    return result
-
-
 class _EMA:
     def __init__(self, model: torch.nn.Module, decay: float) -> None:
         if not 0 < decay < 1:
@@ -155,8 +149,8 @@ def fit_runtime(
         if raw_loss < best_loss:
             best_loss = raw_loss
             best_epoch = epoch
-            best_raw = _marked_state(runtime.model.state_dict(), epoch)
-            best_ema = _marked_state(ema.shadow, epoch)
+            best_raw = _clone_state(runtime.model.state_dict())
+            best_ema = _clone_state(ema.shadow)
 
     if best_epoch == 0:
         raise HardFailure("training produced no best checkpoint")

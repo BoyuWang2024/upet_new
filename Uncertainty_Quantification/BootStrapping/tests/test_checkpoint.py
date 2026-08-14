@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import random
+import numpy as np
 
 import pytest
 import torch
@@ -24,6 +26,9 @@ def _save_checkpoint(
     }
     if include_optimizer:
         document["optimizer_state_dict"] = {"state": {}, "param_groups": []}
+        document["python_rng_state"] = random.getstate()
+        document["numpy_rng_state"] = np.random.get_state()
+        document["torch_rng_state"] = torch.get_rng_state()
     torch.save(document, path)
     return path
 

@@ -30,15 +30,15 @@ class MemberStore:
 
     @property
     def best(self) -> Path:
-        return self.checkpoints / "best.ckpt"
+        return self.checkpoints / "best.pt"
 
     @property
     def final(self) -> Path:
-        return self.checkpoints / "final.ckpt"
+        return self.checkpoints / "final.pt"
 
     @property
     def latest(self) -> Path:
-        return self.checkpoints / "latest.ckpt"
+        return self.checkpoints / "latest.pt"
 
 
 def decide_resume(store: MemberStore) -> ResumeDecision:

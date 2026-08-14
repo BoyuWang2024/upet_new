@@ -65,6 +65,8 @@ def convert_legacy_run(
         destination_path, source_path
     ):
         raise HardFailure("source and destination must be separate directory trees")
+    if _contains(source_path, audit_path):
+        raise HardFailure("audit_root must be outside the read-only source")
     if _contains(destination_path, audit_path):
         raise HardFailure("audit_root must be outside the formal destination")
     audit = inspect_legacy_run(source_path, config)
