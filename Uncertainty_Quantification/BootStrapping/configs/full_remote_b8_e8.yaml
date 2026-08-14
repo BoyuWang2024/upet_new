@@ -1,0 +1,43 @@
+schema_version: 1
+experiment:
+  name: upet-bootstrap-head-posttrain-v1
+  run_id: full_remote_b8_e8
+  output_root: ../outputs
+checkpoint:
+  base_path: ../../../data/pet-omatpes-l-v0.1.0.ckpt
+data:
+  train: ../../../data/matpes_train.extxyz
+  val: ../../../data/matpes_val.extxyz
+  test: ../../../data/matpes_test.extxyz
+  units: {energy: eV, forces: eV/Angstrom, stress: eV/Angstrom^3}
+bootstrap:
+  ensemble_size: 8
+  base_seed: 2026
+  sample_size: null
+  replacement: true
+  save_indices: true
+  save_oob: true
+training:
+  batch_size: 64
+  max_epochs: 8
+  trainable_head: pet_last_layers
+  optimizer: {name: Adam, learning_rate: 0.00003, weight_decay: 0.0}
+  scheduler: none
+  gradient_clip: 1.0
+  ema_decay: 0.999
+  device: cpu
+  precision: float32
+  num_workers: 0
+prediction:
+  splits: [val, test]
+  parameter_modes: [raw]
+  batch_size: 64
+  structure_chunk_size: 2000
+  device: cpu
+  num_workers: 0
+uncertainty:
+  parameter_modes: [raw]
+  ddof: 1
+  compute_std: true
+  compute_gmd: true
+  gmd_pairs: distinct_unordered
