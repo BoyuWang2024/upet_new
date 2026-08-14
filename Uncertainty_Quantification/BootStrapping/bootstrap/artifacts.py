@@ -9,12 +9,14 @@ import os
 import shutil
 import stat
 import tempfile
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import numpy as np
+import torch
 import yaml
 
 from .errors import HardFailure
@@ -88,9 +90,12 @@ def _publish_bytes(path: str | Path, payload: bytes) -> Path:
         try:
             os.link(temporary, destination)
         except FileExistsError:
-            if destination.is_file() and not destination.is_symlink():
-                if destination.read_bytes() == payload:
-                    return destination
+            if (
+                destination.is_file()
+                and not destination.is_symlink()
+                and destination.read_bytes() == payload
+            ):
+                return destination
             raise HardFailure(
                 f"artifact already exists with different content: {destination}"
             ) from None
@@ -141,6 +146,51 @@ def atomic_write_npz(path: str | Path, **arrays: Any) -> Path:
     except (TypeError, ValueError) as error:
         raise HardFailure(f"could not serialize NumPy archive: {error}") from error
     return _publish_bytes(path, buffer.getvalue())
+
+
+def atomic_write_torch(path: str | Path, document: Any) -> Path:
+    """Publish a Torch document without replacing different existing content."""
+
+    buffer = io.BytesIO()
+    try:
+        torch.save(document, buffer)
+    except (RuntimeError, TypeError, ValueError) as error:
+        raise HardFailure(f"could not serialize Torch document: {error}") from error
+    return _publish_bytes(path, buffer.getvalue())
+
+
+def atomic_replace_torch(path: str | Path, document: Any) -> Path:
+    """Atomically replace the mutable latest-training checkpoint."""
+
+    destination = _absolute_lexical(path)
+    _safe_parent(destination)
+    buffer = io.BytesIO()
+    try:
+        torch.save(document, buffer)
+    except (RuntimeError, TypeError, ValueError) as error:
+        raise HardFailure(f"could not serialize Torch document: {error}") from error
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(buffer.getvalue())
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+        directory_fd = os.open(destination.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError as error:
+        raise HardFailure(
+            f"could not replace artifact {destination}: {error}"
+        ) from error
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
 
 
 def copy_file_exact(source: str | Path, destination: str | Path) -> Path:

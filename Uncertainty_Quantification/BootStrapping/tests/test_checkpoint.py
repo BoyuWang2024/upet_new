@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from pathlib import Path
 import random
-import numpy as np
+from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 
@@ -29,6 +29,19 @@ def _save_checkpoint(
         document["python_rng_state"] = random.getstate()
         document["numpy_rng_state"] = np.random.get_state()
         document["torch_rng_state"] = torch.get_rng_state()
+        document["runtime_state"] = {}
+        document["best_epoch"] = 3
+        document["best_loss"] = 0.25
+        document["best_raw_state_dict"] = raw
+        document["best_ema_state_dict"] = ema
+        document["history"] = [
+            {
+                "epoch": 3,
+                "training_loss": 0.5,
+                "raw_validation_loss": 0.25,
+                "ema_validation_loss": 0.3,
+            }
+        ]
     torch.save(document, path)
     return path
 

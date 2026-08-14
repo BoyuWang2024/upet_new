@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
 import pickle
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Mapping, cast
+from typing import Literal, cast
 
 import torch
 from torch import Tensor
 
 from .artifacts import sha256_file
 from .errors import HardFailure
-
 
 CHECKPOINT_SCHEMA = "upet.bootstrap.checkpoint/v1"
 
@@ -127,9 +127,22 @@ def audit_checkpoint(
             "checkpoint trainable parameter count differs: "
             f"expected {expected_parameter_count}, found {parameter_count}"
         )
-    resume_ready = isinstance(optimizer, dict) and all(
-        key in document
-        for key in ("python_rng_state", "numpy_rng_state", "torch_rng_state")
+    resume_fields = {
+        "python_rng_state",
+        "numpy_rng_state",
+        "torch_rng_state",
+        "runtime_state",
+        "best_epoch",
+        "best_loss",
+        "best_raw_state_dict",
+        "best_ema_state_dict",
+        "history",
+    }
+    resume_ready = (
+        isinstance(optimizer, dict)
+        and resume_fields <= set(document)
+        and isinstance(document.get("runtime_state"), dict)
+        and isinstance(document.get("history"), list)
     )
     return CheckpointAudit(
         path=checkpoint_path,
