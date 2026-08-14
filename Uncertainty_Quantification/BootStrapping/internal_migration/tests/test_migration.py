@@ -29,8 +29,8 @@ def _write_legacy_tree(root: Path) -> Path:
             "schema_version": 1,
             "member_index": member,
             "epoch": 4,
-            "raw_state": {"head": torch.tensor([float(member)])},
-            "ema_state": {"head": torch.tensor([float(member) + 0.1])},
+            "raw_state": {"head": torch.full((13_338,), float(member))},
+            "ema_state": {"head": torch.full((13_338,), float(member) + 0.1)},
         }
         for kind in ("best", "final", "latest"):
             torch.save(checkpoint, member_root / f"{kind}.pt")
@@ -132,3 +132,52 @@ def test_converter_rejects_overlapping_source_and_destination(tmp_path: Path) ->
     source = _write_legacy_tree(tmp_path / "source")
     with pytest.raises(HardFailure, match="separate"):
         convert_legacy_run(source, source / "published", _config(), tmp_path / "audit")
+
+
+def test_converter_rejects_checkpoint_branch_metadata_drift(tmp_path: Path) -> None:
+    from Uncertainty_Quantification.BootStrapping.bootstrap.errors import HardFailure
+    from Uncertainty_Quantification.BootStrapping.internal_migration.migration.converter import (
+        convert_legacy_run,
+    )
+
+    source = _write_legacy_tree(tmp_path / "source")
+    path = source / "member_01/best.pt"
+    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    checkpoint["ema_state"]["head"] = torch.ones(13_337)
+    torch.save(checkpoint, path)
+
+    with pytest.raises(HardFailure, match="metadata differs"):
+        convert_legacy_run(
+            source, tmp_path / "published", _config(), tmp_path / "audit"
+        )
+
+
+def test_audit_failure_leaves_destination_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from Uncertainty_Quantification.BootStrapping.bootstrap.errors import HardFailure
+    from Uncertainty_Quantification.BootStrapping.internal_migration.migration import (
+        converter,
+    )
+
+    source = _write_legacy_tree(tmp_path / "source")
+    destination = tmp_path / "published"
+    audit_root = tmp_path / "audit"
+    original = converter.atomic_write_json
+
+    def fail_audit(path, document):
+        if Path(path).name == "migration_audit.json":
+            raise HardFailure("injected audit failure")
+        return original(path, document)
+
+    monkeypatch.setattr(converter, "atomic_write_json", fail_audit)
+    with pytest.raises(HardFailure, match="injected audit failure"):
+        converter.convert_legacy_run(source, destination, _config(), audit_root)
+    assert not destination.exists()
+
+    monkeypatch.setattr(converter, "atomic_write_json", original)
+    publication = converter.convert_legacy_run(
+        source, destination, _config(), audit_root
+    )
+    assert publication.destination == destination.resolve()
+    assert (destination / "run_manifest.json").is_file()

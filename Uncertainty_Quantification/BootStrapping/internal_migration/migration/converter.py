@@ -12,8 +12,10 @@ from ...bootstrap.artifacts import (
     sibling_staging,
 )
 from ...bootstrap.errors import HardFailure
+from ...bootstrap.checkpoint import audit_checkpoint
+from ...bootstrap.head_policy import EXPECTED_TRAINABLE_PARAMETER_COUNT
 from ...bootstrap.prediction import PredictionStore
-from .legacy_reader import inspect_legacy_run, load_legacy_payload
+from .legacy_reader import inspect_legacy_run
 from .normalization import assert_same_targets, concatenate_legacy_chunks
 
 
@@ -33,20 +35,14 @@ def _contains(parent: Path, child: Path) -> bool:
 
 
 def _checkpoint_capabilities(path: Path) -> dict[str, object]:
-    payload = load_legacy_payload(path)
-    raw = payload.get("raw_state")
-    ema = payload.get("ema_state")
-    inference_ready = isinstance(raw, dict) and bool(raw)
-    if ema is not None and not isinstance(ema, dict):
-        raise HardFailure(f"checkpoint EMA state is invalid: {path}")
+    audit = audit_checkpoint(
+        path, expected_parameter_count=EXPECTED_TRAINABLE_PARAMETER_COUNT
+    )
     return {
-        "epoch": payload.get("epoch"),
-        "validation_loss": payload.get("validation_loss"),
-        "inference_ready": inference_ready,
-        "resume_ready": all(
-            key in payload
-            for key in ("optimizer_state_dict", "python_rng_state", "torch_rng_state")
-        ),
+        "epoch": audit.epoch,
+        "validation_loss": audit.validation_loss,
+        "inference_ready": audit.inference_ready,
+        "resume_ready": audit.resume_ready,
     }
 
 
@@ -176,13 +172,13 @@ def convert_legacy_run(
             },
         )
 
-    audit_path.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(
-        audit_path / "migration_audit.json",
-        {
-            "source": str(source_path),
-            "destination": str(destination_path),
-            "checkpoint_copies": audit_records,
-        },
-    )
+        audit_path.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(
+            audit_path / "migration_audit.json",
+            {
+                "source": str(source_path),
+                "destination": str(destination_path),
+                "checkpoint_copies": audit_records,
+            },
+        )
     return MigrationPublication(destination_path, len(audit.members), audit.splits)
