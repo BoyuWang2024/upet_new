@@ -10,7 +10,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import numpy as np
 
@@ -165,20 +165,33 @@ def _resolve_declared_path(root: Path, relative_value: str) -> Path:
     return path
 
 
+def declared_artifact_paths(
+    root: Path, manifest: Mapping[str, object]
+) -> dict[str, Path]:
+    """Resolve the manifest's declared files without allowing root escapes."""
+    files = manifest.get("files", {})
+    if not isinstance(files, dict):
+        raise ValueError("manifest files must be an object")
+    resolved: dict[str, Path] = {}
+    for relative, expected_sha in files.items():
+        if not isinstance(relative, str) or not isinstance(expected_sha, str):
+            raise ValueError("manifest file hashes must map strings to strings")
+        resolved[relative] = _resolve_declared_path(root, relative)
+    return resolved
+
+
 def _verify_declared_files(
     root: Path,
     manifest: Mapping[str, object],
     *,
     verify_npz: bool = False,
 ) -> int:
-    files = manifest.get("files", {})
-    if not isinstance(files, dict):
-        raise ValueError("manifest files must be an object")
+    files = cast(dict[str, str], manifest.get("files", {}))
+    paths = declared_artifact_paths(root, manifest)
     verified = 0
-    for relative, expected_sha in files.items():
-        if not isinstance(relative, str) or not isinstance(expected_sha, str):
-            raise ValueError("manifest file hashes must map strings to strings")
-        path = _resolve_declared_path(root, relative)
+    for relative, path in paths.items():
+        expected_sha = files[relative]
+        assert isinstance(expected_sha, str)
         if not path.is_file():
             raise ValueError(f"declared artifact is missing: {path}")
         actual_sha = sha256_file(path)
