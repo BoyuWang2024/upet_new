@@ -21,10 +21,11 @@ from .calibration_progress import (
 )
 from .checkpoint import load_checkpoint
 from .config import LLPRConfig
-from .curvature import run_build
+from .curvature import resolve_curvature_stage
 from .data import build_system, dataset_identity, iter_samples
 from .observables import compute_structure_jacobians
 from .readout import discover_readout_layout
+from .reuse import materialize_reused_stage, validate_curvature_layout
 from .ridge import (
     RidgeCandidate,
     fit_candidates,
@@ -152,13 +153,39 @@ def _candidates(
     }
 
 
-def run_calibrate(config: LLPRConfig) -> Path:
-    """Calibrate Alpha and optionally eta using validation data only."""
-    curvature_dir = run_build(config)
+def resolve_calibration_stage(config: LLPRConfig) -> Path:
+    """Return a verified calibration stage, computing it only when needed."""
+    curvature_dir = resolve_curvature_stage(config)
     curvature_manifest = load_verified_manifest(
         curvature_dir / "manifest.json", verify_npz=True
     )
-    validation = dataset_identity(config.data.calibration)
+    reuse = config.reuse.calibration if config.reuse is not None else None
+    if reuse is None:
+        return run_calibrate(config)
+    root = config.output.root / config.output.experiment
+    return materialize_reused_stage(
+        reuse.path,
+        RunPaths(root).calibration,
+        stage="calibration",
+        identity=reuse.identity,
+        expected_payload={
+            "curvature_identity": curvature_manifest["identity"],
+            "ridge": config.calibration.ridge.model_dump(mode="json"),
+        },
+        expected_curvature_identity=str(curvature_manifest["identity"]),
+    )
+
+
+def run_calibrate(config: LLPRConfig) -> Path:
+    """Calibrate Alpha and optionally eta using validation data only."""
+    curvature_dir = resolve_curvature_stage(config)
+    curvature_manifest = load_verified_manifest(
+        curvature_dir / "manifest.json", verify_npz=True
+    )
+    calibration_path = config.data.calibration
+    if calibration_path is None:
+        raise ValueError("numerical calibration requires calibration data")
+    validation = dataset_identity(calibration_path)
     if (
         config.data.calibration_expected_sha256 is not None
         and validation.sha256 != config.data.calibration_expected_sha256
@@ -188,6 +215,7 @@ def run_calibrate(config: LLPRConfig) -> Path:
     device = torch.device(config.runtime.device)
     loaded = load_checkpoint(config.checkpoint, device=device, dtype=torch.float64)
     layout = discover_readout_layout(loaded.model)
+    validate_curvature_layout(curvature_dir, curvature_manifest, layout)
     progress_path = stage_dir / "progress.npz"
     candidate_counts = {
         target: len(target_candidates)
@@ -213,7 +241,7 @@ def run_calibrate(config: LLPRConfig) -> Path:
             for target, target_candidates in candidates.items()
         }
         next_index = 0
-    for sample in iter_samples(config.data.calibration):
+    for sample in iter_samples(calibration_path):
         if sample.index < next_index:
             continue
         system = build_system(sample, loaded.model, device=device, dtype=torch.float64)

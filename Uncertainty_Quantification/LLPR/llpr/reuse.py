@@ -74,6 +74,13 @@ def _validate_stage_manifest(
     missing = sorted(REQUIRED_STAGE_FILES[stage].difference(files))
     if missing:
         raise ValueError(f"reused {stage} manifest is missing files: {missing}")
+    if expected_curvature_identity is not None:
+        actual_curvature = manifest.get("curvature_identity")
+        if actual_curvature != expected_curvature_identity:
+            raise ValueError(
+                "reused calibration curvature identity mismatch: "
+                f"{actual_curvature!r} != {expected_curvature_identity!r}"
+            )
     payload = manifest.get("payload")
     if not isinstance(payload, dict):
         raise ValueError(f"reused {stage} manifest payload must be an object")
@@ -83,13 +90,6 @@ def _validate_stage_manifest(
             raise ValueError(
                 f"reused {stage} payload field {name!r} mismatch: "
                 f"{actual!r} != {expected!r}"
-            )
-    if expected_curvature_identity is not None:
-        actual_curvature = manifest.get("curvature_identity")
-        if actual_curvature != expected_curvature_identity:
-            raise ValueError(
-                "reused calibration curvature identity mismatch: "
-                f"{actual_curvature!r} != {expected_curvature_identity!r}"
             )
     return manifest
 

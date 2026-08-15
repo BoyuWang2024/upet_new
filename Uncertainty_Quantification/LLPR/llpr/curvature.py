@@ -25,6 +25,7 @@ from .observables import (
     huber_curvature,
 )
 from .readout import discover_readout_layout
+from .reuse import materialize_reused_stage
 
 
 @dataclass
@@ -146,11 +147,35 @@ def _curvature_identity(config: LLPRConfig, build_sha256: str) -> dict[str, obje
     )
 
 
+def resolve_curvature_stage(config: LLPRConfig) -> Path:
+    """Return a verified curvature stage, computing it only when not reused."""
+    reuse = config.reuse.curvature if config.reuse is not None else None
+    if reuse is None:
+        return run_build(config)
+    root = config.output.root / config.output.experiment
+    return materialize_reused_stage(
+        reuse.path,
+        RunPaths(root).curvature,
+        stage="curvature",
+        identity=reuse.identity,
+        expected_payload={
+            "checkpoint_sha256": config.checkpoint.expected_sha256,
+            "curvature": config.curvature.model_dump(mode="json"),
+            "matrix_dtype": config.runtime.matrix_dtype,
+            "jacobian_backend": config.runtime.jacobian_backend,
+            "force_component_chunk_size": config.runtime.force_component_chunk_size,
+        },
+    )
+
+
 def run_build(config: LLPRConfig) -> Path:
     """Compute or resume the canonical curvature for the build dataset."""
     if config.runtime.matrix_dtype != "float64":
         raise ValueError("LLPR matrices require float64")
-    data_identity = dataset_identity(config.data.build)
+    build_path = config.data.build
+    if build_path is None:
+        raise ValueError("numerical curvature build requires build data")
+    data_identity = dataset_identity(build_path)
     if (
         config.data.build_expected_sha256 is not None
         and data_identity.sha256 != config.data.build_expected_sha256
@@ -187,7 +212,7 @@ def run_build(config: LLPRConfig) -> Path:
         )
         next_index = 0
 
-    for sample in iter_samples(config.data.build):
+    for sample in iter_samples(build_path):
         if sample.index < next_index:
             continue
         system = build_system(sample, loaded.model, device=device, dtype=torch.float64)

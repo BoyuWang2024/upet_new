@@ -21,14 +21,15 @@ from .artifacts import (
     sha256_file,
     stage_identity,
 )
-from .calibration import run_calibrate
+from .calibration import resolve_calibration_stage
 from .checkpoint import load_checkpoint
 from .config import LLPRConfig
-from .curvature import run_build
+from .curvature import resolve_curvature_stage
 from .data import LLPRSample, build_system, dataset_identity, iter_samples
 from .evaluation_shards import validate_evaluation_shard
 from .observables import StructureJacobians, compute_structure_jacobians
 from .readout import discover_readout_layout
+from .reuse import validate_curvature_layout
 from .ridge import quadratic_forms
 
 
@@ -265,12 +266,16 @@ def _flush_shard(
 
 def run_evaluate(config: LLPRConfig) -> Path:
     """Evaluate the configured test dataset with resumable complete shards."""
-    curvature_dir = run_build(config)
-    calibration_dir = run_calibrate(config)
+    curvature_dir = resolve_curvature_stage(config)
+    calibration_dir = resolve_calibration_stage(config)
     curvature_manifest = load_verified_manifest(
         curvature_dir / "manifest.json", verify_npz=True
     )
     calibration_manifest = load_verified_manifest(calibration_dir / "manifest.json")
+    if calibration_manifest.get("curvature_identity") != curvature_manifest.get(
+        "identity"
+    ):
+        raise ValueError("calibration manifest is bound to a different curvature")
     test = dataset_identity(config.data.test)
     if (
         config.data.test_expected_sha256 is not None
@@ -329,6 +334,10 @@ def run_evaluate(config: LLPRConfig) -> Path:
         shard_records = []
         next_index = 0
 
+    device = torch.device(config.runtime.device)
+    loaded = load_checkpoint(config.checkpoint, device=device, dtype=torch.float64)
+    layout = discover_readout_layout(loaded.model)
+    validate_curvature_layout(curvature_dir, curvature_manifest, layout)
     with np.load(curvature_dir / "curvature.npz", allow_pickle=False) as archive:
         matrices = {
             "energy": torch.from_numpy(archive["energy"].copy()).to(torch.float64),
@@ -343,9 +352,6 @@ def run_evaluate(config: LLPRConfig) -> Path:
         )
         for target in ("energy", "force")
     }
-    device = torch.device(config.runtime.device)
-    loaded = load_checkpoint(config.checkpoint, device=device, dtype=torch.float64)
-    layout = discover_readout_layout(loaded.model)
     batch: list[Mapping[str, np.ndarray]] = []
     for sample in iter_samples(config.data.test):
         if sample.index < next_index:

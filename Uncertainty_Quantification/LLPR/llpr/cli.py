@@ -8,9 +8,9 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .artifacts import verify_run as _verify_run
-from .calibration import run_calibrate as _run_calibrate
+from .calibration import resolve_calibration_stage as _resolve_calibration_stage
 from .config import load_llpr_config
-from .curvature import run_build as _run_build
+from .curvature import resolve_curvature_stage as _resolve_curvature_stage
 from .inference import run_evaluate as _run_evaluate
 from .plotting import load_plot_config
 from .plotting import run_plot as _run_plot
@@ -20,11 +20,11 @@ LOGGER = logging.getLogger(__name__)
 
 
 def run_build(config_path: Path) -> Path:
-    return _run_build(load_llpr_config(config_path))
+    return _resolve_curvature_stage(load_llpr_config(config_path))
 
 
 def run_calibrate(config_path: Path) -> Path:
-    return _run_calibrate(load_llpr_config(config_path))
+    return _resolve_calibration_stage(load_llpr_config(config_path))
 
 
 def run_evaluate(config_path: Path) -> Path:
