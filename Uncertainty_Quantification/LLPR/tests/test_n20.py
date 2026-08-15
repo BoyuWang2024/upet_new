@@ -7,10 +7,21 @@ import numpy as np
 import pytest
 
 from Uncertainty_Quantification.LLPR.llpr import calibration as calibration_module
+from Uncertainty_Quantification.LLPR.llpr import curvature as curvature_module
 from Uncertainty_Quantification.LLPR.llpr.artifacts import verify_run
-from Uncertainty_Quantification.LLPR.llpr.calibration import run_calibrate
-from Uncertainty_Quantification.LLPR.llpr.config import load_llpr_config
-from Uncertainty_Quantification.LLPR.llpr.curvature import run_build
+from Uncertainty_Quantification.LLPR.llpr.calibration import (
+    resolve_calibration_stage,
+    run_calibrate,
+)
+from Uncertainty_Quantification.LLPR.llpr.config import (
+    ReuseConfig,
+    StageReuseConfig,
+    load_llpr_config,
+)
+from Uncertainty_Quantification.LLPR.llpr.curvature import (
+    resolve_curvature_stage,
+    run_build,
+)
 from Uncertainty_Quantification.LLPR.llpr.inference import run_evaluate
 from Uncertainty_Quantification.LLPR.llpr.plot_multi import (
     PlotConfig,
@@ -73,6 +84,58 @@ def test_n20_fixed_and_fit_full_paths(
     fixed_curvature = run_build(fixed)
     fixed_calibration = run_calibrate(fixed)
     fixed_evaluation = run_evaluate(fixed)
+
+    reuse_output = fixed.output.model_copy(update={"experiment": "n20_reuse_smoke"})
+    reuse_config = fixed.model_copy(
+        update={
+            "data": fixed.data.model_copy(update={"build": None, "calibration": None}),
+            "output": reuse_output,
+            "reuse": ReuseConfig(
+                curvature=StageReuseConfig(
+                    path=fixed_curvature,
+                    identity=str(_manifest(fixed_curvature)["identity"]),
+                ),
+                calibration=StageReuseConfig(
+                    path=fixed_calibration,
+                    identity=str(_manifest(fixed_calibration)["identity"]),
+                ),
+            ),
+        }
+    )
+
+    def unexpected_recomputation(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("reused stage attempted numerical recomputation")
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(
+            curvature_module,
+            "compute_structure_jacobians",
+            unexpected_recomputation,
+        )
+        patcher.setattr(
+            calibration_module,
+            "compute_structure_jacobians",
+            unexpected_recomputation,
+        )
+        reused_curvature = resolve_curvature_stage(reuse_config)
+        reused_calibration = resolve_calibration_stage(reuse_config)
+    reused_evaluation = run_evaluate(reuse_config)
+
+    assert reused_curvature != fixed_curvature
+    assert reused_calibration != fixed_calibration
+    assert (
+        _manifest(reused_curvature)["identity"]
+        == _manifest(fixed_curvature)["identity"]
+    )
+    assert (
+        _manifest(reused_calibration)["identity"]
+        == _manifest(fixed_calibration)["identity"]
+    )
+    with (
+        np.load(fixed_evaluation / "details.npz", allow_pickle=False) as expected,
+        np.load(reused_evaluation / "details.npz", allow_pickle=False) as actual,
+    ):
+        assert actual.files == expected.files
     fitted_curvature = run_build(fitted)
     fitted_calibration = run_calibrate(fitted)
     fitted_evaluation = run_evaluate(fitted)
