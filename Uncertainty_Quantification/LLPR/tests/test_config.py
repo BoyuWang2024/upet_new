@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from Uncertainty_Quantification.LLPR.llpr.config import (
     REPO_ROOT,
@@ -73,3 +74,92 @@ def test_unknown_fields_are_rejected(write_llpr_config: ConfigWriter) -> None:
 
     with pytest.raises(ValueError, match="unexpected"):
         load_llpr_config(path)
+
+
+def test_curvature_reuse_allows_missing_build_and_resolves_path(
+    write_llpr_config: ConfigWriter,
+) -> None:
+    path = write_llpr_config(None)
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw["data"].pop("build")
+    raw["reuse"] = {
+        "curvature": {
+            "path": "Uncertainty_Quantification/LLPR/outputs/base/curvature/"
+            + "a" * 16,
+            "identity": "a" * 16,
+        }
+    }
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    config = load_llpr_config(path)
+
+    assert config.data.build is None
+    assert config.reuse is not None
+    assert config.reuse.curvature is not None
+    assert config.reuse.curvature.path == (
+        REPO_ROOT
+        / "Uncertainty_Quantification/LLPR/outputs/base/curvature"
+        / ("a" * 16)
+    )
+
+
+def test_calibration_reuse_allows_missing_calibration(
+    write_llpr_config: ConfigWriter,
+) -> None:
+    path = write_llpr_config(None)
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw["data"].pop("calibration")
+    raw["reuse"] = {
+        "curvature": {"path": "base/curvature", "identity": "a" * 16},
+        "calibration": {"path": "base/calibration", "identity": "b" * 16},
+    }
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    config = load_llpr_config(path)
+
+    assert config.data.calibration is None
+    assert config.reuse is not None
+    assert config.reuse.calibration is not None
+    assert config.reuse.calibration.path == REPO_ROOT / "base/calibration"
+
+
+def test_missing_build_without_curvature_reuse_is_rejected(
+    write_llpr_config: ConfigWriter,
+) -> None:
+    path = write_llpr_config(None)
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw["data"].pop("build")
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="build data is required"):
+        load_llpr_config(path)
+
+
+def test_calibration_reuse_requires_curvature_reuse(
+    write_llpr_config: ConfigWriter,
+) -> None:
+    path = write_llpr_config(None)
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw["reuse"] = {"calibration": {"path": "base/calibration", "identity": "b" * 16}}
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="calibration reuse requires curvature reuse"):
+        load_llpr_config(path)
+
+
+def test_reuse_identity_must_be_lowercase_hexadecimal(
+    write_llpr_config: ConfigWriter,
+) -> None:
+    path = write_llpr_config(None)
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw["reuse"] = {
+        "curvature": {"path": "base/curvature", "identity": "NOT-AN-IDENTITY"}
+    }
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(ValidationError) as error:
+        load_llpr_config(path)
+
+    assert ("reuse", "curvature", "identity") in {
+        tuple(item["loc"]) for item in error.value.errors()
+    }

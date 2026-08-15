@@ -34,9 +34,19 @@ class FileIdentityConfig(StrictModel):
     expected_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class StageReuseConfig(StrictModel):
+    path: Path
+    identity: str = Field(pattern=r"^[0-9a-f]{16}$")
+
+
+class ReuseConfig(StrictModel):
+    curvature: StageReuseConfig | None = None
+    calibration: StageReuseConfig | None = None
+
+
 class DataConfig(StrictModel):
-    build: Path
-    calibration: Path
+    build: Path | None = None
+    calibration: Path | None = None
     test: Path
     build_expected_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     calibration_expected_sha256: str | None = Field(
@@ -120,6 +130,19 @@ class LLPRConfig(StrictModel):
     calibration: CalibrationConfig
     runtime: RuntimeConfig
     output: OutputConfig
+    reuse: ReuseConfig | None = None
+
+    @model_validator(mode="after")
+    def validate_stage_inputs(self) -> "LLPRConfig":
+        curvature_reuse = self.reuse.curvature if self.reuse is not None else None
+        calibration_reuse = self.reuse.calibration if self.reuse is not None else None
+        if calibration_reuse is not None and curvature_reuse is None:
+            raise ValueError("calibration reuse requires curvature reuse")
+        if self.data.build is None and curvature_reuse is None:
+            raise ValueError("build data is required without curvature reuse")
+        if self.data.calibration is None and calibration_reuse is None:
+            raise ValueError("calibration data is required without calibration reuse")
+        return self
 
 
 def _normalize_eta(raw: dict[str, Any]) -> None:
@@ -146,6 +169,12 @@ def _resolve_paths(raw: dict[str, Any]) -> None:
     output = raw.get("output")
     if isinstance(output, dict) and "root" in output:
         output["root"] = resolve_repo_path(output["root"])
+    reuse = raw.get("reuse")
+    if isinstance(reuse, dict):
+        for stage in ("curvature", "calibration"):
+            value = reuse.get(stage)
+            if isinstance(value, dict) and "path" in value:
+                value["path"] = resolve_repo_path(value["path"])
 
 
 def load_llpr_config(path: Path) -> LLPRConfig:
