@@ -1,23 +1,8 @@
 # UPET LLPR 不确定性量化
 
-本目录提供一套完整的 LLPR（Last-Layer Parameter Regression）流程，用于计算能量和力的不确定性。
+本目录提供能量和力的 LLPR（Last-Layer Parameter Regression）不确定性量化流程。当前可直接使用已有 MATPES-test 结果，并在不重建曲率矩阵的情况下计算 MAD-test 和 MATPES-train。
 
-当前正式结果位于：
-
-```text
-Uncertainty_Quantification/LLPR/outputs/matpes_r2
-```
-
-该结果使用直接指定的 η：
-
-```text
-energy η = 1.0e-6
-force  η = 1.0e-6
-```
-
-正式结果已经计算完成，日常使用时不需要重新计算。
-
-## 环境与数据
+## 环境和数据
 
 在 Ubuntu 中进入仓库并激活环境：
 
@@ -26,137 +11,144 @@ cd /home/lilong/code/UQ/upet_new
 conda activate upet_new
 ```
 
-代码默认使用以下文件：
+正式流程使用：
+
+- `data/checkpoint/pet-omatpes-l-v0.1.0.ckpt`：UPET 模型。
+- `data/dataset/matpes_train.extxyz`：MATPES 训练集；远端计算可以复用语义一致的现有 extxyz。
+- `data/dataset/matpes_val.extxyz`：MATPES 验证集。
+- `data/dataset/matpes_test.extxyz`：MATPES 测试集。
+- `data/dataset/mad-val.xyz`：MAD 验证集，用于重新计算 MAD 的 Alpha。
+- `data/dataset/mad-test.xyz`：MAD 测试集。
+- `data/dataset/matpes_n20.extxyz`：本地小规模全链路测试数据。
+
+`mad-val.xyz` 和 `mad-test.xyz` 分别与兼容版 MAD 文件字节一致。
+
+## 三个正式结果
+
+- `outputs/matpes_r2`：已有 MATPES-test 完整结果，保留不变。
+- `outputs/mad_test`：复用已有曲率，在 MAD 验证集重新计算 Alpha，再评估 MAD-test。
+- `outputs/matpes_train`：复用已有曲率和 Alpha，只评估 MATPES-train。
+
+当前 η 直接指定为：
 
 ```text
-data/checkpoint/pet-omatpes-l-v0.1.0.ckpt
-data/dataset/matpes_train.extxyz
-data/dataset/matpes_val.extxyz
-data/dataset/matpes_test.extxyz
-data/dataset/matpes_n20.extxyz
+energy η = 1.0e-6
+force  η = 1.0e-6
 ```
+
+代码也保留 η 拟合模式，见 `cpu_n20_fit.yaml` 和 `gpu_full_fit.yaml`。
 
 ## 常用命令
 
-### 验证当前正式结果
+先验证已有 MATPES-test 结果：
 
 ```bash
 python -m Uncertainty_Quantification.LLPR.llpr verify \
   --config Uncertainty_Quantification/LLPR/outputs/matpes_r2
 ```
 
-### 绘制当前正式结果
-
-```bash
-python -m Uncertainty_Quantification.LLPR.llpr plot \
-  --config Uncertainty_Quantification/LLPR/configs/plot_matpes_r2.yaml
-```
-
-图片和绘图统计会写入：
-
-```text
-Uncertainty_Quantification/LLPR/plots/matpes_r2
-```
-
-绘图不会修改 `outputs/matpes_r2`。
-
-### 小规模全链路
-
-直接指定 η：
+运行 20 个结构的小规模完整链路：
 
 ```bash
 python -m Uncertainty_Quantification.LLPR.llpr run \
   --config Uncertainty_Quantification/LLPR/configs/cpu_n20_fixed.yaml
 ```
 
-拟合 η：
+计算 MAD 的 Alpha 和测试集 UQ：
 
 ```bash
 python -m Uncertainty_Quantification.LLPR.llpr run \
-  --config Uncertainty_Quantification/LLPR/configs/cpu_n20_fit.yaml
+  --config Uncertainty_Quantification/LLPR/configs/gpu_mad_test_fixed.yaml
 ```
 
-### 完整数据重新计算
-
-直接指定 η：
+复用已有 Alpha，计算 MATPES-train UQ：
 
 ```bash
 python -m Uncertainty_Quantification.LLPR.llpr run \
-  --config Uncertainty_Quantification/LLPR/configs/gpu_full_fixed.yaml
+  --config Uncertainty_Quantification/LLPR/configs/gpu_matpes_train_fixed.yaml
 ```
 
-拟合 η：
+生成三个数据集的六张图：
 
 ```bash
-python -m Uncertainty_Quantification.LLPR.llpr run \
-  --config Uncertainty_Quantification/LLPR/configs/gpu_full_fit.yaml
+python -m Uncertainty_Quantification.LLPR.llpr plot \
+  --config Uncertainty_Quantification/LLPR/configs/plot_three_datasets.yaml
 ```
 
-完整数据计算量很大。`gpu_full_fixed.yaml` 对应当前正式结果；只要正式文件完整，代码会直接验证并复用它们。
+绘图目录为 `Uncertainty_Quantification/Plots/LLPR`，包含六张 PNG、六张 PDF、`plotting_statistics.csv` 和 `plotting_manifest.json`。
 
 ## 计算流程
 
 ```text
-checkpoint + 训练集
-        ↓
-曲率矩阵
-        ↓
-验证集 + η（直接指定或拟合）
-        ↓
-校准参数
-        ↓
-测试集评估
-        ↓
-按需绘图
+已有 checkpoint + 已有曲率
+                │
+        ┌───────┴────────┐
+        │                │
+MAD 验证集重新算 Alpha   MATPES 直接复用 Alpha
+        │                │
+    MAD-test UQ      MATPES-train UQ
+        └───────┬────────┘
+                │
+       与 MATPES-test 一起绘图
 ```
 
-## 新代码文件
+曲率和校准复用前都会检查清单、身份和文件完整性。复用结果会放入新实验目录，已有 `outputs/matpes_r2` 不会被修改。
+
+## 代码文件
 
 | 文件 | 作用 |
 |---|---|
-| `__init__.py` | 将 `LLPR` 声明为 Python 包。 |
-| `llpr/__init__.py` | 定义 LLPR 子包。 |
-| `llpr/__main__.py` | 支持通过 `python -m Uncertainty_Quantification.LLPR.llpr` 运行命令。 |
-| `llpr/cli.py` | 提供构建、校准、评估、完整运行、验证和绘图命令。 |
-| `llpr/config.py` | 读取并严格检查 YAML 配置。 |
-| `llpr/artifacts.py` | 管理结果目录、清单、自动编号、原子写入和完整校验。 |
-| `llpr/checkpoint.py` | 检查 checkpoint，并加载模型和训练损失参数。 |
-| `llpr/data.py` | 读取数据集、标签和数据集统计信息。 |
-| `llpr/readout.py` | 定位模型最后一层的能量与力参数。 |
-| `llpr/observables.py` | 计算参数 Jacobian 和 Huber 曲率权重。 |
-| `llpr/curvature.py` | 构建能量和力的曲率矩阵。 |
-| `llpr/curvature_progress.py` | 保存并检查曲率构建的断点。 |
-| `llpr/ridge.py` | 处理 ridge 矩阵、候选 η 和二次型。 |
-| `llpr/calibration.py` | 使用验证集计算 Alpha，并直接使用或拟合 η。 |
-| `llpr/calibration_progress.py` | 保存并检查校准阶段的断点。 |
-| `llpr/inference.py` | 在测试集上计算预测、残差和不确定性。 |
-| `llpr/evaluation_shards.py` | 保存并检查分片评估结果。 |
-| `llpr/plotting.py` | 从正式评估结果生成散点图、可靠性图和统计表。 |
+| `llpr/__init__.py` | 定义 LLPR Python 子包。 |
+| `llpr/__main__.py` | 支持 `python -m Uncertainty_Quantification.LLPR.llpr`。 |
+| `llpr/cli.py` | 提供 build、calibrate、evaluate、run、verify 和 plot 命令。 |
+| `llpr/config.py` | 严格读取 LLPR YAML，并检查数据、η 和复用设置。 |
+| `llpr/artifacts.py` | 生成结果身份，原子写入文件，并校验清单和文件。 |
+| `llpr/checkpoint.py` | 校验并加载 checkpoint。 |
+| `llpr/data.py` | 按顺序读取 extxyz、能量标签和力标签。 |
+| `llpr/dataset_fingerprint.py` | 比较两个 extxyz 的结构、坐标、能量和力是否语义一致。 |
+| `llpr/readout.py` | 找到模型最后一层中用于能量和力的参数。 |
+| `llpr/observables.py` | 计算 Jacobian 和 Huber 曲率权重。 |
+| `llpr/curvature.py` | 构建或复用能量、力曲率矩阵。 |
+| `llpr/curvature_progress.py` | 保存并校验曲率阶段的断点。 |
+| `llpr/reuse.py` | 将已校验的曲率或校准产物安全放入新实验目录。 |
+| `llpr/ridge.py` | 构造 ridge 矩阵并处理 η。 |
+| `llpr/calibration.py` | 在验证集上计算 Alpha，并支持固定或拟合 η。 |
+| `llpr/calibration_progress.py` | 保存并校验校准阶段的断点。 |
+| `llpr/inference.py` | 计算预测、残差和校准后的 UQ。 |
+| `llpr/evaluation_shards.py` | 保存、恢复和合并分片推理结果。 |
+| `llpr/plotting.py` | 提供原有单结果统计和绘图辅助函数。 |
+| `llpr/plot_multi.py` | 读取一个或多个现有评估结果并发布统一风格图片。 |
+| `llpr/export.py` | 导出不含大型 `details.npz` 的可验证摘要。 |
 
 ## 配置文件
 
 | 文件 | 作用 |
 |---|---|
-| `configs/cpu_n20_fixed.yaml` | 使用 20 个结构在 CPU 上测试直接指定 η 的全链路。 |
-| `configs/cpu_n20_fit.yaml` | 使用 20 个结构在 CPU 上测试拟合 η 的全链路。 |
-| `configs/gpu_full_fixed.yaml` | 使用完整数据和 GPU，直接指定 η；对应当前正式结果。 |
-| `configs/gpu_full_fit.yaml` | 使用完整数据和 GPU，根据验证集拟合 η。 |
-| `configs/plot_matpes_r2.yaml` | 读取当前正式结果，并将图片写到独立绘图目录。 |
+| `configs/cpu_n20_fixed.yaml` | CPU 小数据全链路，直接指定 η。 |
+| `configs/cpu_n20_fit.yaml` | CPU 小数据全链路，拟合 η。 |
+| `configs/gpu_full_fixed.yaml` | 完整 MATPES 数据重新计算，直接指定 η。 |
+| `configs/gpu_full_fit.yaml` | 完整 MATPES 数据重新计算，拟合 η。 |
+| `configs/gpu_mad_test_fixed.yaml` | 复用曲率，重新计算 MAD Alpha 和 MAD-test UQ。 |
+| `configs/gpu_matpes_train_fixed.yaml` | 复用曲率与 Alpha，只计算 MATPES-train UQ。 |
+| `configs/plot_matpes_r2.yaml` | 只绘制已有 MATPES-test 结果。 |
+| `configs/plot_three_datasets.yaml` | 一次绘制 MATPES-test、MAD-test 和 MATPES-train。 |
 
-## 正式结果文件
+## 结果文件
+
+每个完整实验都按以下结构保存：
 
 ```text
-outputs/matpes_r2/
+outputs/<实验名>/
 ├── manifest.json
-├── curvature/981cc8bdf7f8b820/
+├── curvature/<身份>/
 │   ├── manifest.json
 │   ├── curvature.npz
 │   └── diagnostics.json
-├── calibration/169d1d75c0dc1190/
+├── calibration/<身份>/
 │   ├── manifest.json
 │   ├── candidates.json
 │   └── summary.json
-└── evaluation/169d1d75c0dc1190/519237da91c72b73/
+└── evaluation/<校准身份>/<评估身份>/
     ├── manifest.json
     ├── details.npz
     ├── summary.json
@@ -165,38 +157,43 @@ outputs/matpes_r2/
 
 | 文件 | 作用 |
 |---|---|
-| `outputs/matpes_r2/manifest.json` | 连接当前正式结果的曲率、校准和评估阶段。 |
-| `curvature/981cc8bdf7f8b820/manifest.json` | 记录曲率阶段使用的模型、数据、参数和结果文件。 |
-| `curvature/981cc8bdf7f8b820/curvature.npz` | 保存能量和力的正式曲率矩阵。 |
-| `curvature/981cc8bdf7f8b820/diagnostics.json` | 保存曲率维度、训练集数量和矩阵诊断信息。 |
-| `calibration/169d1d75c0dc1190/manifest.json` | 记录校准阶段依赖的曲率、验证集和参数。 |
-| `calibration/169d1d75c0dc1190/candidates.json` | 保存能量和力的 η 校准候选结果。 |
-| `calibration/169d1d75c0dc1190/summary.json` | 保存最终使用的 η、Alpha 和校准统计。 |
-| `evaluation/169d1d75c0dc1190/519237da91c72b73/manifest.json` | 记录测试评估使用的曲率、校准和测试集。 |
-| `evaluation/169d1d75c0dc1190/519237da91c72b73/details.npz` | 保存逐结构、逐原子和逐力分量的完整结果。 |
-| `evaluation/169d1d75c0dc1190/519237da91c72b73/summary.json` | 保存测试集上的汇总指标。 |
-| `evaluation/169d1d75c0dc1190/519237da91c72b73/preview.json` | 保存便于快速查看的少量结果预览。 |
+| 根目录 `manifest.json` | 连接一次实验使用的曲率、校准和评估。 |
+| 曲率 `manifest.json` | 记录模型、训练集和曲率设置。 |
+| `curvature.npz` | 保存能量和力曲率矩阵。 |
+| `diagnostics.json` | 保存矩阵维度、样本数和数值诊断。 |
+| 校准 `manifest.json` | 记录验证集、η 和对应曲率。 |
+| `candidates.json` | 保存固定或拟合 η 的候选计算。 |
+| 校准 `summary.json` | 保存最终 η、Alpha 和校准统计。 |
+| 评估 `manifest.json` | 记录测试集、曲率、校准和结果文件。 |
+| `details.npz` | 保存逐结构、逐原子和逐力分量的完整结果。 |
+| 评估 `summary.json` | 保存整体误差和 UQ 指标。 |
+| `preview.json` | 保存少量便于查看的结果。 |
 
-目录中的自动编号由代码生成，用于避免不同模型、数据或参数的结果混用，不需要手动修改。
+本地保留完整 MAD-test 结果。MATPES-train 的完整 `details.npz` 保留在远端计算目录，本地只保留 `summary.json`、`preview.json` 和摘要 `manifest.json`。摘要清单会记录远端完整结果身份和 `details.npz` 的校验值。
 
 ## 测试文件
 
 | 文件 | 作用 |
 |---|---|
-| `tests/conftest.py` | 提供测试共用设置。 |
-| `tests/test_artifacts.py` | 测试清单、编号、写入和文件校验。 |
-| `tests/test_release_contract.py` | 测试正式根清单不包含来源字段并可独立验证。 |
-| `tests/test_config.py` | 测试配置读取和错误输入。 |
-| `tests/test_cli.py` | 测试命令行入口和执行顺序。 |
-| `tests/test_checkpoint_readout_data.py` | 测试 checkpoint、最后一层和数据读取。 |
+| `tests/conftest.py` | 测试共用配置和临时数据。 |
+| `tests/test_artifacts.py` | 测试身份、清单、写入和校验。 |
+| `tests/test_config.py` | 测试 YAML 和复用配置。 |
+| `tests/test_reuse.py` | 测试复用产物的复制、链接和回滚。 |
+| `tests/test_stage_resolution.py` | 测试各命令是否正确选择复用或计算。 |
+| `tests/test_dataset_fingerprint.py` | 测试 extxyz 语义一致性。 |
+| `tests/test_export.py` | 测试小型摘要导出。 |
+| `tests/test_formal_configs.py` | 测试正式推理和绘图配置。 |
+| `tests/test_plotting.py` | 测试多数据集绘图和 14 文件发布。 |
+| `tests/test_checkpoint_readout_data.py` | 测试 checkpoint、最后一层和数据标签。 |
 | `tests/test_curvature.py` | 测试曲率计算。 |
-| `tests/test_curvature_progress_validation.py` | 测试曲率断点文件的完整性检查。 |
-| `tests/test_n20_curvature_resume.py` | 测试小规模曲率计算中断后恢复。 |
-| `tests/test_ridge_calibration.py` | 测试 ridge 和 η 校准。 |
-| `tests/test_calibration_progress.py` | 测试校准断点的保存与恢复。 |
-| `tests/test_applied_calibration.py` | 测试校准参数能被评估阶段正确读取。 |
-| `tests/test_inference.py` | 测试评估结果的合并和统计。 |
-| `tests/test_plotting.py` | 测试绘图计算、独立输出和只读行为。 |
-| `tests/test_n20.py` | 使用真实 checkpoint 和 20 个结构测试两种 η 模式的完整链路。 |
+| `tests/test_curvature_progress_validation.py` | 测试曲率断点校验。 |
+| `tests/test_n20_curvature_resume.py` | 测试小数据曲率中断恢复。 |
+| `tests/test_ridge_calibration.py` | 测试 ridge、η 和 Alpha。 |
+| `tests/test_calibration_progress.py` | 测试校准中断恢复。 |
+| `tests/test_applied_calibration.py` | 测试评估是否正确应用 Alpha。 |
+| `tests/test_inference.py` | 测试推理合并和汇总。 |
+| `tests/test_n20.py` | 使用真实 checkpoint 做小数据全链路测试。 |
+| `tests/test_cli.py` | 测试命令分发。 |
+| `tests/test_release_contract.py` | 测试发布结果不依赖来源说明。 |
 
-`__pycache__/`、`.pyc`、运行日志和临时测试结果不属于发布内容。
+`__pycache__/`、`.pyc`、日志、断点临时目录和小规模测试输出不属于正式发布内容。
