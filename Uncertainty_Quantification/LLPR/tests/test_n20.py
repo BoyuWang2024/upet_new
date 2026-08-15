@@ -12,7 +12,11 @@ from Uncertainty_Quantification.LLPR.llpr.calibration import run_calibrate
 from Uncertainty_Quantification.LLPR.llpr.config import load_llpr_config
 from Uncertainty_Quantification.LLPR.llpr.curvature import run_build
 from Uncertainty_Quantification.LLPR.llpr.inference import run_evaluate
-from Uncertainty_Quantification.LLPR.llpr.plotting import PlotConfig, run_plot
+from Uncertainty_Quantification.LLPR.llpr.plot_multi import (
+    PlotConfig,
+    PlotEvaluationConfig,
+    run_plot,
+)
 
 
 CONFIGS = Path(__file__).resolve().parents[1] / "configs"
@@ -103,18 +107,23 @@ def test_n20_fixed_and_fit_full_paths(
 
     _assert_positive_finite_variances(fixed_evaluation)
     _assert_positive_finite_variances(fitted_evaluation)
-    for evaluation in (fixed_evaluation, fitted_evaluation):
+    for label, evaluation in (
+        ("fixed", fixed_evaluation),
+        ("fitted", fitted_evaluation),
+    ):
         plot = run_plot(
             PlotConfig(
-                run_root=evaluation.parents[2],
-                output_root=tmp_path / "plots",
-                evaluation_identity=str(_manifest(evaluation)["identity"]),
-                bin_count=5,
-                sample_size=10_000,
-                seed=2026,
+                evaluations=(
+                    PlotEvaluationConfig(
+                        label=label,
+                        run_root=evaluation.parents[2],
+                        evaluation_identity=str(_manifest(evaluation)["identity"]),
+                    ),
+                ),
+                output_root=tmp_path / "plots" / label,
             )
         )
-        assert (plot / "manifest.json").is_file()
+        assert (plot / "plotting_manifest.json").is_file()
 
     for run_root in (fixed_root, fitted_root):
         result = verify_run(run_root, level="full")

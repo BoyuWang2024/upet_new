@@ -12,8 +12,8 @@ from .calibration import resolve_calibration_stage as _resolve_calibration_stage
 from .config import load_llpr_config
 from .curvature import resolve_curvature_stage as _resolve_curvature_stage
 from .inference import run_evaluate as _run_evaluate
-from .plotting import load_plot_config
-from .plotting import run_plot as _run_plot
+from .plot_multi import load_plot_config
+from .plot_multi import run_plot as _run_plot
 
 
 LOGGER = logging.getLogger(__name__)

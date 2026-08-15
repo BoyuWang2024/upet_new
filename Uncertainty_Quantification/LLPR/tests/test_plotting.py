@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import csv
 import json
 from pathlib import Path
 
@@ -9,144 +12,180 @@ from Uncertainty_Quantification.LLPR.llpr.artifacts import (
     atomic_npz_save,
     sha256_file,
 )
-from Uncertainty_Quantification.LLPR.llpr.plotting import (
+from Uncertainty_Quantification.LLPR.llpr.plot_multi import (
     PlotConfig,
+    PlotEvaluationConfig,
+    PlotStyleConfig,
     analyze_panel,
     filter_log_pairs,
-    reliability_bins,
     run_plot,
-    standardized_residual_cdf,
+    shared_square_log_limits,
 )
 
 
-def test_panel_statistics_are_deterministic() -> None:
-    uncertainty = np.array([0.1, 0.2, 0.4, 0.8])
-    error = np.array([0.08, 0.3, 0.2, 1.0])
-
-    first = analyze_panel(uncertainty, error)
-    second = analyze_panel(uncertainty, error)
-
-    assert first == second
-    assert first.count == 4
-    assert np.isfinite(first.pearson_log10)
-    assert np.isfinite(first.spearman_log10)
-
-
-def test_nonpositive_and_nonfinite_log_pairs_are_filtered() -> None:
-    filtered = filter_log_pairs(
-        np.array([1.0, 0.0, np.nan, 2.0, -1.0]),
-        np.array([0.5, 1.0, 2.0, np.inf, 3.0]),
-    )
-
-    np.testing.assert_array_equal(filtered.uncertainty, np.array([1.0]))
-    np.testing.assert_array_equal(filtered.absolute_error, np.array([0.5]))
-    assert filtered.original_count == 5
-    assert filtered.dropped_count == 4
-
-
-def test_reliability_bins_and_standardized_cdf() -> None:
-    std = np.array([1.0, 2.0, 3.0, 4.0])
-    residual = np.array([0.5, -1.0, 6.0, -2.0])
-
-    bins = reliability_bins(std, residual, bin_count=2)
-    z, empirical = standardized_residual_cdf(std, residual)
-
-    assert len(bins) == 2
-    assert sum(item.count for item in bins) == 4
-    assert all(item.mean_predicted_std > 0 for item in bins)
-    np.testing.assert_allclose(z, np.array([0.5, 0.5, 0.5, 2.0]))
-    np.testing.assert_allclose(empirical, np.array([0.25, 0.5, 0.75, 1.0]))
-
-
-def _write_evaluation(root: Path) -> Path:
-    evaluation = root / "evaluation/cal/eval"
-    details = {
-        "energy_residual": np.array([0.1, -0.2, 0.3, -0.4]),
-        "energy_calibrated_std": np.array([0.15, 0.25, 0.35, 0.45]),
-        "force_residual": np.array([0.2, -0.1, 0.4, -0.3, 0.5, -0.6]),
-        "force_calibrated_std_component": np.array(
-            [0.25, 0.15, 0.45, 0.35, 0.55, 0.65]
-        ),
+def _write_evaluation(root: Path, identity: str, scale: float) -> PlotEvaluationConfig:
+    evaluation = root / "evaluation/cal" / identity
+    arrays = {
+        "energy_residual": scale * np.array([0.1, -0.2, 0.3, -0.4]),
+        "energy_calibrated_std": scale * np.array([0.15, 0.25, 0.35, 0.45]),
+        "force_residual": scale * np.array([0.2, -0.1, 0.4, -0.3, 0.5, -0.6]),
+        "force_calibrated_std_component": scale
+        * np.array([0.25, 0.15, 0.45, 0.35, 0.55, 0.65]),
     }
-    details_path = evaluation / "details.npz"
-    summary_path = evaluation / "summary.json"
-    atomic_npz_save(details_path, details)
-    atomic_json_dump(summary_path, {"structure_count": 4})
+    details = evaluation / "details.npz"
+    summary = evaluation / "summary.json"
+    atomic_npz_save(details, arrays)
+    atomic_json_dump(summary, {"structure_count": 4})
     atomic_json_dump(
         evaluation / "manifest.json",
         {
             "status": "complete",
-            "identity": "eval",
+            "identity": identity,
             "files": {
-                "details.npz": sha256_file(details_path),
-                "summary.json": sha256_file(summary_path),
+                "details.npz": sha256_file(details),
+                "summary.json": sha256_file(summary),
             },
         },
     )
-    return evaluation
-
-
-def test_run_plot_publishes_complete_figures_and_statistics(
-    tmp_path: Path,
-) -> None:
-    run_root = tmp_path / "run"
-    plot_root = tmp_path / "plots"
-    _write_evaluation(run_root)
-
-    output = run_plot(
-        PlotConfig(
-            run_root=run_root,
-            output_root=plot_root,
-            bin_count=2,
-            sample_size=100,
-            seed=7,
-        )
+    return PlotEvaluationConfig(
+        label=root.name, run_root=root, evaluation_identity=identity
     )
 
-    manifest = json.loads((output / "manifest.json").read_text())
+
+def _style() -> PlotStyleConfig:
+    return PlotStyleConfig(grid_size=24, dpi=40)
+
+
+def test_filtering_limits_and_analysis_are_deterministic() -> None:
+    first = (np.array([0.1, 0.2, np.nan]), np.array([0.2, 0.4, 1.0]))
+    second = (np.array([1.0, 2.0]), np.array([2.0, 4.0]))
+    filtered = filter_log_pairs(*first)
+    limits = shared_square_log_limits((first, second), margin=0.05)
+
+    assert filtered.valid_count == 2
+    assert filtered.excluded == {"nan": 1, "inf": 0, "zero": 0, "negative": 0}
+    assert limits[0] < -1.0
+    assert limits[1] > np.log10(4.0)
+
+    uncertainty = np.geomspace(0.01, 1.0, 20)
+    error = uncertainty[::-1]
+    kwargs = {
+        "log_limits": (-2.1, 0.1),
+        "grid_size": 24,
+        "gaussian_sigma": 1.2,
+        "contour_masses": (0.5, 0.7, 0.85, 0.95, 0.99),
+        "scatter_max_points": 10,
+        "random_seed": 7,
+        "coverage_thresholds": (),
+    }
+    left = analyze_panel(uncertainty, error, **kwargs)
+    right = analyze_panel(uncertainty, error, **kwargs)
+    np.testing.assert_array_equal(left.scatter_indices, right.scatter_indices)
+    assert left.statistics == right.statistics
+    assert left.statistics["spearman_log"] == pytest.approx(-1.0)
+
+
+def test_run_plot_publishes_exactly_fourteen_verified_files(tmp_path: Path) -> None:
+    evaluations = tuple(
+        _write_evaluation(tmp_path / label, f"eval-{index}", scale)
+        for index, (label, scale) in enumerate(
+            (("matpes_test", 1.0), ("mad_test", 10.0), ("matpes_train", 100.0))
+        )
+    )
+    output = tmp_path / "plots"
+    assert (
+        run_plot(
+            PlotConfig(evaluations=evaluations, output_root=output, style=_style())
+        )
+        == output
+    )
+
+    expected = {
+        *(
+            f"llpr_{label}_{target}_uncertainty_vs_residual.{suffix}"
+            for label in ("matpes_test", "mad_test", "matpes_train")
+            for target in ("energy", "force")
+            for suffix in ("png", "pdf")
+        ),
+        "plotting_statistics.csv",
+        "plotting_manifest.json",
+    }
+    assert {path.name for path in output.iterdir()} == expected
+    assert all(path.stat().st_size > 0 for path in output.iterdir())
+
+    manifest = json.loads((output / "plotting_manifest.json").read_text())
     assert manifest["status"] == "complete"
-    assert "origin" not in manifest
-    assert "source_origin" not in manifest
-    assert manifest["evaluation_identity"] == "eval"
-    assert output.parent == plot_root
-    for name in (
-        "energy_uncertainty_vs_error.png",
-        "energy_uncertainty_vs_error.pdf",
-        "force_uncertainty_vs_error.png",
-        "force_uncertainty_vs_error.pdf",
-        "reliability.png",
-        "reliability.pdf",
-        "standardized_residual.png",
-        "standardized_residual.pdf",
-        "statistics.csv",
-    ):
-        assert (output / name).is_file()
-        assert (output / name).stat().st_size > 0
+    assert set(manifest["evaluation_identities"]) == {
+        "matpes_test",
+        "mad_test",
+        "matpes_train",
+    }
+    assert set(manifest["files"]) == expected - {"plotting_manifest.json"}
+    for name, digest in manifest["files"].items():
+        assert sha256_file(output / name) == digest
+    assert str(tmp_path.resolve()) not in json.dumps(manifest)
+
+    with (output / "plotting_statistics.csv").open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 6
+    assert {(row["dataset"], row["target"]) for row in rows} == {
+        (label, target)
+        for label in ("matpes_test", "mad_test", "matpes_train")
+        for target in ("energy", "force")
+    }
+    for target in ("energy", "force"):
+        limits = {
+            (row["log_limit_low"], row["log_limit_high"])
+            for row in rows
+            if row["target"] == target
+        }
+        assert len(limits) == 1
 
 
-def test_plotting_does_not_modify_evaluation_details(tmp_path: Path) -> None:
-    run_root = tmp_path / "run"
-    evaluation = _write_evaluation(run_root)
-    details = evaluation / "details.npz"
-    before_hash = sha256_file(details)
-    before_mtime = details.stat().st_mtime_ns
-
+def test_plotting_is_read_only_and_validates_configuration(tmp_path: Path) -> None:
+    evaluation = _write_evaluation(tmp_path / "matpes_test", "eval", 1.0)
+    details = tmp_path / "matpes_test/evaluation/cal/eval/details.npz"
+    before = (sha256_file(details), details.stat().st_mtime_ns)
     run_plot(
         PlotConfig(
-            run_root=run_root,
-            output_root=tmp_path / "plots",
-            bin_count=2,
-            sample_size=2,
-            seed=3,
+            evaluations=(evaluation,), output_root=tmp_path / "plots", style=_style()
         )
     )
+    assert (sha256_file(details), details.stat().st_mtime_ns) == before
 
-    assert sha256_file(details) == before_hash
-    assert details.stat().st_mtime_ns == before_mtime
+    with pytest.raises(ValueError, match="unique"):
+        PlotConfig(
+            evaluations=(evaluation, evaluation), output_root=tmp_path / "plots-2"
+        )
+    with pytest.raises(ValueError, match="label"):
+        PlotEvaluationConfig(label="../unsafe", run_root=tmp_path / "one")
+    with pytest.raises(ValueError, match="outside"):
+        PlotConfig(
+            evaluations=(evaluation,),
+            output_root=tmp_path / "matpes_test/plots",
+        )
 
 
-def test_plot_output_must_be_outside_formal_run(tmp_path: Path) -> None:
-    run_root = tmp_path / "run"
+def test_existing_destination_survives_failed_render(tmp_path: Path) -> None:
+    output = tmp_path / "plots"
+    output.mkdir()
+    marker = output / "keep.txt"
+    marker.write_text("old")
+    evaluation = _write_evaluation(tmp_path / "bad", "eval", 1.0)
+    details = tmp_path / "bad/evaluation/cal/eval/details.npz"
+    with np.load(details) as archive:
+        arrays = {
+            name: archive[name] for name in archive.files if name != "force_residual"
+        }
+    atomic_npz_save(details, arrays)
+    manifest_path = details.parent / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["files"]["details.npz"] = sha256_file(details)
+    atomic_json_dump(manifest_path, manifest)
 
-    with pytest.raises(ValueError, match="outside run_root"):
-        PlotConfig(run_root=run_root, output_root=run_root / "plots")
+    with pytest.raises(KeyError, match="force_residual"):
+        run_plot(
+            PlotConfig(evaluations=(evaluation,), output_root=output, style=_style())
+        )
+    assert marker.read_text() == "old"
+    assert {path.name for path in output.iterdir()} == {"keep.txt"}
