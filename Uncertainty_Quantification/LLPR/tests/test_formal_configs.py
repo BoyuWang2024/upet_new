@@ -38,3 +38,11 @@ def test_formal_three_dataset_plot_config_loads() -> None:
     )
     assert config.output_root.name == "LLPR"
     assert config.style.grid_size == 160
+
+
+def test_matpes_train_config_binds_verified_local_dataset() -> None:
+    config = load_llpr_config(CONFIGS / "gpu_matpes_train_fixed.yaml")
+
+    assert config.data.test_expected_sha256 == (
+        "12ff9403254c955537827ba96c140ee1753a7410ada7910f13c42be0aa308cec"
+    )
