@@ -8,6 +8,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from .artifacts import _absolute_lexical, _reject_symlink_components
 from .errors import HardFailure
 from .identifiers import validate_artifact_key
 from .uq_publication import _manifest_document, compute_uncertainty_results
@@ -78,15 +79,19 @@ def validate_uq_publication(
     """Recompute one generic UQ publication and require complete exact equality."""
 
     key = _validate_request(split, mode, member_count)
-    root = Path(run_root).expanduser().resolve()
+    root_path = _absolute_lexical(run_root)
+    _reject_symlink_components(root_path)
+    root = root_path.resolve()
     expected = compute_uncertainty_results(
         root / "predictions" / key, mode=mode, member_count=member_count
     )
-    published = (
-        Path(publication_root).expanduser().resolve()
+    publication_path = (
+        _absolute_lexical(publication_root)
         if publication_root is not None
-        else root / "uncertainty" / key / mode
+        else root_path / "uncertainty" / key / mode
     )
+    _reject_symlink_components(publication_path)
+    published = publication_path.resolve()
     results_path, manifest_path = _exact_publication_files(published)
     try:
         with np.load(results_path, allow_pickle=False) as archive:

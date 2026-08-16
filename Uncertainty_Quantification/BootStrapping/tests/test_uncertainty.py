@@ -186,3 +186,156 @@ def test_compute_store_uncertainty_rejects_unsafe_generic_key(tmp_path: Path) ->
             member_count=2,
             units=_UNITS,
         )
+
+
+def test_generic_publication_manifest_matches_literal_v1_contract(
+    tmp_path: Path,
+) -> None:
+    """Catches v1 manifest drift hidden by shared publication/audit helpers."""
+    import json
+
+    from Uncertainty_Quantification.BootStrapping.bootstrap.artifacts import sha256_file
+    from Uncertainty_Quantification.BootStrapping.bootstrap.uq_publication import (
+        compute_uncertainty_results,
+        publish_uncertainty_results,
+    )
+
+    split_root = _write_prediction_split(
+        tmp_path / "predictions", dataset_key="mad_test", target_stress=False
+    )
+    results = compute_uncertainty_results(split_root, mode="raw", member_count=2)
+    root = tmp_path / "uncertainty" / "mad_test" / "raw"
+    publication = publish_uncertainty_results(
+        root, results, dataset_key="mad_test", mode="raw", member_count=2, units=_UNITS
+    )
+
+    expected_arrays = {
+        "energy_gmd": {"shape": [2], "dtype": "float64"},
+        "energy_mean": {"shape": [2], "dtype": "float64"},
+        "energy_per_atom_gmd": {"shape": [2], "dtype": "float64"},
+        "energy_per_atom_std": {"shape": [2], "dtype": "float64"},
+        "energy_std": {"shape": [2], "dtype": "float64"},
+        "force_vector_rms_gmd": {"shape": [3], "dtype": "float64"},
+        "force_vector_rms_std": {"shape": [3], "dtype": "float64"},
+        "forces_gmd": {"shape": [3, 3], "dtype": "float64"},
+        "forces_mean": {"shape": [3, 3], "dtype": "float64"},
+        "forces_std": {"shape": [3, 3], "dtype": "float64"},
+        "stress_gmd": {"shape": [2, 3, 3], "dtype": "float64"},
+        "stress_mean": {"shape": [2, 3, 3], "dtype": "float64"},
+        "stress_std": {"shape": [2, 3, 3], "dtype": "float64"},
+        "stress_tensor_rms_gmd": {"shape": [2], "dtype": "float64"},
+        "stress_tensor_rms_std": {"shape": [2], "dtype": "float64"},
+    }
+    expected_manifest = {
+        "schema": "upet.bootstrap.uncertainty/v1",
+        "formula": {
+            "standard_deviation": "sample_ddof_1",
+            "gmd": "distinct_unordered_pairs",
+            "reduction_dtype": "float64",
+        },
+        "split": "mad_test",
+        "parameter_mode": "raw",
+        "member_count": 2,
+        "units": _UNITS,
+        "results": {
+            "path": "results.npz",
+            "sha256": sha256_file(publication.results_path),
+            "arrays": expected_arrays,
+        },
+    }
+    actual_manifest = json.loads(publication.manifest_path.read_text(encoding="utf-8"))
+    assert actual_manifest == expected_manifest
+
+
+def test_publish_uncertainty_rejects_symlinked_output_ancestor(tmp_path: Path) -> None:
+    """Catches direct UQ publication following a symlinked output ancestor."""
+    from Uncertainty_Quantification.BootStrapping.bootstrap.errors import HardFailure
+    from Uncertainty_Quantification.BootStrapping.bootstrap.uq_publication import (
+        compute_uncertainty_results,
+        publish_uncertainty_results,
+    )
+
+    split_root = _write_prediction_split(
+        tmp_path / "predictions", dataset_key="test", target_stress=True
+    )
+    results = compute_uncertainty_results(split_root, mode="raw", member_count=2)
+    external = tmp_path / "external_output"
+    external.mkdir()
+    output_link = tmp_path / "uncertainty"
+    output_link.symlink_to(external, target_is_directory=True)
+
+    with pytest.raises(HardFailure, match="symlink"):
+        publish_uncertainty_results(
+            output_link / "test" / "raw",
+            results,
+            dataset_key="test",
+            mode="raw",
+            member_count=2,
+            units=_UNITS,
+        )
+
+    assert not list(external.iterdir())
+
+
+def test_compute_uncertainty_rejects_symlinked_split_and_member(tmp_path: Path) -> None:
+    """Catches direct UQ computation following split or member artifact links."""
+    from Uncertainty_Quantification.BootStrapping.bootstrap.errors import HardFailure
+    from Uncertainty_Quantification.BootStrapping.bootstrap.uq_publication import (
+        compute_uncertainty_results,
+    )
+
+    split_root = _write_prediction_split(
+        tmp_path / "predictions", dataset_key="test", target_stress=True
+    )
+    split_link = tmp_path / "split_link"
+    split_link.symlink_to(split_root, target_is_directory=True)
+    with pytest.raises(HardFailure, match="symlink"):
+        compute_uncertainty_results(split_link, mode="raw", member_count=2)
+
+    member = split_root / "members" / "member_000" / "raw.npz"
+    external_member = tmp_path / "external_member.npz"
+    external_member.write_bytes(member.read_bytes())
+    member.unlink()
+    member.symlink_to(external_member)
+    with pytest.raises(HardFailure, match="symlink"):
+        compute_uncertainty_results(split_root, mode="raw", member_count=2)
+
+
+def test_compute_store_uncertainty_rejects_symlinked_input_and_output(
+    tmp_path: Path,
+) -> None:
+    """Catches store UQ following either prediction or output symlink ancestors."""
+    from Uncertainty_Quantification.BootStrapping.bootstrap.errors import HardFailure
+    from Uncertainty_Quantification.BootStrapping.bootstrap.uq_publication import (
+        compute_store_uncertainty,
+    )
+
+    prediction_root = tmp_path / "predictions"
+    _write_prediction_split(prediction_root, dataset_key="test", target_stress=True)
+    input_link = tmp_path / "prediction_link"
+    input_link.symlink_to(prediction_root, target_is_directory=True)
+    with pytest.raises(HardFailure, match="symlink"):
+        compute_store_uncertainty(
+            input_link,
+            tmp_path / "output",
+            split="test",
+            mode="raw",
+            member_count=2,
+            units=_UNITS,
+        )
+
+    external_output = tmp_path / "external_output"
+    external_output.mkdir()
+    output_link = tmp_path / "output_link"
+    output_link.symlink_to(external_output, target_is_directory=True)
+    with pytest.raises(HardFailure, match="symlink"):
+        compute_store_uncertainty(
+            prediction_root,
+            output_link,
+            split="test",
+            mode="raw",
+            member_count=2,
+            units=_UNITS,
+        )
+
+    assert not list(external_output.iterdir())

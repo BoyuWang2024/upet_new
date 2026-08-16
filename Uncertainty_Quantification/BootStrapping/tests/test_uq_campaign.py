@@ -189,3 +189,50 @@ def test_campaign_selection_keeps_declaration_order(tmp_path: Path) -> None:
         ("run_0", "test"),
         ("run_1", "test"),
     ]
+
+
+def test_campaign_rejects_symlinked_uncertainty_reuse_paths(tmp_path: Path) -> None:
+    """Catches validation that resolves a publication symlink before rejecting it."""
+    import Uncertainty_Quantification.BootStrapping.bootstrap.uq_campaign as uq_campaign
+    from Uncertainty_Quantification.BootStrapping.bootstrap.errors import HardFailure
+    from Uncertainty_Quantification.BootStrapping.bootstrap.validation import (
+        validate_uq_publication,
+    )
+
+    run_root = tmp_path / "run"
+    _write_prediction_split(run_root / "predictions", "test")
+    from Uncertainty_Quantification.BootStrapping.bootstrap.uq_publication import (
+        compute_uncertainty_results,
+        publish_uncertainty_results,
+    )
+
+    external_uncertainty = tmp_path / "external_uncertainty"
+    results = compute_uncertainty_results(
+        run_root / "predictions" / "test", mode="raw", member_count=2
+    )
+    publish_uncertainty_results(
+        external_uncertainty / "test" / "raw",
+        results,
+        dataset_key="test",
+        mode="raw",
+        member_count=2,
+        units=_UNITS,
+    )
+    uncertainty_link = run_root / "uncertainty"
+    uncertainty_link.symlink_to(external_uncertainty, target_is_directory=True)
+
+    with pytest.raises(HardFailure, match="symlink"):
+        validate_uq_publication(
+            run_root,
+            split="test",
+            mode="raw",
+            member_count=2,
+            publication_root=uncertainty_link / "test" / "raw",
+        )
+    with pytest.raises(HardFailure, match="symlink"):
+        uq_campaign.compute_campaign_uq(
+            _campaign((run_root,), ("test",)), run_labels=None, dataset_labels=None
+        )
+
+    assert (external_uncertainty / "test" / "raw" / "manifest.json").is_file()
+    assert uncertainty_link.is_symlink()

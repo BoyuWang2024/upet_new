@@ -9,7 +9,13 @@ from typing import Mapping
 import numpy as np
 from numpy.typing import NDArray
 
-from .artifacts import atomic_write_json, atomic_write_npz, sha256_file
+from .artifacts import (
+    _absolute_lexical,
+    _reject_symlink_components,
+    atomic_write_json,
+    atomic_write_npz,
+    sha256_file,
+)
 from .errors import HardFailure
 from .identifiers import validate_artifact_key
 from .prediction import load_target_arrays
@@ -51,6 +57,8 @@ def _member_paths(
         split_root / "members" / f"member_{index:03d}" / f"{mode}.npz"
         for index in range(member_count)
     )
+    for path in members:
+        _reject_symlink_components(path)
     if any(not path.is_file() for path in members):
         raise HardFailure(f"uncertainty requires every configured {mode} member")
     return members
@@ -64,8 +72,12 @@ def compute_uncertainty_results(
     from .uncertainty import pairwise_gmd, scalar_rms_reductions, streaming_mean_std
 
     _validate_request("selected_split", mode, member_count)
-    split_root = Path(prediction_split_root).expanduser().resolve()
-    targets = load_target_arrays(split_root / "targets.npz")
+    split_path = _absolute_lexical(prediction_split_root)
+    _reject_symlink_components(split_path)
+    split_root = split_path.resolve()
+    targets_path = split_root / "targets.npz"
+    _reject_symlink_components(targets_path)
+    targets = load_target_arrays(targets_path)
     members = _member_paths(split_root, mode=mode, member_count=member_count)
     results: dict[str, NDArray[np.float64]] = {}
     for field in ("energy", "forces", "stress"):
@@ -136,7 +148,9 @@ def publish_uncertainty_results(
     """Publish already-reduced UQ arrays, with the manifest written last."""
 
     key = _validate_request(dataset_key, mode, member_count)
-    root = Path(publication_root).expanduser().resolve()
+    root_path = _absolute_lexical(publication_root)
+    _reject_symlink_components(root_path)
+    root = root_path.resolve()
     canonical = {
         name: np.asarray(value, dtype=np.float64) for name, value in results.items()
     }
@@ -173,12 +187,17 @@ def compute_store_uncertainty(
     """Compute and publish UQ from one canonical prediction dataset."""
 
     key = _validate_request(split, mode, member_count)
-    prediction_path = Path(prediction_root).expanduser().resolve()
+    prediction_path = _absolute_lexical(prediction_root)
+    _reject_symlink_components(prediction_path)
+    prediction_path = prediction_path.resolve()
+    output_path = _absolute_lexical(output_root)
+    _reject_symlink_components(output_path)
+    output_path = output_path.resolve()
     results = compute_uncertainty_results(
         prediction_path / key, mode=mode, member_count=member_count
     )
     return publish_uncertainty_results(
-        Path(output_root).expanduser().resolve() / key / mode,
+        output_path / key / mode,
         results,
         dataset_key=key,
         mode=mode,
