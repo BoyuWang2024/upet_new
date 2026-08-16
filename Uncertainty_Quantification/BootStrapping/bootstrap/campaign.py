@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -76,10 +77,11 @@ def _mapping(value: object, location: str) -> Mapping[str, Any]:
 
 def _keys(value: object, location: str, required: set[str]) -> Mapping[str, Any]:
     result = _mapping(value, location)
-    unknown = set(result) - required
+    unknown = [key for key in result if key not in required]
     if unknown:
-        raise HardFailure(f"unknown key {location}.{sorted(unknown)[0]}")
-    missing = required - set(result)
+        raise HardFailure(f"unknown key {location}.{sorted(map(str, unknown))[0]}")
+    present = {key for key in result if isinstance(key, str)}
+    missing = required - present
     if missing:
         raise HardFailure(f"missing key {location}.{sorted(missing)[0]}")
     return result
@@ -118,8 +120,8 @@ def _nonnegative_int(value: object, location: str) -> int:
 
 def _positive_float(value: object, location: str) -> float:
     result = _typed(value, float, location)
-    if result <= 0:
-        raise HardFailure(f"{location} must be positive")
+    if not math.isfinite(result) or result <= 0:
+        raise HardFailure(f"{location} must be finite and positive")
     return result
 
 
@@ -164,7 +166,7 @@ def _load_prediction(value: object) -> CampaignPrediction:
         raise HardFailure("prediction.member_count must be at least 2")
     return CampaignPrediction(
         mode=mode,
-        member_count=_positive_int(record["member_count"], "prediction.member_count"),
+        member_count=member_count,
         device=_nonempty_text(record["device"], "prediction.device"),
         batch_size=_positive_int(record["batch_size"], "prediction.batch_size"),
     )

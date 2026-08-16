@@ -203,3 +203,30 @@ def test_select_campaign_items_preserves_campaign_order(tmp_path: Path) -> None:
 
     assert [run.label for run in runs] == ["full_remote_b8_e8", "lr_1e-6"]
     assert [dataset.label for dataset in datasets] == ["mad_test", "matpes_train"]
+
+
+def test_campaign_rejects_mixed_type_unknown_keys(tmp_path: Path) -> None:
+    source = _write_campaign(tmp_path)
+    source.write_text(
+        "1: numeric-unknown\nunexpected: true\n" + source.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(HardFailure, match="unknown key"):
+        load_campaign(source)
+
+
+@pytest.mark.parametrize("value", [".nan", ".inf", "-.inf"])
+def test_campaign_rejects_nonfinite_positive_plot_values(
+    tmp_path: Path, value: str
+) -> None:
+    source = _write_campaign(tmp_path)
+    source.write_text(
+        source.read_text(encoding="utf-8").replace(
+            "gaussian_sigma: 1.2", f"gaussian_sigma: {value}"
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(HardFailure, match="gaussian_sigma must be finite and positive"):
+        load_campaign(source)
