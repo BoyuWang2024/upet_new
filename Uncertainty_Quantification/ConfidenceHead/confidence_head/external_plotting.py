@@ -129,7 +129,7 @@ def verify_plot_publication(
 
 def _external_series(source: Path) -> PlotSeries:
     run = source.parent.parent
-    verify_run(run, full=True)
+    verify_run(run, full=True, allow_plots=True)
     external_manifest = verify_external_prediction(source / "manifest.json", full=True)
     config = _mapping(run / "resolved_config.yaml", yaml_file=True)
     bins = _mapping(run / "binning.json")

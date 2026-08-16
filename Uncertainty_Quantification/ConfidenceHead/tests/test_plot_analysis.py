@@ -120,7 +120,7 @@ def _write_plot_run(
 
 @pytest.fixture(autouse=True)
 def _accept_synthetic_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(plot_analysis, "verify_run", lambda run_dir, full: {})
+    monkeypatch.setattr(plot_analysis, "verify_run", lambda run_dir, full, **kwargs: {})
 
 
 def test_load_energy_preserves_per_atom_observations(tmp_path: Path) -> None:

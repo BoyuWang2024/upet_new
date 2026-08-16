@@ -353,8 +353,10 @@ def _verify_cache(manifest: Mapping[str, Any], counts: Mapping[str, Any]) -> Non
         raise ValueError("evaluation test counts disagree with complete cache")
 
 
-def verify_run(run_dir: Path, *, full: bool = True) -> dict[str, Any]:
-    """Verify completeness, identity linkage, hashes, shapes, and no figures."""
+def verify_run(
+    run_dir: Path, *, full: bool = True, allow_plots: bool = False
+) -> dict[str, Any]:
+    """Verify a run, optionally allowing derived figures below ``plots/``."""
     root = Path(run_dir).resolve()
     manifest = _mapping(root / "manifest.json")
     if (
@@ -379,8 +381,12 @@ def verify_run(run_dir: Path, *, full: bool = True) -> dict[str, Any]:
             str(artifacts["checkpoints/last.pt"]["sha256"]),
             force_mode,
         )
+    plots_root = (root / "plots").resolve()
     images = [
-        path for path in root.rglob("*") if path.suffix.lower() in _IMAGE_SUFFIXES
+        path
+        for path in root.rglob("*")
+        if path.suffix.lower() in _IMAGE_SUFFIXES
+        and not (allow_plots and path.resolve().is_relative_to(plots_root))
     ]
     if images:
         raise ValueError(f"run contains forbidden figure artifacts: {images}")

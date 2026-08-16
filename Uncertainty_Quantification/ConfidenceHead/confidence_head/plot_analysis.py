@@ -128,7 +128,7 @@ def load_plot_series(
     if expected_num_bins != _EXPECTED_NUM_BINS:
         raise ValueError("UPET result plots require exactly 50 bins")
     root = Path(run_dir).resolve()
-    verify_run(root, full=True)
+    verify_run(root, full=True, allow_plots=True)
     config = _mapping(root / "resolved_config.yaml", yaml_file=True)
     bins = _mapping(root / "binning.json")
     metrics = _mapping(root / "evaluation" / "metrics.json")

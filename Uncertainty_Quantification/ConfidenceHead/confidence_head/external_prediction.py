@@ -439,7 +439,7 @@ def predict_dataset_run(
 def _existing_evaluations(runs: ExternalRuns) -> tuple[Path, ...]:
     outputs: list[Path] = []
     for run in runs.ordered():
-        verify_run(run, full=True)
+        verify_run(run, full=True, allow_plots=True)
         evaluation = run / "evaluation"
         if not (evaluation / "manifest.json").is_file():
             raise ValueError(f"existing evaluation is missing: {run.name}")
