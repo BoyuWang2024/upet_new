@@ -1,0 +1,7 @@
+schema_version: upet.fge.plot.v1
+input:
+  root: ../outputs/inference_matpes_train_k8
+  kind: inference
+output:
+  root: ../../Plots/FGE/matpes_train
+plot: {}

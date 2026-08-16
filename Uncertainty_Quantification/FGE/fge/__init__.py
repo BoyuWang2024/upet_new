@@ -24,6 +24,13 @@ from .evaluation import (
     evaluate_prediction,
     global_mae,
 )
+from .inference_config import InferenceConfig, load_inference_config
+from .inference_evaluation import evaluate_inference_dataset
+from .inference_only import predict_inference_dataset
+from .inference_validation import (
+    InferenceValidationReport,
+    validate_inference_result,
+)
 from .manifests import (
     build_prediction_manifest,
     build_result_manifest,
@@ -41,6 +48,17 @@ from .members import (
     pack_member,
     readout_tensor_names,
 )
+from .plot_analysis import (
+    PlotAnalysisResult,
+    PlotConfig,
+    PlotInput,
+    PlotSettings,
+    analyze_plot_input,
+    load_completed_fge_plot_input,
+    load_inference_plot_input,
+    load_plot_config,
+)
+from .plot_rendering import render_plot_suite
 from .prediction import (
     PredictionShape,
     canonical_prediction,
@@ -109,4 +127,19 @@ __all__ = [
     "train_fge",
     "PETTrainingRuntime",
     "validate_prediction_payload",
+    "InferenceConfig",
+    "InferenceValidationReport",
+    "PlotAnalysisResult",
+    "PlotConfig",
+    "PlotInput",
+    "PlotSettings",
+    "analyze_plot_input",
+    "evaluate_inference_dataset",
+    "load_completed_fge_plot_input",
+    "load_inference_config",
+    "load_inference_plot_input",
+    "load_plot_config",
+    "predict_inference_dataset",
+    "render_plot_suite",
+    "validate_inference_result",
 ]

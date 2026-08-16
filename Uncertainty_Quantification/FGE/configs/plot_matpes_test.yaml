@@ -1,0 +1,7 @@
+schema_version: upet.fge.plot.v1
+input:
+  root: ../outputs/upet-FGE-CKPT-UQ-v1.0-full-v3
+  kind: completed_fge
+output:
+  root: ../../Plots/FGE/matpes_test
+plot: {}
