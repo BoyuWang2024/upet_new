@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 
 
@@ -233,3 +234,92 @@ def test_predict_run_preserves_raw_and_ema_combined_publication(
         (1, "raw"),
         (1, "ema"),
     ]
+
+    from Uncertainty_Quantification.BootStrapping.bootstrap.prediction_publication import (
+        validate_legacy_prediction_publication,
+    )
+
+    validate_legacy_prediction_publication(
+        manifest.parent,
+        dataset_key="test",
+        modes=("raw", "ema"),
+        member_count=2,
+        structure_limit=None,
+    )
+
+
+def test_predict_run_legacy_member_failure_removes_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from Uncertainty_Quantification.BootStrapping.bootstrap import native_prediction
+    from Uncertainty_Quantification.BootStrapping.bootstrap.errors import HardFailure
+    from Uncertainty_Quantification.BootStrapping.bootstrap.native_prediction import (
+        predict_run,
+    )
+
+    class Atoms:
+        info = {}
+
+        def __len__(self) -> int:
+            return 1
+
+        def get_potential_energy(self) -> float:
+            return -1.0
+
+        def get_forces(self) -> np.ndarray:
+            return np.zeros((1, 3), dtype=np.float64)
+
+        def get_stress(self, *, voigt: bool) -> np.ndarray:
+            return np.zeros((3, 3), dtype=np.float64)
+
+    def load_member(
+        base: object,
+        checkpoint: Path,
+        *,
+        mode: str,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[int, str]:
+        del base, device, dtype
+        member = int(checkpoint.parts[-3].split("_")[1])
+        if (member, mode) == (1, "ema"):
+            raise HardFailure("member mode failed")
+        return (member, mode)
+
+    def predict_member(
+        model: tuple[int, str],
+        atoms: list[Atoms],
+        *,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ):
+        del atoms, batch_size, device, dtype
+        return native_prediction.PredictionArrays(
+            energy=np.array([float(model[0])]),
+            forces=np.zeros((1, 3)),
+            stress=np.zeros((1, 3, 3)),
+        )
+
+    monkeypatch.setattr(native_prediction, "_read_atoms", lambda path, limit: [Atoms()])
+    monkeypatch.setattr(native_prediction, "load_pet_member_model", load_member)
+    monkeypatch.setattr(native_prediction, "_predict_dataset", predict_member)
+    config = SimpleNamespace(
+        prediction=SimpleNamespace(
+            splits=("test",),
+            parameter_modes=("raw", "ema"),
+            device="cpu",
+            batch_size=2,
+        ),
+        training=SimpleNamespace(precision="float64"),
+        bootstrap=SimpleNamespace(ensemble_size=2),
+        experiment=SimpleNamespace(run_id="legacy"),
+        checkpoint=SimpleNamespace(base_path="base.ckpt"),
+        data=SimpleNamespace(test=tmp_path / "test.xyz"),
+    )
+
+    with pytest.raises(HardFailure, match="member mode failed"):
+        predict_run(config, tmp_path)
+
+    assert not (tmp_path / "predictions" / "test").exists()
+    assert not list((tmp_path / "predictions").glob(".test.*.staging"))

@@ -102,30 +102,30 @@ def _validate_members(
     root: Path,
     document: Mapping[str, Any],
     *,
-    mode: str,
+    modes: tuple[str, ...],
     member_count: int,
     targets: TargetArrays,
 ) -> None:
     records = document.get("members")
-    if not isinstance(records, list) or len(records) != member_count:
+    if not isinstance(records, list) or len(records) != member_count * len(modes):
         raise HardFailure("prediction manifest member records do not match count")
     declared_paths: set[str] = set()
-    declared_indices: set[int] = set()
-    for record in records:
+    for position, record in enumerate(records):
         item = _mapping(record, "prediction manifest member")
         if set(item) != _MEMBER_KEYS:
             raise HardFailure("prediction manifest member record keys do not match schema")
         index = item["member_index"]
+        expected_index = position // len(modes)
+        expected_mode = modes[position % len(modes)]
         if isinstance(index, bool) or not isinstance(index, int):
             raise HardFailure("prediction manifest member_index must be an integer")
-        if index != len(declared_indices):
+        if index != expected_index:
             raise HardFailure("prediction manifest member record order differs")
-        expected_path = f"members/member_{index:03d}/{mode}.npz"
+        expected_path = f"members/member_{index:03d}/{expected_mode}.npz"
         if (
             index < 0
-            or item["mode"] != mode
+            or item["mode"] != expected_mode
             or item["path"] != expected_path
-            or index in declared_indices
             or item["path"] in declared_paths
         ):
             raise HardFailure("prediction manifest member records do not match schema")
@@ -137,16 +137,35 @@ def _validate_members(
         shapes, dtypes = _expected_metadata(values)
         if item["shapes"] != shapes or item["dtypes"] != dtypes:
             raise HardFailure(f"prediction member metadata differs: {index}")
-        declared_indices.add(index)
         declared_paths.add(expected_path)
-    if declared_indices != set(range(member_count)):
-        raise HardFailure("prediction manifest member records do not match schema")
     actual_paths = {
         str(path.relative_to(root)).replace("\\", "/")
         for path in (root / "members").rglob("*.npz")
     }
     if actual_paths != declared_paths:
         raise HardFailure("prediction member files do not match manifest")
+
+
+def _validate_v1_header(
+    document: Mapping[str, Any], dataset_key: str, member_count: int
+) -> None:
+    required = {
+        "schema",
+        "split",
+        "units",
+        "member_count",
+        "targets",
+        "members",
+    }
+    if (
+        set(document) != required
+        or document["split"] != dataset_key
+        or document["units"] != _UNITS
+        or isinstance(document["member_count"], bool)
+        or not isinstance(document["member_count"], int)
+        or document["member_count"] != member_count
+    ):
+        raise HardFailure("prediction manifest metadata does not match request")
 
 
 def validate_prediction_publication(
@@ -172,16 +191,7 @@ def validate_prediction_publication(
     document = _load_manifest(manifest_path)
     schema = document.get("schema")
     if schema == "upet.bootstrap.predictions/v1":
-        required = {
-            "schema",
-            "split",
-            "units",
-            "member_count",
-            "targets",
-            "members",
-        }
-        if set(document) != required or document["split"] != key:
-            raise HardFailure("prediction manifest dataset key does not match")
+        _validate_v1_header(document, key, member_count)
         expected_schema_targets = ("energy", "forces", "stress")
     elif schema == "upet.bootstrap.predictions/v2":
         required = {
@@ -206,7 +216,9 @@ def validate_prediction_publication(
         expected_schema_targets = ("energy", "forces")
     else:
         raise HardFailure("prediction manifest schema is not supported")
-    if document["units"] != _UNITS or document["member_count"] != member_count:
+    if schema != "upet.bootstrap.predictions/v1" and (
+        document["units"] != _UNITS or document["member_count"] != member_count
+    ):
         raise HardFailure("prediction manifest metadata does not match request")
     targets = _validate_targets(
         root, document, reference_targets, structure_limit
@@ -214,6 +226,41 @@ def validate_prediction_publication(
     if target_fields(targets) != expected_schema_targets:
         raise HardFailure("prediction manifest schema target layout differs")
     _validate_members(
-        root, document, mode=mode, member_count=member_count, targets=targets
+        root, document, modes=(mode,), member_count=member_count, targets=targets
     )
     return PredictionPublicationAudit(manifest_path, key, mode, member_count)
+
+
+def validate_legacy_prediction_publication(
+    split_root: str | Path,
+    *,
+    dataset_key: str,
+    modes: tuple[str, ...],
+    member_count: int,
+    structure_limit: int | None,
+) -> PredictionPublicationAudit:
+    """Audit an ordered legacy raw-plus-EMA v1 publication."""
+
+    key = validate_artifact_key(dataset_key, "prediction dataset key")
+    if modes != ("raw", "ema"):
+        raise HardFailure("legacy prediction modes must be raw then ema")
+    if isinstance(member_count, bool) or member_count < 1:
+        raise HardFailure("prediction member_count must be positive")
+    root = _publication_root(split_root)
+    manifest_path = root / "manifest.json"
+    document = _load_manifest(manifest_path)
+    if document.get("schema") != "upet.bootstrap.predictions/v1":
+        raise HardFailure("legacy prediction manifest schema is not supported")
+    _validate_v1_header(document, key, member_count)
+    targets = _validate_targets(
+        root,
+        document,
+        ("energy", "forces", "stress"),
+        structure_limit,
+    )
+    if target_fields(targets) != ("energy", "forces", "stress"):
+        raise HardFailure("prediction manifest schema target layout differs")
+    _validate_members(
+        root, document, modes=modes, member_count=member_count, targets=targets
+    )
+    return PredictionPublicationAudit(manifest_path, key, "raw+ema", member_count)

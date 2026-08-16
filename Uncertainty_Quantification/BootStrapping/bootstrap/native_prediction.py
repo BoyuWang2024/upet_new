@@ -17,7 +17,10 @@ from .config import BootstrapConfig
 from .errors import HardFailure
 from .head_policy import TrainablePolicyAudit, apply_pet_last_layer_policy
 from .prediction import PredictionArrays, PredictionStore, TargetArrays
-from .prediction_publication import validate_prediction_publication
+from .prediction_publication import (
+    validate_legacy_prediction_publication,
+    validate_prediction_publication,
+)
 
 
 _UNITS = {"energy": "eV", "forces": "eV/Angstrom", "stress": "eV/Angstrom^3"}
@@ -400,59 +403,73 @@ def _predict_legacy_split(
     dtype: torch.dtype,
     structure_limit: int | None,
 ) -> Path:
-    """Preserve the legacy combined raw/EMA split publication."""
+    """Transactionally preserve the legacy combined raw/EMA publication."""
 
+    destination = root / "predictions" / split
     atoms = _read_atoms(getattr(config.data, split), structure_limit)
-    store = PredictionStore(root / "predictions", split=split, units=_UNITS)
     targets = extract_targets(atoms, split, ("energy", "forces", "stress"))
-    store.write_targets(targets)
-    records: list[dict[str, object]] = []
-    for index in range(config.bootstrap.ensemble_size):
-        checkpoint = (
-            root / "members" / f"member_{index:03d}" / "checkpoints" / "best.pt"
-        )
-        for mode in config.prediction.parameter_modes:
-            model = load_pet_member_model(
-                config.checkpoint.base_path,
-                checkpoint,
-                mode=mode,
-                device=device,
-                dtype=dtype,
+    with sibling_staging(destination) as staging:
+        store = PredictionStore.at_split_root(staging, split=split, units=_UNITS)
+        store.write_targets(targets)
+        records: list[dict[str, object]] = []
+        for index in range(config.bootstrap.ensemble_size):
+            checkpoint = (
+                root
+                / "members"
+                / f"member_{index:03d}"
+                / "checkpoints"
+                / "best.pt"
             )
-            values = _predict_dataset(
-                model,
-                atoms,
-                batch_size=config.prediction.batch_size,
-                device=device,
-                dtype=dtype,
-            )
-            publication = store.write_member(index, mode, values)
-            records.append(
-                {
-                    "member_index": index,
-                    "mode": mode,
-                    "path": str(publication.path.relative_to(store.split_root)),
-                    "sha256": publication.sha256,
-                    "shapes": publication.shapes,
-                    "dtypes": publication.dtypes,
-                }
-            )
-            del model
-    return atomic_write_json(
-        store.split_root / "manifest.json",
-        {
-            "schema": "upet.bootstrap.predictions/v1",
-            "split": split,
-            "units": _UNITS,
-            "member_count": config.bootstrap.ensemble_size,
-            "targets": {
-                "structure_limit": structure_limit,
-                "path": "targets.npz",
-                "sha256": sha256_file(store.targets_path),
+            for mode in config.prediction.parameter_modes:
+                model = load_pet_member_model(
+                    config.checkpoint.base_path,
+                    checkpoint,
+                    mode=mode,
+                    device=device,
+                    dtype=dtype,
+                )
+                values = _predict_dataset(
+                    model,
+                    atoms,
+                    batch_size=config.prediction.batch_size,
+                    device=device,
+                    dtype=dtype,
+                )
+                publication = store.write_member(index, mode, values)
+                records.append(
+                    {
+                        "member_index": index,
+                        "mode": mode,
+                        "path": str(publication.path.relative_to(store.split_root)),
+                        "sha256": publication.sha256,
+                        "shapes": publication.shapes,
+                        "dtypes": publication.dtypes,
+                    }
+                )
+                del model
+        manifest = atomic_write_json(
+            store.split_root / "manifest.json",
+            {
+                "schema": "upet.bootstrap.predictions/v1",
+                "split": split,
+                "units": _UNITS,
+                "member_count": config.bootstrap.ensemble_size,
+                "targets": {
+                    "structure_limit": structure_limit,
+                    "path": "targets.npz",
+                    "sha256": sha256_file(store.targets_path),
+                },
+                "members": records,
             },
-            "members": records,
-        },
-    )
+        )
+        validate_legacy_prediction_publication(
+            store.split_root,
+            dataset_key=split,
+            modes=config.prediction.parameter_modes,
+            member_count=config.bootstrap.ensemble_size,
+            structure_limit=structure_limit,
+        )
+    return destination / manifest.name
 
 
 def predict_run(
