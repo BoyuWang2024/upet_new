@@ -65,6 +65,7 @@ class ExternalPredictionConfig(StrictModel):
     runs_root: Path
     cache_root: Path
     plots_root: Path
+    cache_batch_size: int = Field(default=2, gt=0)
     batch_size: int = Field(default=128, gt=0)
     device: str = Field(default="cpu", min_length=1)
 

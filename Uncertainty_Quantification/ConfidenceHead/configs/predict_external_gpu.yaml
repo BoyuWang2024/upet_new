@@ -17,5 +17,6 @@ datasets:
 runs_root: /home/bywang/code/UQ/upet_new/Uncertainty_Quantification/ConfidenceHead/outputs/runs
 cache_root: /home/bywang/code/UQ/upet_new/Uncertainty_Quantification/ConfidenceHead/outputs/prediction_cache
 plots_root: /home/bywang/code/UQ/upet_new/Uncertainty_Quantification/Plots/ConfidenceHead
+cache_batch_size: 2
 batch_size: 128
 device: cuda

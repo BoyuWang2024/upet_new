@@ -175,7 +175,7 @@ def resolve_declared_cache_split(
 def _extraction_config(config: ExternalPredictionConfig) -> Any:
     return SimpleNamespace(
         readouts=ReadoutConfig(),
-        cache=SimpleNamespace(batch_size=config.batch_size),
+        cache=SimpleNamespace(batch_size=config.cache_batch_size),
         run=SimpleNamespace(device=config.device, amp=False),
     )
 
