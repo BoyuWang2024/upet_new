@@ -183,6 +183,7 @@ def validate_prediction_publication(
     mode: str,
     member_count: int,
     reference_targets: tuple[str, ...],
+    dataset_label: str | None = None,
     structure_limit: int | None = None,
 ) -> PredictionPublicationAudit:
     """Audit a v1 or v2 publication before it can be reused."""
@@ -213,11 +214,15 @@ def validate_prediction_publication(
             "targets",
             "members",
         }
+        manifest_dataset_label = document.get("dataset_label")
+        if not isinstance(manifest_dataset_label, str) or (
+            dataset_label is not None and manifest_dataset_label != dataset_label
+        ):
+            raise HardFailure("prediction manifest dataset label differs")
         if (
             set(document) != required
             or document["split"] != key
             or document["dataset_key"] != key
-            or not isinstance(document["dataset_label"], str)
             or document["reference_targets"] != list(reference_targets)
         ):
             raise HardFailure("prediction manifest dataset key does not match")
