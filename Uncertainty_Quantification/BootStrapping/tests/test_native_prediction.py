@@ -86,3 +86,47 @@ def test_prediction_schema_signature_ignores_dataset_size(tmp_path: Path) -> Non
     )
     assert v2_small["schema"] == "upet.bootstrap.predictions/v2"
     assert "stress" not in v2_small["targets"]
+
+
+def test_prediction_schema_signature_accepts_safe_dataset_key(tmp_path: Path) -> None:
+    from Uncertainty_Quantification.BootStrapping.bootstrap.prediction import (
+        PredictionArrays,
+        PredictionStore,
+        TargetArrays,
+    )
+    from Uncertainty_Quantification.BootStrapping.bootstrap.schema import (
+        prediction_schema_signature,
+    )
+
+    units = {"energy": "eV", "forces": "eV/Angstrom", "stress": "eV/Angstrom^3"}
+
+    def write(root: Path, structures: int) -> None:
+        atoms = structures * 2
+        store = PredictionStore(root, split="mad_test", units=units)
+        store.write_targets(
+            TargetArrays(
+                structure_ids=np.array([f"s{i}" for i in range(structures)]),
+                num_atoms=np.full(structures, 2),
+                atom_offsets=np.arange(0, atoms + 1, 2),
+                energy=np.zeros(structures),
+                forces=np.zeros((atoms, 3)),
+                stress=None,
+            )
+        )
+        store.write_member(
+            0,
+            "raw",
+            PredictionArrays(
+                energy=np.zeros(structures),
+                forces=np.zeros((atoms, 3)),
+                stress=np.zeros((structures, 3, 3)),
+            ),
+        )
+
+    write(tmp_path / "small", 2)
+    write(tmp_path / "large", 5)
+    assert prediction_schema_signature(
+        tmp_path / "small", split="mad_test", modes=("raw",), member_count=1
+    ) == prediction_schema_signature(
+        tmp_path / "large", split="mad_test", modes=("raw",), member_count=1
+    )

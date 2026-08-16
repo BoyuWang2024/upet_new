@@ -8,6 +8,7 @@ from typing import Iterable
 import numpy as np
 
 from .errors import HardFailure
+from .identifiers import validate_artifact_key
 from .prediction import load_prediction_arrays, load_target_arrays, validate_predictions
 
 
@@ -28,8 +29,7 @@ def prediction_schema_signature(
 ) -> dict[str, object]:
     """Validate a store and describe its schema without binding dataset size."""
 
-    if split not in {"val", "test"}:
-        raise HardFailure("prediction split must be val or test")
+    split = validate_artifact_key(split, "prediction split")
     normalized_modes = tuple(modes)
     if not normalized_modes or any(
         mode not in {"raw", "ema"} for mode in normalized_modes
