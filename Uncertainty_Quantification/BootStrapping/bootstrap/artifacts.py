@@ -267,7 +267,17 @@ def sibling_staging(destination: str | Path) -> Iterator[Path]:
         yield staging
         if destination_path.exists() or destination_path.is_symlink():
             raise HardFailure(f"artifact already exists: {destination_path}")
-        staging.rename(destination_path)
+        try:
+            staging.rename(destination_path)
+            directory_fd = os.open(destination_path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError as error:
+            raise HardFailure(
+                f"could not publish staging {staging} to {destination_path}: {error}"
+            ) from error
     finally:
         if staging.exists():
             shutil.rmtree(staging)

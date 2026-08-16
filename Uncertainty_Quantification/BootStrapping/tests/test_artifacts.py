@@ -69,3 +69,53 @@ def test_copy_file_exact_checks_existing_content(tmp_path: Path) -> None:
     source.write_bytes(b"different")
     with pytest.raises(HardFailure, match="already exists"):
         copy_file_exact(source, destination)
+
+
+def test_sibling_staging_fsyncs_parent_after_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from Uncertainty_Quantification.BootStrapping.bootstrap import artifacts
+    from Uncertainty_Quantification.BootStrapping.bootstrap.artifacts import (
+        sibling_staging,
+    )
+
+    calls: list[int] = []
+    original_fsync = artifacts.os.fsync
+
+    def record_fsync(descriptor: int) -> None:
+        calls.append(descriptor)
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(artifacts.os, "fsync", record_fsync)
+    destination = tmp_path / "published"
+    with sibling_staging(destination) as staging:
+        (staging / "value.txt").write_text("complete")
+
+    assert destination.is_dir()
+    assert calls
+
+
+def test_sibling_staging_rename_failure_removes_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from Uncertainty_Quantification.BootStrapping.bootstrap import artifacts
+    from Uncertainty_Quantification.BootStrapping.bootstrap.artifacts import (
+        sibling_staging,
+    )
+    from Uncertainty_Quantification.BootStrapping.bootstrap.errors import HardFailure
+
+    destination = tmp_path / "published"
+    original_rename = artifacts.Path.rename
+
+    def fail_staging_rename(source: Path, target: Path) -> Path:
+        if source.name.endswith(".staging"):
+            raise OSError("rename blocked")
+        return original_rename(source, target)
+
+    monkeypatch.setattr(artifacts.Path, "rename", fail_staging_rename)
+    with pytest.raises(HardFailure, match="publish staging"):
+        with sibling_staging(destination):
+            pass
+
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".published.*.staging"))

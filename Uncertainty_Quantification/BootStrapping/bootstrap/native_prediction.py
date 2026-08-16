@@ -331,6 +331,7 @@ def predict_dataset(request: DatasetPredictionRequest) -> Path:
             mode=request.mode,
             member_count=request.member_count,
             reference_targets=request.dataset.reference_targets,
+            structure_limit=request.structure_limit,
         )
     return destination / manifest.name
 
@@ -375,6 +376,7 @@ def predict_campaign(
                     mode=campaign.prediction.mode,
                     member_count=campaign.prediction.member_count,
                     reference_targets=dataset.reference_targets,
+                    structure_limit=None,
                 )
                 results.append(
                     CampaignPredictionPublication(
@@ -387,6 +389,70 @@ def predict_campaign(
                     CampaignPredictionPublication(run.label, dataset.label, manifest, False)
                 )
     return tuple(results)
+
+
+def _predict_legacy_split(
+    config: BootstrapConfig,
+    root: Path,
+    split: str,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+    structure_limit: int | None,
+) -> Path:
+    """Preserve the legacy combined raw/EMA split publication."""
+
+    atoms = _read_atoms(getattr(config.data, split), structure_limit)
+    store = PredictionStore(root / "predictions", split=split, units=_UNITS)
+    targets = extract_targets(atoms, split, ("energy", "forces", "stress"))
+    store.write_targets(targets)
+    records: list[dict[str, object]] = []
+    for index in range(config.bootstrap.ensemble_size):
+        checkpoint = (
+            root / "members" / f"member_{index:03d}" / "checkpoints" / "best.pt"
+        )
+        for mode in config.prediction.parameter_modes:
+            model = load_pet_member_model(
+                config.checkpoint.base_path,
+                checkpoint,
+                mode=mode,
+                device=device,
+                dtype=dtype,
+            )
+            values = _predict_dataset(
+                model,
+                atoms,
+                batch_size=config.prediction.batch_size,
+                device=device,
+                dtype=dtype,
+            )
+            publication = store.write_member(index, mode, values)
+            records.append(
+                {
+                    "member_index": index,
+                    "mode": mode,
+                    "path": str(publication.path.relative_to(store.split_root)),
+                    "sha256": publication.sha256,
+                    "shapes": publication.shapes,
+                    "dtypes": publication.dtypes,
+                }
+            )
+            del model
+    return atomic_write_json(
+        store.split_root / "manifest.json",
+        {
+            "schema": "upet.bootstrap.predictions/v1",
+            "split": split,
+            "units": _UNITS,
+            "member_count": config.bootstrap.ensemble_size,
+            "targets": {
+                "structure_limit": structure_limit,
+                "path": "targets.npz",
+                "sha256": sha256_file(store.targets_path),
+            },
+            "members": records,
+        },
+    )
 
 
 def predict_run(
@@ -406,8 +472,6 @@ def predict_run(
         raise HardFailure("requested prediction split is not enabled")
     if structure_limit is not None and structure_limit < 1:
         raise HardFailure("prediction structure_limit must be positive")
-    if len(config.prediction.parameter_modes) != 1:
-        raise HardFailure("transactional prediction requires exactly one parameter mode")
     device = torch.device(config.prediction.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise HardFailure("prediction requests CUDA but CUDA is unavailable")
@@ -415,6 +479,18 @@ def predict_run(
         dtype = getattr(torch, config.training.precision)
     except AttributeError as error:
         raise HardFailure("unsupported prediction precision") from error
+    if len(config.prediction.parameter_modes) > 1:
+        return tuple(
+            _predict_legacy_split(
+                config,
+                root,
+                split,
+                device=device,
+                dtype=dtype,
+                structure_limit=structure_limit,
+            )
+            for split in selected_splits
+        )
     run = CampaignRun(
         label=config.experiment.run_id,
         config_path=root / "config.yaml",

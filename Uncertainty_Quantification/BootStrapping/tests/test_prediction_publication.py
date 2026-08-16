@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -290,3 +291,189 @@ def test_validation_rejects_an_extra_declared_member_record(
             member_count=2,
             reference_targets=("energy", "forces"),
         )
+
+
+def test_validation_rejects_symlink_publication_root(
+    tmp_path: Path, fake_runtime: FakeRuntime
+) -> None:
+    from Uncertainty_Quantification.BootStrapping.bootstrap.native_prediction import (
+        predict_dataset,
+    )
+    from Uncertainty_Quantification.BootStrapping.bootstrap.prediction_publication import (
+        validate_prediction_publication,
+    )
+
+    manifest = predict_dataset(fake_runtime.request(tmp_path))
+    symlink = tmp_path / "linked-predictions"
+    symlink.symlink_to(manifest.parent, target_is_directory=True)
+
+    with pytest.raises(HardFailure, match="symlink"):
+        validate_prediction_publication(
+            symlink,
+            dataset_key="mad_test",
+            mode="raw",
+            member_count=2,
+            reference_targets=("energy", "forces"),
+            structure_limit=None,
+        )
+
+
+def test_campaign_does_not_reuse_partial_publication(
+    tmp_path: Path, fake_runtime: FakeRuntime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from Uncertainty_Quantification.BootStrapping.bootstrap import native_prediction
+    from Uncertainty_Quantification.BootStrapping.bootstrap.native_prediction import (
+        predict_campaign,
+        predict_dataset,
+    )
+
+    request = replace(fake_runtime.request(tmp_path), structure_limit=1)
+    predict_dataset(request)
+    campaign = CampaignConfig(
+        schema_version=1,
+        runs=(
+            CampaignRun(
+                label="run",
+                config_path=tmp_path / "run.yaml",
+                run_root=tmp_path,
+                config=SimpleNamespace(),
+            ),
+        ),
+        datasets=(request.dataset,),
+        prediction=CampaignPrediction(
+            mode="raw", member_count=2, device="cpu", batch_size=4
+        ),
+        plot=SimpleNamespace(),
+        output_root=tmp_path / "output",
+        source_path=tmp_path / "campaign.yaml",
+    )
+
+    monkeypatch.setattr(
+        native_prediction,
+        "load_pet_member_model",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no reuse")),
+    )
+    with pytest.raises(HardFailure, match="structure_limit"):
+        predict_campaign(campaign)
+
+
+@pytest.mark.parametrize(
+    ("schema", "targets", "expected_targets"),
+    (
+        ("upet.bootstrap.predictions/v1", ("energy", "forces"), ("energy", "forces")),
+        (
+            "upet.bootstrap.predictions/v2",
+            ("energy", "forces", "stress"),
+            ("energy", "forces", "stress"),
+        ),
+    ),
+)
+def test_validation_binds_schema_to_reference_target_layout(
+    tmp_path: Path,
+    fake_runtime: FakeRuntime,
+    schema: str,
+    targets: tuple[str, ...],
+    expected_targets: tuple[str, ...],
+) -> None:
+    from Uncertainty_Quantification.BootStrapping.bootstrap.native_prediction import (
+        predict_dataset,
+    )
+    from Uncertainty_Quantification.BootStrapping.bootstrap.prediction_publication import (
+        validate_prediction_publication,
+    )
+
+    if schema.endswith("v1"):
+        manifest = predict_dataset(fake_runtime.request(tmp_path))
+        document = json.loads(manifest.read_text())
+        document["schema"] = schema
+        del document["dataset_key"]
+        del document["dataset_label"]
+        del document["reference_targets"]
+    else:
+        _write_existing_v1_test_publication(tmp_path)
+        manifest = tmp_path / "predictions" / "test" / "manifest.json"
+        document = json.loads(manifest.read_text())
+        document["schema"] = schema
+        document["dataset_key"] = "test"
+        document["dataset_label"] = "matpes_test"
+        document["reference_targets"] = list(targets)
+    manifest.unlink()
+    manifest.write_text(json.dumps(document))
+
+    with pytest.raises(HardFailure, match="schema"):
+        validate_prediction_publication(
+            manifest.parent,
+            dataset_key=manifest.parent.name,
+            mode="raw",
+            member_count=2,
+            reference_targets=expected_targets,
+            structure_limit=None,
+        )
+
+
+def test_validation_rejects_reordered_member_records(
+    tmp_path: Path, fake_runtime: FakeRuntime
+) -> None:
+    from Uncertainty_Quantification.BootStrapping.bootstrap.native_prediction import (
+        predict_dataset,
+    )
+    from Uncertainty_Quantification.BootStrapping.bootstrap.prediction_publication import (
+        validate_prediction_publication,
+    )
+
+    manifest = predict_dataset(fake_runtime.request(tmp_path))
+    document = json.loads(manifest.read_text())
+    document["members"].reverse()
+    manifest.unlink()
+    manifest.write_text(json.dumps(document))
+
+    with pytest.raises(HardFailure, match="order"):
+        validate_prediction_publication(
+            manifest.parent,
+            dataset_key="mad_test",
+            mode="raw",
+            member_count=2,
+            reference_targets=("energy", "forces"),
+            structure_limit=None,
+        )
+
+
+def test_predict_dataset_checks_member_files_before_writing_manifest(
+    tmp_path: Path, fake_runtime: FakeRuntime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from Uncertainty_Quantification.BootStrapping.bootstrap import native_prediction
+    from Uncertainty_Quantification.BootStrapping.bootstrap.native_prediction import (
+        predict_dataset,
+    )
+
+    original_write = native_prediction.atomic_write_json
+
+    def assert_members_then_write(path: Path, document: object) -> Path:
+        assert (path.parent / "targets.npz").is_file()
+        assert (path.parent / "members/member_000/raw.npz").is_file()
+        assert (path.parent / "members/member_001/raw.npz").is_file()
+        return original_write(path, document)
+
+    monkeypatch.setattr(native_prediction, "atomic_write_json", assert_members_then_write)
+    predict_dataset(fake_runtime.request(tmp_path))
+
+
+def test_prediction_audit_failure_removes_staging(
+    tmp_path: Path, fake_runtime: FakeRuntime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from Uncertainty_Quantification.BootStrapping.bootstrap import native_prediction
+    from Uncertainty_Quantification.BootStrapping.bootstrap.native_prediction import (
+        predict_dataset,
+    )
+
+    def fail_audit(*args: object, **kwargs: object) -> object:
+        raise HardFailure("audit rejected")
+
+    monkeypatch.setattr(
+        native_prediction, "validate_prediction_publication", fail_audit
+    )
+    with pytest.raises(HardFailure, match="audit rejected"):
+        predict_dataset(fake_runtime.request(tmp_path))
+
+    assert not (tmp_path / "predictions" / "mad_test").exists()
+    assert not list((tmp_path / "predictions").glob(".mad_test.*.staging"))

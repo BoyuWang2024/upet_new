@@ -7,14 +7,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from .artifacts import sha256_file
+from .artifacts import _reject_symlink_components, sha256_file
 from .errors import HardFailure
 from .identifiers import validate_artifact_key
 from .prediction import (
     TargetArrays,
     load_prediction_arrays,
     load_target_arrays,
-    reference_targets,
+    reference_targets as target_fields,
     validate_predictions,
 )
 
@@ -37,6 +37,14 @@ def _mapping(value: object, location: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise HardFailure(f"{location} must be a mapping")
     return value
+
+
+def _publication_root(value: str | Path) -> Path:
+    root = Path(value).expanduser()
+    if not root.is_absolute():
+        root = Path.cwd() / root
+    _reject_symlink_components(root)
+    return root
 
 
 def _load_manifest(path: Path) -> Mapping[str, Any]:
@@ -64,17 +72,28 @@ def _validate_targets(
     root: Path,
     document: Mapping[str, Any],
     expected_reference_targets: tuple[str, ...],
+    expected_structure_limit: int | None,
 ) -> TargetArrays:
     targets = _mapping(document.get("targets"), "prediction manifest.targets")
     if set(targets) != {"structure_limit", "path", "sha256"}:
         raise HardFailure("prediction manifest.targets keys do not match schema")
+    actual_limit = targets["structure_limit"]
+    if expected_structure_limit is None:
+        if actual_limit is not None:
+            raise HardFailure("prediction manifest structure_limit differs")
+    elif (
+        isinstance(actual_limit, bool)
+        or not isinstance(actual_limit, int)
+        or actual_limit != expected_structure_limit
+    ):
+        raise HardFailure("prediction manifest structure_limit differs")
     if targets["path"] != "targets.npz":
         raise HardFailure("prediction manifest targets path does not match schema")
     target_path = root / "targets.npz"
     if targets["sha256"] != sha256_file(target_path):
         raise HardFailure("prediction manifest targets SHA-256 differs")
     loaded = load_target_arrays(target_path)
-    if reference_targets(loaded) != expected_reference_targets:
+    if target_fields(loaded) != expected_reference_targets:
         raise HardFailure("prediction manifest reference targets differ")
     return loaded
 
@@ -99,6 +118,8 @@ def _validate_members(
         index = item["member_index"]
         if isinstance(index, bool) or not isinstance(index, int):
             raise HardFailure("prediction manifest member_index must be an integer")
+        if index != len(declared_indices):
+            raise HardFailure("prediction manifest member record order differs")
         expected_path = f"members/member_{index:03d}/{mode}.npz"
         if (
             index < 0
@@ -135,6 +156,7 @@ def validate_prediction_publication(
     mode: str,
     member_count: int,
     reference_targets: tuple[str, ...],
+    structure_limit: int | None = None,
 ) -> PredictionPublicationAudit:
     """Audit a v1 or v2 publication before it can be reused."""
 
@@ -145,7 +167,7 @@ def validate_prediction_publication(
         raise HardFailure("prediction member_count must be positive")
     if reference_targets not in (("energy", "forces"), ("energy", "forces", "stress")):
         raise HardFailure("prediction reference targets are not supported")
-    root = Path(split_root).expanduser().resolve()
+    root = _publication_root(split_root)
     manifest_path = root / "manifest.json"
     document = _load_manifest(manifest_path)
     schema = document.get("schema")
@@ -160,6 +182,7 @@ def validate_prediction_publication(
         }
         if set(document) != required or document["split"] != key:
             raise HardFailure("prediction manifest dataset key does not match")
+        expected_schema_targets = ("energy", "forces", "stress")
     elif schema == "upet.bootstrap.predictions/v2":
         required = {
             "schema",
@@ -180,11 +203,16 @@ def validate_prediction_publication(
             or document["reference_targets"] != list(reference_targets)
         ):
             raise HardFailure("prediction manifest dataset key does not match")
+        expected_schema_targets = ("energy", "forces")
     else:
         raise HardFailure("prediction manifest schema is not supported")
     if document["units"] != _UNITS or document["member_count"] != member_count:
         raise HardFailure("prediction manifest metadata does not match request")
-    targets = _validate_targets(root, document, reference_targets)
+    targets = _validate_targets(
+        root, document, reference_targets, structure_limit
+    )
+    if target_fields(targets) != expected_schema_targets:
+        raise HardFailure("prediction manifest schema target layout differs")
     _validate_members(
         root, document, mode=mode, member_count=member_count, targets=targets
     )

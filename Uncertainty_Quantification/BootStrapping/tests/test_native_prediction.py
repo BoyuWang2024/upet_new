@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -155,3 +156,80 @@ def test_extract_targets_does_not_request_missing_mad_stress() -> None:
     targets = extract_targets([MadAtoms()], "mad_test", ("energy", "forces"))
 
     assert targets.stress is None
+
+
+def test_predict_run_preserves_raw_and_ema_combined_publication(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from Uncertainty_Quantification.BootStrapping.bootstrap import native_prediction
+    from Uncertainty_Quantification.BootStrapping.bootstrap.native_prediction import (
+        predict_run,
+    )
+
+    class Atoms:
+        info = {}
+
+        def __len__(self) -> int:
+            return 1
+
+        def get_potential_energy(self) -> float:
+            return -1.0
+
+        def get_forces(self) -> np.ndarray:
+            return np.zeros((1, 3), dtype=np.float64)
+
+        def get_stress(self, *, voigt: bool) -> np.ndarray:
+            return np.zeros((3, 3), dtype=np.float64)
+
+    def load_member(
+        base: object,
+        checkpoint: Path,
+        *,
+        mode: str,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[int, str]:
+        del base, device, dtype
+        return (int(checkpoint.parts[-3].split("_")[1]), mode)
+
+    def predict_member(
+        model: tuple[int, str],
+        atoms: list[Atoms],
+        *,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ):
+        del atoms, batch_size, device, dtype
+        return native_prediction.PredictionArrays(
+            energy=np.array([float(model[0])]),
+            forces=np.zeros((1, 3)),
+            stress=np.zeros((1, 3, 3)),
+        )
+
+    monkeypatch.setattr(native_prediction, "_read_atoms", lambda path, limit: [Atoms()])
+    monkeypatch.setattr(native_prediction, "load_pet_member_model", load_member)
+    monkeypatch.setattr(native_prediction, "_predict_dataset", predict_member)
+    config = SimpleNamespace(
+        prediction=SimpleNamespace(
+            splits=("test",),
+            parameter_modes=("raw", "ema"),
+            device="cpu",
+            batch_size=2,
+        ),
+        training=SimpleNamespace(precision="float64"),
+        bootstrap=SimpleNamespace(ensemble_size=2),
+        experiment=SimpleNamespace(run_id="legacy"),
+        checkpoint=SimpleNamespace(base_path="base.ckpt"),
+        data=SimpleNamespace(test=tmp_path / "test.xyz"),
+    )
+
+    (manifest,) = predict_run(config, tmp_path)
+    document = __import__("json").loads(manifest.read_text())
+
+    assert [(item["member_index"], item["mode"]) for item in document["members"]] == [
+        (0, "raw"),
+        (0, "ema"),
+        (1, "raw"),
+        (1, "ema"),
+    ]
