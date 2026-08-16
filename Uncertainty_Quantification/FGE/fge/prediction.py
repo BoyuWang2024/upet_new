@@ -424,6 +424,13 @@ class PETBase:
     base_sha256: str
 
 
+@dataclass(frozen=True)
+class PreparedPETChunk:
+    """Neighbor-listed metatomic systems prepared once for all FGE members."""
+
+    systems: tuple[Any, ...]
+
+
 class PETPredictionRuntime:
     """Real metatrain PET implementation of the formal prediction seam."""
 
@@ -439,7 +446,21 @@ class PETPredictionRuntime:
             )
         except AttributeError as exc:
             raise HardFailure("PET prediction configuration is incomplete") from exc
-        if sha256_file(checkpoint_path) != base_sha256:
+        return self.load_reused_base(
+            checkpoint_path,
+            base_sha256,
+            members_directory,
+        )
+
+    def load_reused_base(
+        self,
+        base_checkpoint: str | Path,
+        expected_sha256: str,
+        members_directory: str | Path,
+    ) -> PETBase:
+        """Restore one authenticated base for a separately verified member tree."""
+        checkpoint_path = Path(base_checkpoint)
+        if sha256_file(checkpoint_path) != expected_sha256:
             raise HardFailure("base checkpoint SHA256 does not match configuration")
         try:
             import metatomic.torch  # noqa: F401
@@ -468,8 +489,8 @@ class PETPredictionRuntime:
             model=model,
             state_dict=state_dict,
             audit=audit,
-            members_directory=members_directory,
-            base_sha256=base_sha256,
+            members_directory=Path(members_directory),
+            base_sha256=expected_sha256,
         )
 
     def restore_and_apply(self, base: object, member_id: str) -> None:
@@ -517,48 +538,57 @@ class PETPredictionRuntime:
             ),
         )
 
-    def infer_member(
-        self, base: object, member_id: str, config: FGEConfig
-    ) -> Mapping[str, object]:
-        """Infer one already-applied A3 member on the formal test split."""
-        del member_id
+    def prepare_ase_chunk(
+        self,
+        base: object,
+        atoms: tuple[object, ...] | list[object],
+    ) -> PreparedPETChunk:
+        """Convert and neighbor-list one ASE chunk exactly once."""
         if not isinstance(base, PETBase):
             raise HardFailure("PET prediction base is invalid")
+        if not atoms:
+            raise HardFailure("PET prediction chunk is empty")
         try:
-            from ase.io import read
-            from metatrain.utils.data import read_systems
-            from metatrain.utils.evaluate_model import evaluate_model
+            from metatomic.torch import systems_to_torch
             from metatrain.utils.neighbor_lists import (
                 get_requested_neighbor_lists,
                 get_system_with_neighbor_lists,
             )
 
-            ase_systems = read(str(config.paths.test_data), ":")
-            model_systems = read_systems(str(config.paths.test_data))
-        except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
-            raise HardFailure("unable to prepare PET prediction inputs") from exc
-        if (
-            not isinstance(ase_systems, list)
-            or not ase_systems
-            or len(ase_systems) != len(model_systems)
-        ):
-            raise HardFailure("PET prediction datasets are empty or inconsistent")
-        ase_systems = cast(list[Any], ase_systems)
-        model_systems = cast(list[Any], model_systems)
-        ordered_pairs = sorted(
-            zip(ase_systems, model_systems, strict=True),
-            key=lambda pair: str(pair[0].info["structure_id"]),
-        )
-        ase_systems = _ordered_ase_systems([pair[0] for pair in ordered_pairs])
-        model_systems = [pair[1] for pair in ordered_pairs]
-        try:
+            model_systems = systems_to_torch(list(atoms), dtype=torch.float32)
             requested = get_requested_neighbor_lists(base.model)
-            prepared_systems = [
+            prepared = tuple(
                 get_system_with_neighbor_lists(
-                    system.to(dtype=torch.float32), requested
+                    system.to(dtype=torch.float32),
+                    requested,
                 )
                 for system in model_systems
-            ]
+            )
+        except (
+            ImportError,
+            AttributeError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise HardFailure("unable to prepare PET prediction chunk") from exc
+        if len(prepared) != len(atoms):
+            raise HardFailure("PET prediction chunk conversion changed its length")
+        return PreparedPETChunk(systems=prepared)
+
+    def infer_prepared(
+        self,
+        base: object,
+        prepared: PreparedPETChunk,
+    ) -> Mapping[str, torch.Tensor]:
+        """Evaluate energy, force, and stress for one already-prepared chunk."""
+        if not isinstance(base, PETBase) or not isinstance(prepared, PreparedPETChunk):
+            raise HardFailure("PET prepared prediction inputs are invalid")
+        if not prepared.systems:
+            raise HardFailure("PET prepared prediction chunk is empty")
+        try:
+            from metatrain.utils.evaluate_model import evaluate_model
+
             targets = {
                 name: base.model.dataset_info.targets[name]
                 for name in (
@@ -569,26 +599,51 @@ class PETPredictionRuntime:
             }
             base.model.eval()
             prediction = evaluate_model(
-                base.model, prepared_systems, targets, is_training=False
+                base.model,
+                list(prepared.systems),
+                targets,
+                is_training=False,
             )
-            energy = (
-                prediction["energy"]
+            return {
+                "energy": prediction["energy"]
                 .block()
                 .values.reshape(-1)
-                .to(dtype=torch.float32, device="cpu")
-            )
-            forces = (
-                prediction["non_conservative_forces"]
+                .to(dtype=torch.float32, device="cpu"),
+                "forces": prediction["non_conservative_forces"]
                 .block()
                 .values.squeeze(-1)
-                .to(dtype=torch.float32, device="cpu")
-            )
-            stress = (
-                prediction["non_conservative_stress"]
+                .to(dtype=torch.float32, device="cpu"),
+                "stress": prediction["non_conservative_stress"]
                 .block()
                 .values.squeeze(-1)
-                .to(dtype=torch.float32, device="cpu")
-            )
+                .to(dtype=torch.float32, device="cpu"),
+            }
+        except (KeyError, AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            raise HardFailure("unable to evaluate PET prediction chunk") from exc
+
+    def infer_member(
+        self, base: object, member_id: str, config: FGEConfig
+    ) -> Mapping[str, object]:
+        """Infer one already-applied A3 member on the formal test split."""
+        del member_id
+        if not isinstance(base, PETBase):
+            raise HardFailure("PET prediction base is invalid")
+        try:
+            from ase.io import read
+
+            ase_systems = read(str(config.paths.test_data), ":")
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise HardFailure("unable to prepare PET prediction inputs") from exc
+        if not isinstance(ase_systems, list) or not ase_systems:
+            raise HardFailure("PET prediction dataset is empty")
+        ase_systems = cast(list[Any], ase_systems)
+        ase_systems = _ordered_ase_systems(ase_systems)
+        prepared = self.prepare_ase_chunk(base, ase_systems)
+        predictions = self.infer_prepared(base, prepared)
+        energy = predictions["energy"]
+        forces = predictions["forces"]
+        stress = predictions["stress"]
+        try:
             structure_ids = tuple(
                 str(system.info["structure_id"]) for system in ase_systems
             )
