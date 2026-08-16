@@ -1,0 +1,14 @@
+profile: smoke
+checkpoint:
+  path: /home/bywang/code/UQ/upet/pet-omatpes-l-v0.1.0.ckpt
+  expected_sha256: 879b1045391d88869522605a8b8b3cedeed74668e7062fdd7487548ab7b08004
+datasets:
+  smoke:
+    source: extxyz
+    path: /home/bywang/code/UQ/upet_new/data/dataset/matpes_n20.extxyz
+    expected_sha256: c92161329aab539064a2c2438a395cb01e38bfc91211c558aebbc1ff94702e3d
+runs_root: /home/bywang/code/UQ/upet_new/Uncertainty_Quantification/ConfidenceHead/outputs/runs
+cache_root: /home/bywang/code/UQ/upet_new/Uncertainty_Quantification/ConfidenceHead/outputs/prediction_cache
+plots_root: /home/bywang/code/UQ/upet_new/Uncertainty_Quantification/Plots/ConfidenceHead-smoke
+batch_size: 4
+device: cpu

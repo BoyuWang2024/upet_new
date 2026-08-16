@@ -1,0 +1,21 @@
+profile: production
+checkpoint:
+  path: /home/bywang/code/UQ/upet/pet-omatpes-l-v0.1.0.ckpt
+  expected_sha256: 879b1045391d88869522605a8b8b3cedeed74668e7062fdd7487548ab7b08004
+datasets:
+  matpes_test:
+    source: existing_evaluation
+    expected_sha256: 1ffcdcad2fc6f0b0907b91cd29bfee340eb02cddf6b525268290c6329f56182d
+  matpes_train:
+    source: cache_split
+    split: train
+    expected_sha256: 12ff9403254c955537827ba96c140ee1753a7410ada7910f13c42be0aa308cec
+  mad_test:
+    source: extxyz
+    path: /home/bywang/code/UQ/upet_new/data/dataset/mad-test.xyz
+    expected_sha256: d9a1280246a7a678f699e7654aebd29e4273ab6dcd1dfb4f74334a9b15edb66b
+runs_root: /home/bywang/code/UQ/upet_new/Uncertainty_Quantification/ConfidenceHead/outputs/runs
+cache_root: /home/bywang/code/UQ/upet_new/Uncertainty_Quantification/ConfidenceHead/outputs/prediction_cache
+plots_root: /home/bywang/code/UQ/upet_new/Uncertainty_Quantification/Plots/ConfidenceHead
+batch_size: 128
+device: cuda
