@@ -51,9 +51,7 @@ def test_prediction_schema_signature_ignores_dataset_size(tmp_path: Path) -> Non
                 atom_offsets=np.arange(0, atoms + 1, 2),
                 energy=np.zeros(structures),
                 forces=np.zeros((atoms, 3)),
-                stress=(
-                    np.zeros((structures, 3, 3)) if reference_stress else None
-                ),
+                stress=(np.zeros((structures, 3, 3)) if reference_stress else None),
             )
         )
         store.write_member(
@@ -159,9 +157,18 @@ def test_extract_targets_does_not_request_missing_mad_stress() -> None:
     assert targets.stress is None
 
 
+@pytest.mark.parametrize(
+    "parameter_modes",
+    (("raw", "ema"), ("ema", "raw")),
+    ids=("raw_then_ema", "ema_then_raw"),
+)
 def test_predict_run_preserves_raw_and_ema_combined_publication(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    parameter_modes: tuple[str, str],
 ) -> None:
+    """Preserve each declared legacy mode order in member-major records."""
+
     from Uncertainty_Quantification.BootStrapping.bootstrap import native_prediction
     from Uncertainty_Quantification.BootStrapping.bootstrap.native_prediction import (
         predict_run,
@@ -214,7 +221,7 @@ def test_predict_run_preserves_raw_and_ema_combined_publication(
     config = SimpleNamespace(
         prediction=SimpleNamespace(
             splits=("test",),
-            parameter_modes=("raw", "ema"),
+            parameter_modes=parameter_modes,
             device="cpu",
             batch_size=2,
         ),
@@ -229,20 +236,17 @@ def test_predict_run_preserves_raw_and_ema_combined_publication(
     document = __import__("json").loads(manifest.read_text())
 
     assert [(item["member_index"], item["mode"]) for item in document["members"]] == [
-        (0, "raw"),
-        (0, "ema"),
-        (1, "raw"),
-        (1, "ema"),
+        (index, mode) for index in range(2) for mode in parameter_modes
     ]
 
-    from Uncertainty_Quantification.BootStrapping.bootstrap.prediction_publication import (
-        validate_legacy_prediction_publication,
+    from Uncertainty_Quantification.BootStrapping.bootstrap import (
+        prediction_publication,
     )
 
-    validate_legacy_prediction_publication(
+    prediction_publication.validate_legacy_prediction_publication(
         manifest.parent,
         dataset_key="test",
-        modes=("raw", "ema"),
+        modes=parameter_modes,
         member_count=2,
         structure_limit=None,
     )

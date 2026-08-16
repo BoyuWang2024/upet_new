@@ -11,7 +11,12 @@ import torch
 from numpy.typing import NDArray
 
 from .artifacts import atomic_write_json, sha256_file, sibling_staging
-from .campaign import CampaignConfig, CampaignDataset, CampaignRun, select_campaign_items
+from .campaign import (
+    CampaignConfig,
+    CampaignDataset,
+    CampaignRun,
+    select_campaign_items,
+)
 from .checkpoint import load_checkpoint_branch
 from .config import BootstrapConfig
 from .errors import HardFailure
@@ -53,7 +58,7 @@ class CampaignPredictionPublication:
 def apply_member_state(
     model: torch.nn.Module, state: Mapping[str, torch.Tensor]
 ) -> TrainablePolicyAudit:
-    """Apply exactly one audited PET last-layer state without touching frozen tensors."""
+    """Apply an audited PET last-layer state without touching frozen tensors."""
 
     audit = apply_pet_last_layer_policy(model)
     if set(state) != set(audit.trainable_names):
@@ -131,9 +136,9 @@ def extract_targets(
         )
         stress = None
         if "stress" in targets:
-            stress = np.stack(
-                [item.get_stress(voigt=False) for item in atoms]
-            ).astype(np.float64, copy=False)
+            stress = np.stack([item.get_stress(voigt=False) for item in atoms]).astype(
+                np.float64, copy=False
+            )
         return TargetArrays(
             structure_ids=np.asarray(
                 [
@@ -310,7 +315,9 @@ def predict_dataset(request: DatasetPredictionRequest) -> Path:
                 )
                 publication = store.write_member(index, request.mode, values)
             except HardFailure as error:
-                raise HardFailure(f"member {index} prediction failed: {error}") from error
+                raise HardFailure(
+                    f"member {index} prediction failed: {error}"
+                ) from error
             records.append(
                 {
                     "member_index": index,
@@ -389,7 +396,9 @@ def predict_campaign(
             else:
                 manifest = predict_dataset(_campaign_request(campaign, run, dataset))
                 results.append(
-                    CampaignPredictionPublication(run.label, dataset.label, manifest, False)
+                    CampaignPredictionPublication(
+                        run.label, dataset.label, manifest, False
+                    )
                 )
     return tuple(results)
 
@@ -414,11 +423,7 @@ def _predict_legacy_split(
         records: list[dict[str, object]] = []
         for index in range(config.bootstrap.ensemble_size):
             checkpoint = (
-                root
-                / "members"
-                / f"member_{index:03d}"
-                / "checkpoints"
-                / "best.pt"
+                root / "members" / f"member_{index:03d}" / "checkpoints" / "best.pt"
             )
             for mode in config.prediction.parameter_modes:
                 model = load_pet_member_model(

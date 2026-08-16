@@ -43,14 +43,16 @@ class FakeRuntime:
         )
 
     def request(self, root: Path):
-        from Uncertainty_Quantification.BootStrapping.bootstrap.native_prediction import (
-            DatasetPredictionRequest,
+        from Uncertainty_Quantification.BootStrapping.bootstrap import (
+            native_prediction,
         )
 
-        return DatasetPredictionRequest(
+        return native_prediction.DatasetPredictionRequest(
             run=SimpleNamespace(
                 run_root=root,
-                config=SimpleNamespace(checkpoint=SimpleNamespace(base_path="base.ckpt")),
+                config=SimpleNamespace(
+                    checkpoint=SimpleNamespace(base_path="base.ckpt")
+                ),
             ),
             dataset=CampaignDataset(
                 label="mad_test",
@@ -245,9 +247,7 @@ def test_predict_campaign_reuses_complete_test_without_loader_calls(
         raise AssertionError("a valid existing publication must be reused")
 
     monkeypatch.setattr(native_prediction, "load_pet_member_model", fail_if_called)
-    publications = predict_campaign(
-        campaign, ("full_remote_b8_e8",), ("matpes_test",)
-    )
+    publications = predict_campaign(campaign, ("full_remote_b8_e8",), ("matpes_test",))
 
     assert publications[0].skipped is True
 
@@ -269,11 +269,11 @@ def test_member_failure_does_not_publish_destination(
 def test_validation_rejects_an_extra_declared_member_record(
     tmp_path: Path, fake_runtime: FakeRuntime
 ) -> None:
+    from Uncertainty_Quantification.BootStrapping.bootstrap import (
+        prediction_publication,
+    )
     from Uncertainty_Quantification.BootStrapping.bootstrap.native_prediction import (
         predict_dataset,
-    )
-    from Uncertainty_Quantification.BootStrapping.bootstrap.prediction_publication import (
-        validate_prediction_publication,
     )
 
     manifest = predict_dataset(fake_runtime.request(tmp_path))
@@ -283,7 +283,7 @@ def test_validation_rejects_an_extra_declared_member_record(
     manifest.write_text(json.dumps(document))
 
     with pytest.raises(HardFailure, match="member records"):
-        validate_prediction_publication(
+        prediction_publication.validate_prediction_publication(
             manifest.parent,
             dataset_key="mad_test",
             mode="raw",
@@ -295,11 +295,11 @@ def test_validation_rejects_an_extra_declared_member_record(
 def test_validation_rejects_symlink_publication_root(
     tmp_path: Path, fake_runtime: FakeRuntime
 ) -> None:
+    from Uncertainty_Quantification.BootStrapping.bootstrap import (
+        prediction_publication,
+    )
     from Uncertainty_Quantification.BootStrapping.bootstrap.native_prediction import (
         predict_dataset,
-    )
-    from Uncertainty_Quantification.BootStrapping.bootstrap.prediction_publication import (
-        validate_prediction_publication,
     )
 
     manifest = predict_dataset(fake_runtime.request(tmp_path))
@@ -307,7 +307,7 @@ def test_validation_rejects_symlink_publication_root(
     symlink.symlink_to(manifest.parent, target_is_directory=True)
 
     with pytest.raises(HardFailure, match="symlink"):
-        validate_prediction_publication(
+        prediction_publication.validate_prediction_publication(
             symlink,
             dataset_key="mad_test",
             mode="raw",
@@ -374,11 +374,11 @@ def test_validation_binds_schema_to_reference_target_layout(
     targets: tuple[str, ...],
     expected_targets: tuple[str, ...],
 ) -> None:
+    from Uncertainty_Quantification.BootStrapping.bootstrap import (
+        prediction_publication,
+    )
     from Uncertainty_Quantification.BootStrapping.bootstrap.native_prediction import (
         predict_dataset,
-    )
-    from Uncertainty_Quantification.BootStrapping.bootstrap.prediction_publication import (
-        validate_prediction_publication,
     )
 
     if schema.endswith("v1"):
@@ -400,7 +400,7 @@ def test_validation_binds_schema_to_reference_target_layout(
     manifest.write_text(json.dumps(document))
 
     with pytest.raises(HardFailure, match="schema"):
-        validate_prediction_publication(
+        prediction_publication.validate_prediction_publication(
             manifest.parent,
             dataset_key=manifest.parent.name,
             mode="raw",
@@ -413,11 +413,11 @@ def test_validation_binds_schema_to_reference_target_layout(
 def test_validation_rejects_reordered_member_records(
     tmp_path: Path, fake_runtime: FakeRuntime
 ) -> None:
+    from Uncertainty_Quantification.BootStrapping.bootstrap import (
+        prediction_publication,
+    )
     from Uncertainty_Quantification.BootStrapping.bootstrap.native_prediction import (
         predict_dataset,
-    )
-    from Uncertainty_Quantification.BootStrapping.bootstrap.prediction_publication import (
-        validate_prediction_publication,
     )
 
     manifest = predict_dataset(fake_runtime.request(tmp_path))
@@ -427,11 +427,38 @@ def test_validation_rejects_reordered_member_records(
     manifest.write_text(json.dumps(document))
 
     with pytest.raises(HardFailure, match="order"):
-        validate_prediction_publication(
+        prediction_publication.validate_prediction_publication(
             manifest.parent,
             dataset_key="mad_test",
             mode="raw",
             member_count=2,
+            reference_targets=("energy", "forces"),
+            structure_limit=None,
+        )
+
+
+def test_validation_rejects_boolean_v2_member_count(
+    tmp_path: Path, fake_runtime: FakeRuntime
+) -> None:
+    from Uncertainty_Quantification.BootStrapping.bootstrap import (
+        prediction_publication,
+    )
+    from Uncertainty_Quantification.BootStrapping.bootstrap.native_prediction import (
+        predict_dataset,
+    )
+
+    manifest = predict_dataset(replace(fake_runtime.request(tmp_path), member_count=1))
+    document = json.loads(manifest.read_text())
+    document["member_count"] = True
+    manifest.unlink()
+    manifest.write_text(json.dumps(document))
+
+    with pytest.raises(HardFailure, match="metadata"):
+        prediction_publication.validate_prediction_publication(
+            manifest.parent,
+            dataset_key="mad_test",
+            mode="raw",
+            member_count=1,
             reference_targets=("energy", "forces"),
             structure_limit=None,
         )
@@ -453,7 +480,9 @@ def test_predict_dataset_checks_member_files_before_writing_manifest(
         assert (path.parent / "members/member_001/raw.npz").is_file()
         return original_write(path, document)
 
-    monkeypatch.setattr(native_prediction, "atomic_write_json", assert_members_then_write)
+    monkeypatch.setattr(
+        native_prediction, "atomic_write_json", assert_members_then_write
+    )
     predict_dataset(fake_runtime.request(tmp_path))
 
 

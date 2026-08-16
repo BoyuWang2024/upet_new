@@ -14,8 +14,10 @@ from .prediction import (
     TargetArrays,
     load_prediction_arrays,
     load_target_arrays,
-    reference_targets as target_fields,
     validate_predictions,
+)
+from .prediction import (
+    reference_targets as target_fields,
 )
 
 
@@ -51,11 +53,15 @@ def _load_manifest(path: Path) -> Mapping[str, Any]:
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise HardFailure(f"could not load prediction manifest {path}: {error}") from error
+        raise HardFailure(
+            f"could not load prediction manifest {path}: {error}"
+        ) from error
     return _mapping(document, "prediction manifest")
 
 
-def _expected_metadata(values: object) -> tuple[dict[str, list[int]], dict[str, str]]:
+def _expected_metadata(
+    values: object,
+) -> tuple[dict[str, list[int]], dict[str, str]]:
     return (
         {
             name: list(getattr(values, name).shape)
@@ -113,7 +119,9 @@ def _validate_members(
     for position, record in enumerate(records):
         item = _mapping(record, "prediction manifest member")
         if set(item) != _MEMBER_KEYS:
-            raise HardFailure("prediction manifest member record keys do not match schema")
+            raise HardFailure(
+                "prediction manifest member record keys do not match schema"
+            )
         index = item["member_index"]
         expected_index = position // len(modes)
         expected_mode = modes[position % len(modes)]
@@ -217,12 +225,13 @@ def validate_prediction_publication(
     else:
         raise HardFailure("prediction manifest schema is not supported")
     if schema != "upet.bootstrap.predictions/v1" and (
-        document["units"] != _UNITS or document["member_count"] != member_count
+        document["units"] != _UNITS
+        or isinstance(document["member_count"], bool)
+        or not isinstance(document["member_count"], int)
+        or document["member_count"] != member_count
     ):
         raise HardFailure("prediction manifest metadata does not match request")
-    targets = _validate_targets(
-        root, document, reference_targets, structure_limit
-    )
+    targets = _validate_targets(root, document, reference_targets, structure_limit)
     if target_fields(targets) != expected_schema_targets:
         raise HardFailure("prediction manifest schema target layout differs")
     _validate_members(
@@ -242,8 +251,10 @@ def validate_legacy_prediction_publication(
     """Audit an ordered legacy raw-plus-EMA v1 publication."""
 
     key = validate_artifact_key(dataset_key, "prediction dataset key")
-    if modes != ("raw", "ema"):
-        raise HardFailure("legacy prediction modes must be raw then ema")
+    if len(modes) != 2 or set(modes) != {"raw", "ema"}:
+        raise HardFailure(
+            "legacy prediction modes must contain raw and ema exactly once"
+        )
     if isinstance(member_count, bool) or member_count < 1:
         raise HardFailure("prediction member_count must be positive")
     root = _publication_root(split_root)
