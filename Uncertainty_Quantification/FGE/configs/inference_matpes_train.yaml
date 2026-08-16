@@ -15,7 +15,7 @@ dataset:
     forces: true
     stress: true
 chunking:
-  max_structures: 128
+  max_structures: 512
   max_atoms: 8192
 output:
   root: ../outputs/inference_matpes_train_k8
