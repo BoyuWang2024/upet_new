@@ -209,7 +209,9 @@ def _extract_external_stream(
     try:
         first = next(stream)
     except StopIteration as error:
-        raise ValueError("external dataset must contain at least one structure") from error
+        raise ValueError(
+            "external dataset must contain at least one structure"
+        ) from error
     feature_dims = (
         int(first.force_features.shape[1]),
         int(first.energy_features.shape[1]),

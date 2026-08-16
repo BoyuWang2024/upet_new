@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
 from confidence_head.external_config import (
     CacheSplitSource,
     ExistingEvaluationSource,
@@ -19,11 +18,14 @@ SHA_CHECKPOINT = "4" * 64
 
 
 def _write_config(tmp_path: Path, mad_source: str | None = None) -> Path:
-    mad = mad_source or f"""
+    mad = (
+        mad_source
+        or f"""
     source: extxyz
     path: data/mad-test.xyz
     expected_sha256: "{SHA_MAD}"
 """
+    )
     path = tmp_path / "external.yaml"
     path.write_text(
         f"""

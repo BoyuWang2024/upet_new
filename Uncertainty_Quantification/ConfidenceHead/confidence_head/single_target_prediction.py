@@ -60,9 +60,7 @@ def collect_single_target_predictions(
                 batch["energy_features"] if energy_active else None,
                 batch["num_atoms"] if energy_active else None,
             )
-            values: dict[str, torch.Tensor] = {
-                "structure_ids": batch["structure_ids"]
-            }
+            values: dict[str, torch.Tensor] = {"structure_ids": batch["structure_ids"]}
             if force_active:
                 if output.force_logits is None:
                     raise RuntimeError("active force model returned no logits")

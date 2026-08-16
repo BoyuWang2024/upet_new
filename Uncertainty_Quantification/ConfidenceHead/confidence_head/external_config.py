@@ -77,7 +77,9 @@ class ExternalPredictionConfig(StrictModel):
             raise ValueError("datasets must not be empty")
         for name in value:
             if name in {".", ".."} or Path(name).name != name:
-                raise ValueError(f"dataset name must be a safe path component: {name!r}")
+                raise ValueError(
+                    f"dataset name must be a safe path component: {name!r}"
+                )
         return value
 
     @model_validator(mode="after")
@@ -120,7 +122,9 @@ def load_external_config(
     try:
         loaded = yaml.load(Path(path).read_text(encoding="utf-8"), UniqueKeySafeLoader)
     except (OSError, yaml.YAMLError) as error:
-        raise ValueError(f"invalid external prediction config {path}: {error}") from error
+        raise ValueError(
+            f"invalid external prediction config {path}: {error}"
+        ) from error
     if not isinstance(loaded, dict):
         raise ValueError("external prediction config must contain a mapping")
     _resolve_paths(loaded, root)

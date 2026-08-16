@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+# mypy: disable-error-code=func-returns-value
 import importlib
 import importlib.util
 from pathlib import Path
