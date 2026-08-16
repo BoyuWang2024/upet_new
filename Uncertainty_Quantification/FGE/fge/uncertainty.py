@@ -51,6 +51,32 @@ def vector_gmd(members: torch.Tensor) -> torch.Tensor:
     return torch.linalg.vector_norm(differences, dim=-1).mean(dim=(0, 1))
 
 
+def tensor_to_voigt_symmetric(stress: torch.Tensor) -> torch.Tensor:
+    """Symmetrize trailing 3x3 tensors and return xx,yy,zz,yz,xz,xy."""
+    if not isinstance(stress, torch.Tensor):
+        raise TypeError("stress must be a torch.Tensor")
+    if stress.device.type != "cpu":
+        raise ValueError("stress must be stored on CPU")
+    if not stress.is_floating_point():
+        raise TypeError("stress must have a floating dtype")
+    if stress.ndim < 2 or tuple(stress.shape[-2:]) != (3, 3):
+        raise ValueError("stress must end in a 3x3 tensor")
+    if not bool(torch.isfinite(stress).all()):
+        raise ValueError("stress must contain only finite values")
+    symmetric = 0.5 * (stress + stress.transpose(-1, -2))
+    return torch.stack(
+        (
+            symmetric[..., 0, 0],
+            symmetric[..., 1, 1],
+            symmetric[..., 2, 2],
+            symmetric[..., 1, 2],
+            symmetric[..., 0, 2],
+            symmetric[..., 0, 1],
+        ),
+        dim=-1,
+    )
+
+
 def reduce_force_by_structure(
     values: torch.Tensor, offsets: torch.Tensor, quantile: float = 0.95
 ) -> dict[str, torch.Tensor]:
