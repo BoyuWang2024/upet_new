@@ -130,3 +130,28 @@ def test_prediction_schema_signature_accepts_safe_dataset_key(tmp_path: Path) ->
     ) == prediction_schema_signature(
         tmp_path / "large", split="mad_test", modes=("raw",), member_count=1
     )
+
+
+def test_extract_targets_does_not_request_missing_mad_stress() -> None:
+    from Uncertainty_Quantification.BootStrapping.bootstrap.native_prediction import (
+        extract_targets,
+    )
+
+    class MadAtoms:
+        info = {"structure_id": "mad-0"}
+
+        def __len__(self) -> int:
+            return 2
+
+        def get_potential_energy(self) -> float:
+            return -1.25
+
+        def get_forces(self) -> np.ndarray:
+            return np.zeros((2, 3))
+
+        def get_stress(self, *, voigt: bool) -> np.ndarray:
+            raise AssertionError("MAD reference stress must not be requested")
+
+    targets = extract_targets([MadAtoms()], "mad_test", ("energy", "forces"))
+
+    assert targets.stress is None

@@ -1,0 +1,191 @@
+"""Validation for complete native prediction publications."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Mapping
+
+from .artifacts import sha256_file
+from .errors import HardFailure
+from .identifiers import validate_artifact_key
+from .prediction import (
+    TargetArrays,
+    load_prediction_arrays,
+    load_target_arrays,
+    reference_targets,
+    validate_predictions,
+)
+
+
+_UNITS = {"energy": "eV", "forces": "eV/Angstrom", "stress": "eV/Angstrom^3"}
+_MEMBER_KEYS = {"member_index", "mode", "path", "sha256", "shapes", "dtypes"}
+
+
+@dataclass(frozen=True)
+class PredictionPublicationAudit:
+    """A verified immutable prediction publication."""
+
+    manifest_path: Path
+    dataset_key: str
+    mode: str
+    member_count: int
+
+
+def _mapping(value: object, location: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise HardFailure(f"{location} must be a mapping")
+    return value
+
+
+def _load_manifest(path: Path) -> Mapping[str, Any]:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise HardFailure(f"could not load prediction manifest {path}: {error}") from error
+    return _mapping(document, "prediction manifest")
+
+
+def _expected_metadata(values: object) -> tuple[dict[str, list[int]], dict[str, str]]:
+    return (
+        {
+            name: list(getattr(values, name).shape)
+            for name in ("energy", "forces", "stress")
+        },
+        {
+            name: str(getattr(values, name).dtype)
+            for name in ("energy", "forces", "stress")
+        },
+    )
+
+
+def _validate_targets(
+    root: Path,
+    document: Mapping[str, Any],
+    expected_reference_targets: tuple[str, ...],
+) -> TargetArrays:
+    targets = _mapping(document.get("targets"), "prediction manifest.targets")
+    if set(targets) != {"structure_limit", "path", "sha256"}:
+        raise HardFailure("prediction manifest.targets keys do not match schema")
+    if targets["path"] != "targets.npz":
+        raise HardFailure("prediction manifest targets path does not match schema")
+    target_path = root / "targets.npz"
+    if targets["sha256"] != sha256_file(target_path):
+        raise HardFailure("prediction manifest targets SHA-256 differs")
+    loaded = load_target_arrays(target_path)
+    if reference_targets(loaded) != expected_reference_targets:
+        raise HardFailure("prediction manifest reference targets differ")
+    return loaded
+
+
+def _validate_members(
+    root: Path,
+    document: Mapping[str, Any],
+    *,
+    mode: str,
+    member_count: int,
+    targets: TargetArrays,
+) -> None:
+    records = document.get("members")
+    if not isinstance(records, list) or len(records) != member_count:
+        raise HardFailure("prediction manifest member records do not match count")
+    declared_paths: set[str] = set()
+    declared_indices: set[int] = set()
+    for record in records:
+        item = _mapping(record, "prediction manifest member")
+        if set(item) != _MEMBER_KEYS:
+            raise HardFailure("prediction manifest member record keys do not match schema")
+        index = item["member_index"]
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise HardFailure("prediction manifest member_index must be an integer")
+        expected_path = f"members/member_{index:03d}/{mode}.npz"
+        if (
+            index < 0
+            or item["mode"] != mode
+            or item["path"] != expected_path
+            or index in declared_indices
+            or item["path"] in declared_paths
+        ):
+            raise HardFailure("prediction manifest member records do not match schema")
+        member_path = root / expected_path
+        if item["sha256"] != sha256_file(member_path):
+            raise HardFailure(f"prediction member SHA-256 differs: {index}")
+        values = load_prediction_arrays(member_path)
+        validate_predictions(values, targets)
+        shapes, dtypes = _expected_metadata(values)
+        if item["shapes"] != shapes or item["dtypes"] != dtypes:
+            raise HardFailure(f"prediction member metadata differs: {index}")
+        declared_indices.add(index)
+        declared_paths.add(expected_path)
+    if declared_indices != set(range(member_count)):
+        raise HardFailure("prediction manifest member records do not match schema")
+    actual_paths = {
+        str(path.relative_to(root)).replace("\\", "/")
+        for path in (root / "members").rglob("*.npz")
+    }
+    if actual_paths != declared_paths:
+        raise HardFailure("prediction member files do not match manifest")
+
+
+def validate_prediction_publication(
+    split_root: str | Path,
+    *,
+    dataset_key: str,
+    mode: str,
+    member_count: int,
+    reference_targets: tuple[str, ...],
+) -> PredictionPublicationAudit:
+    """Audit a v1 or v2 publication before it can be reused."""
+
+    key = validate_artifact_key(dataset_key, "prediction dataset key")
+    if mode not in {"raw", "ema"}:
+        raise HardFailure("prediction mode must be raw or ema")
+    if isinstance(member_count, bool) or member_count < 1:
+        raise HardFailure("prediction member_count must be positive")
+    if reference_targets not in (("energy", "forces"), ("energy", "forces", "stress")):
+        raise HardFailure("prediction reference targets are not supported")
+    root = Path(split_root).expanduser().resolve()
+    manifest_path = root / "manifest.json"
+    document = _load_manifest(manifest_path)
+    schema = document.get("schema")
+    if schema == "upet.bootstrap.predictions/v1":
+        required = {
+            "schema",
+            "split",
+            "units",
+            "member_count",
+            "targets",
+            "members",
+        }
+        if set(document) != required or document["split"] != key:
+            raise HardFailure("prediction manifest dataset key does not match")
+    elif schema == "upet.bootstrap.predictions/v2":
+        required = {
+            "schema",
+            "split",
+            "dataset_key",
+            "dataset_label",
+            "reference_targets",
+            "units",
+            "member_count",
+            "targets",
+            "members",
+        }
+        if (
+            set(document) != required
+            or document["split"] != key
+            or document["dataset_key"] != key
+            or not isinstance(document["dataset_label"], str)
+            or document["reference_targets"] != list(reference_targets)
+        ):
+            raise HardFailure("prediction manifest dataset key does not match")
+    else:
+        raise HardFailure("prediction manifest schema is not supported")
+    if document["units"] != _UNITS or document["member_count"] != member_count:
+        raise HardFailure("prediction manifest metadata does not match request")
+    targets = _validate_targets(root, document, reference_targets)
+    _validate_members(
+        root, document, mode=mode, member_count=member_count, targets=targets
+    )
+    return PredictionPublicationAudit(manifest_path, key, mode, member_count)
