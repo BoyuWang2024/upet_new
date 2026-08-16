@@ -180,6 +180,56 @@ def _extraction_config(config: ExternalPredictionConfig) -> Any:
     )
 
 
+def _expected_external_payload(
+    config: ExternalPredictionConfig,
+    dataset_name: str,
+) -> dict[str, Any]:
+    """Build the stable cache identity fields without loading the UPET model."""
+
+    source = config.datasets.get(dataset_name)
+    if not isinstance(source, ExtXYZSource):
+        raise ValueError(f"dataset {dataset_name!r} is not an extxyz source")
+    identity = dataset_identity(source.path, expected_sha256=source.expected_sha256)
+    adapter = _extraction_config(config)
+    return _identity_payload(
+        adapter,
+        config.checkpoint.expected_sha256,
+        {"dataset": identity},
+        adapter.readouts.model_dump(),
+        _execution_policy(adapter),
+        (1, 1),
+    )
+
+
+def _without_features(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in payload.items() if key != "features"}
+
+
+def _reusable_external_cache(
+    config: ExternalPredictionConfig,
+    dataset_name: str,
+) -> DatasetCache | None:
+    """Find one exact cache identity before any model inference is started."""
+
+    source = config.datasets.get(dataset_name)
+    if not isinstance(source, ExtXYZSource):
+        raise ValueError(f"dataset {dataset_name!r} is not an extxyz source")
+    expected = _without_features(_expected_external_payload(config, dataset_name))
+    matches: list[DatasetCache] = []
+    for manifest_path in sorted(config.cache_root.glob("*/manifest.json")):
+        try:
+            manifest = _mapping(manifest_path, context="external cache manifest")
+        except ValueError:
+            continue
+        payload = manifest.get("identity_payload")
+        if not isinstance(payload, Mapping) or _without_features(payload) != expected:
+            continue
+        matches.append(_dataset_cache(manifest_path, "dataset", source.expected_sha256))
+    if len(matches) > 1:
+        raise ValueError("multiple reusable external dataset caches")
+    return matches[0] if matches else None
+
+
 def _extract_external_stream(
     config: ExternalPredictionConfig,
     dataset_name: str,
@@ -236,6 +286,9 @@ def build_external_dataset_cache(
     source = config.datasets.get(dataset_name)
     if not isinstance(source, ExtXYZSource):
         raise ValueError(f"dataset {dataset_name!r} is not an extxyz source")
+    reusable = _reusable_external_cache(config, dataset_name)
+    if reusable is not None:
+        return reusable
     stream, payload = _extract_external_stream(config, dataset_name)
     manifest_path = build_raw_cache(
         output_root=config.cache_root,

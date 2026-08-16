@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 import torch
-
 from confidence_head.cache import RawStructure, build_raw_cache
 from confidence_head.external_cache import (
     build_external_dataset_cache,
@@ -160,16 +159,30 @@ def test_build_external_cache_publishes_one_dataset_split_and_reuses_identity(
     )
     import confidence_head.external_cache as module
 
+    payload = _identity_payload("dataset")
+    extractions = 0
+
+    def extract(*_args: object, **_kwargs: object):
+        nonlocal extractions
+        extractions += 1
+        return iter([_raw()]), payload
+
+    monkeypatch.setattr(
+        module,
+        "_expected_external_payload",
+        lambda *_args, **_kwargs: payload,
+    )
     monkeypatch.setattr(
         module,
         "_extract_external_stream",
-        lambda *_args, **_kwargs: (iter([_raw()]), _identity_payload("dataset")),
+        extract,
     )
 
     first = build_external_dataset_cache(config, "mad")
     second = build_external_dataset_cache(config, "mad")
 
     assert first == second
+    assert extractions == 1
     manifest = json.loads(first.manifest_path.read_text(encoding="utf-8"))
     assert set(manifest["splits"]) == {"dataset"}
     assert first.split == "dataset"
