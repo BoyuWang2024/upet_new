@@ -39,7 +39,7 @@ def test_prediction_schema_signature_ignores_dataset_size(tmp_path: Path) -> Non
 
     units = {"energy": "eV", "forces": "eV/Angstrom", "stress": "eV/Angstrom^3"}
 
-    def write(root: Path, structures: int) -> None:
+    def write(root: Path, structures: int, *, reference_stress: bool) -> None:
         atoms = structures * 2
         store = PredictionStore(root, split="test", units=units)
         store.write_targets(
@@ -49,7 +49,9 @@ def test_prediction_schema_signature_ignores_dataset_size(tmp_path: Path) -> Non
                 atom_offsets=np.arange(0, atoms + 1, 2),
                 energy=np.zeros(structures),
                 forces=np.zeros((atoms, 3)),
-                stress=np.zeros((structures, 3, 3)),
+                stress=(
+                    np.zeros((structures, 3, 3)) if reference_stress else None
+                ),
             )
         )
         store.write_member(
@@ -62,11 +64,25 @@ def test_prediction_schema_signature_ignores_dataset_size(tmp_path: Path) -> Non
             ),
         )
 
-    write(tmp_path / "small", 2)
-    write(tmp_path / "large", 5)
+    write(tmp_path / "small", 2, reference_stress=True)
+    write(tmp_path / "large", 5, reference_stress=True)
 
-    assert prediction_schema_signature(
+    v1_small = prediction_schema_signature(
         tmp_path / "small", split="test", modes=("raw",), member_count=1
-    ) == prediction_schema_signature(
+    )
+    assert v1_small == prediction_schema_signature(
         tmp_path / "large", split="test", modes=("raw",), member_count=1
     )
+    assert v1_small["schema"] == "upet.bootstrap.predictions/v1"
+    assert "stress" in v1_small["targets"]
+
+    write(tmp_path / "mad_small", 2, reference_stress=False)
+    write(tmp_path / "mad_large", 5, reference_stress=False)
+    v2_small = prediction_schema_signature(
+        tmp_path / "mad_small", split="test", modes=("raw",), member_count=1
+    )
+    assert v2_small == prediction_schema_signature(
+        tmp_path / "mad_large", split="test", modes=("raw",), member_count=1
+    )
+    assert v2_small["schema"] == "upet.bootstrap.predictions/v2"
+    assert "stress" not in v2_small["targets"]

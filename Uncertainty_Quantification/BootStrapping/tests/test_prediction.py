@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pytest
+
+UNITS = {"energy": "eV", "forces": "eV/Angstrom", "stress": "eV/Angstrom^3"}
 
 
 def _targets():
@@ -43,7 +46,7 @@ def test_prediction_store_round_trip_and_single_targets(tmp_path: Path) -> None:
     store = PredictionStore(
         tmp_path,
         split="test",
-        units={"energy": "eV", "forces": "eV/Angstrom", "stress": "eV/Angstrom^3"},
+        units=UNITS,
     )
     targets_path = store.write_targets(_targets())
     store.write_targets(_targets())
@@ -69,7 +72,7 @@ def test_prediction_store_rejects_layout_and_mode_mismatch(tmp_path: Path) -> No
     store = PredictionStore(
         tmp_path,
         split="val",
-        units={"energy": "eV", "forces": "eV/Angstrom", "stress": "eV/Angstrom^3"},
+        units=UNITS,
     )
     store.write_targets(_targets())
     mismatched = PredictionArrays(
@@ -111,3 +114,57 @@ def test_targets_require_unique_ids_and_exact_offsets() -> None:
     )
     with pytest.raises(HardFailure, match="offset"):
         validate_targets(wrong_offsets)
+
+
+def test_target_store_round_trips_mad_without_stress(tmp_path: Path) -> None:
+    from Uncertainty_Quantification.BootStrapping.bootstrap.prediction import (
+        PredictionStore,
+        load_target_arrays,
+        reference_targets,
+    )
+
+    targets = replace(_targets(), stress=None)
+    store = PredictionStore(tmp_path, split="mad_test", units=UNITS)
+    path = store.write_targets(targets)
+
+    loaded = load_target_arrays(path)
+    assert loaded.stress is None
+    assert reference_targets(loaded) == ("energy", "forces")
+    with np.load(path, allow_pickle=False) as archive:
+        assert "stress" not in archive.files
+    store.write_member(0, "raw", _predictions())
+
+
+def test_prediction_store_rejects_escaping_dataset_key(tmp_path: Path) -> None:
+    from Uncertainty_Quantification.BootStrapping.bootstrap.errors import HardFailure
+    from Uncertainty_Quantification.BootStrapping.bootstrap.prediction import (
+        PredictionStore,
+    )
+
+    with pytest.raises(HardFailure, match="split"):
+        PredictionStore(tmp_path, split="../outside", units=UNITS)
+
+
+def test_existing_v1_targets_remain_readable(tmp_path: Path) -> None:
+    from Uncertainty_Quantification.BootStrapping.bootstrap.prediction import (
+        PredictionStore,
+        load_target_arrays,
+        reference_targets,
+    )
+
+    path = PredictionStore(tmp_path, split="test", units=UNITS).write_targets(
+        _targets()
+    )
+    loaded = load_target_arrays(path)
+    assert loaded.stress is not None
+    assert reference_targets(loaded) == ("energy", "forces", "stress")
+
+
+def test_prediction_store_can_use_a_direct_split_root(tmp_path: Path) -> None:
+    from Uncertainty_Quantification.BootStrapping.bootstrap.prediction import (
+        PredictionStore,
+    )
+
+    split_root = tmp_path / "staging" / "mad_test"
+    store = PredictionStore.at_split_root(split_root, split="mad_test", units=UNITS)
+    assert store.split_root == split_root

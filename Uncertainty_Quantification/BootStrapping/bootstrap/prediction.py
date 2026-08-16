@@ -11,6 +11,7 @@ from numpy.typing import NDArray
 
 from .artifacts import atomic_write_npz, sha256_file
 from .errors import HardFailure
+from .identifiers import validate_artifact_key
 
 
 _TARGET_KEYS = {
@@ -21,6 +22,7 @@ _TARGET_KEYS = {
     "forces",
     "stress",
 }
+_TARGET_KEYS_WITHOUT_STRESS = _TARGET_KEYS - {"stress"}
 _PREDICTION_KEYS = {"energy", "forces", "stress"}
 _EXPECTED_UNITS = {
     "energy": "eV",
@@ -36,7 +38,16 @@ class TargetArrays:
     atom_offsets: NDArray
     energy: NDArray
     forces: NDArray
-    stress: NDArray
+    stress: NDArray | None
+
+
+def reference_targets(targets: TargetArrays) -> tuple[str, ...]:
+    """Return the reference fields available for one target store."""
+
+    fields = ["energy", "forces"]
+    if targets.stress is not None:
+        fields.append("stress")
+    return tuple(fields)
 
 
 @dataclass(frozen=True)
@@ -79,7 +90,6 @@ def validate_targets(targets: TargetArrays) -> None:
     offsets = _array(targets.atom_offsets, "targets.atom_offsets")
     energy = _array(targets.energy, "targets.energy")
     forces = _array(targets.forces, "targets.forces")
-    stress = _array(targets.stress, "targets.stress")
     if ids.ndim != 1:
         raise HardFailure("targets.structure_ids must be one-dimensional")
     count = len(ids)
@@ -101,10 +111,13 @@ def validate_targets(targets: TargetArrays) -> None:
         raise HardFailure("targets.energy has an invalid layout")
     if forces.shape != (atom_count, 3):
         raise HardFailure("targets.forces has an invalid layout")
-    if stress.shape != (count, 3, 3):
-        raise HardFailure("targets.stress has an invalid layout")
-    for name, array in (("energy", energy), ("forces", forces), ("stress", stress)):
+    for name, array in (("energy", energy), ("forces", forces)):
         _finite(array, f"targets.{name}")
+    if targets.stress is not None:
+        stress = _array(targets.stress, "targets.stress")
+        if stress.shape != (count, 3, 3):
+            raise HardFailure("targets.stress has an invalid layout")
+        _finite(stress, "targets.stress")
 
 
 def validate_predictions(values: PredictionArrays, targets: TargetArrays) -> None:
@@ -141,7 +154,28 @@ def _load_npz(path: str | Path, expected: set[str]) -> dict[str, NDArray]:
 
 
 def load_target_arrays(path: str | Path) -> TargetArrays:
-    arrays = _load_npz(path, _TARGET_KEYS)
+    source = Path(path).expanduser().resolve()
+    try:
+        with np.load(source, allow_pickle=False) as archive:
+            keys = set(archive.files)
+            if keys == _TARGET_KEYS:
+                arrays: dict[str, NDArray | None] = {
+                    name: np.array(archive[name], copy=True) for name in _TARGET_KEYS
+                }
+            elif keys == _TARGET_KEYS_WITHOUT_STRESS:
+                arrays = {
+                    name: np.array(archive[name], copy=True)
+                    for name in _TARGET_KEYS_WITHOUT_STRESS
+                }
+                arrays["stress"] = None
+            else:
+                raise HardFailure(f"NPZ array keys do not match schema: {source}")
+    except HardFailure:
+        raise
+    except (OSError, ValueError) as error:
+        raise HardFailure(
+            f"could not load prediction artifact {source}: {error}"
+        ) from error
     targets = TargetArrays(**arrays)
     validate_targets(targets)
     return targets
@@ -156,18 +190,32 @@ class PredictionStore:
     """Immutable per-split target and member prediction store."""
 
     def __init__(
-        self, root: str | Path, *, split: str, units: Mapping[str, str]
+        self,
+        root: str | Path,
+        *,
+        split: str,
+        units: Mapping[str, str],
+        direct_split_root: bool = False,
     ) -> None:
-        if split not in {"val", "test"}:
-            raise HardFailure("prediction split must be val or test")
+        self.split = validate_artifact_key(split, "prediction split")
         if dict(units) != _EXPECTED_UNITS:
             raise HardFailure("prediction units do not match the public schema")
         self.root = Path(root).expanduser().absolute()
-        self.split = split
+        self._direct_split_root = direct_split_root
         self.units = dict(units)
+
+    @classmethod
+    def at_split_root(
+        cls, split_root: str | Path, *, split: str, units: Mapping[str, str]
+    ) -> "PredictionStore":
+        """Create a store whose root is already the final split directory."""
+
+        return cls(split_root, split=split, units=units, direct_split_root=True)
 
     @property
     def split_root(self) -> Path:
+        if self._direct_split_root:
+            return self.root
         return self.root / self.split
 
     @property
@@ -176,15 +224,16 @@ class PredictionStore:
 
     def write_targets(self, targets: TargetArrays) -> Path:
         validate_targets(targets)
-        return atomic_write_npz(
-            self.targets_path,
-            structure_ids=targets.structure_ids,
-            num_atoms=targets.num_atoms,
-            atom_offsets=targets.atom_offsets,
-            energy=targets.energy,
-            forces=targets.forces,
-            stress=targets.stress,
-        )
+        arrays: dict[str, NDArray] = {
+            "structure_ids": targets.structure_ids,
+            "num_atoms": targets.num_atoms,
+            "atom_offsets": targets.atom_offsets,
+            "energy": targets.energy,
+            "forces": targets.forces,
+        }
+        if targets.stress is not None:
+            arrays["stress"] = targets.stress
+        return atomic_write_npz(self.targets_path, **arrays)
 
     def write_member(
         self, member_index: int, mode: str, values: PredictionArrays

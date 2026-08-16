@@ -46,8 +46,9 @@ def prediction_schema_signature(
         "atom_offsets": _layout(targets.atom_offsets, leading_axes=1),
         "energy": _layout(targets.energy, leading_axes=1),
         "forces": _layout(targets.forces, leading_axes=1),
-        "stress": _layout(targets.stress, leading_axes=1),
     }
+    if targets.stress is not None:
+        target_layout["stress"] = _layout(targets.stress, leading_axes=1)
     member_layout: dict[str, dict[str, object]] | None = None
     for index in range(member_count):
         for mode in normalized_modes:
@@ -66,7 +67,11 @@ def prediction_schema_signature(
                 raise HardFailure("prediction member schema differs")
     assert member_layout is not None
     return {
-        "schema": "upet.bootstrap.predictions/v1",
+        "schema": (
+            "upet.bootstrap.predictions/v1"
+            if targets.stress is not None
+            else "upet.bootstrap.predictions/v2"
+        ),
         "modes": sorted(set(normalized_modes)),
         "targets": target_layout,
         "member": member_layout,
