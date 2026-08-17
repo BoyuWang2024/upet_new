@@ -1,0 +1,23 @@
+schema_version: 1
+runs:
+  - {label: full_remote_b8_e8, config: full_remote_b8_e8.yaml, root: ../outputs/upet-bootstrap-head-posttrain-v1/full_remote_b8_e8}
+  - {label: lr_1e-4, config: lr_1e-4.yaml, root: ../outputs/upet-bootstrap-head-posttrain-v1/lr_1e-4}
+  - {label: lr_1e-6, config: lr_1e-6.yaml, root: ../outputs/upet-bootstrap-head-posttrain-v1/lr_1e-6}
+datasets:
+  - {label: matpes_test, storage_key: matpes_test, path: ../../../data/matpes_test.extxyz, reference_targets: [energy, forces, stress]}
+  - {label: mad_test, storage_key: mad_test, path: ../../../data/dataset/mad-test.xyz, reference_targets: [energy, forces]}
+  - {label: matpes_train, storage_key: matpes_train, path: ../../../data/matpes_train.extxyz, reference_targets: [energy, forces, stress]}
+prediction: {mode: raw, member_count: 8, device: cuda, batch_size: 64}
+plot:
+  grid_size: 180
+  gaussian_sigma: 1.5
+  contour_masses: [0.5, 0.8, 0.95]
+  scatter_max_points: 200000
+  scatter_seed: 2026
+  scatter_size: 2.0
+  scatter_alpha: 0.35
+  log_margin: 0.15
+  figure_size: [6.4, 5.2]
+  dpi: 180
+  formats: [png, pdf]
+output_root: ../outputs/campaign_plots
