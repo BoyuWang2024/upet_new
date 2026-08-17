@@ -1,11 +1,15 @@
 """Compute canonical raw uncertainty results for a configured campaign."""
+
 from __future__ import annotations
+
 import argparse
 import sys
 from pathlib import Path
+
 from ..bootstrap.campaign import load_campaign
 from ..bootstrap.errors import HardFailure
 from ..bootstrap.uq_campaign import compute_campaign_uq
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -14,13 +18,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dataset", action="append", dest="datasets")
     arguments = parser.parse_args(argv)
     try:
-        results = compute_campaign_uq(load_campaign(arguments.campaign), arguments.runs, arguments.datasets)
+        results = compute_campaign_uq(
+            load_campaign(arguments.campaign), arguments.runs, arguments.datasets
+        )
     except HardFailure as error:
         print(f"campaign UQ failed: {error}", file=sys.stderr)
         return 2
     for result in results:
         print(f"{result.run_label}/{result.dataset_label}: {result.destination}")
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

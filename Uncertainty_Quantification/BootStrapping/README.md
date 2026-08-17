@@ -38,3 +38,19 @@ tooling are excluded.
 Generated data belongs under `outputs/`, which is ignored by Git. The
 `internal_migration/` directory is operational tooling and is excluded from
 formal source releases.
+
+Run the complete three-run, three-dataset raw campaign on the execution host:
+
+```bash
+CAMPAIGN=Uncertainty_Quantification/BootStrapping/configs/three_run_three_dataset_raw.yaml
+python -m Uncertainty_Quantification.BootStrapping.scripts.predict_campaign \
+  --campaign "$CAMPAIGN"
+python -m Uncertainty_Quantification.BootStrapping.scripts.compute_campaign_uq \
+  --campaign "$CAMPAIGN"
+python -m Uncertainty_Quantification.BootStrapping.scripts.plot_campaign \
+  --campaign "$CAMPAIGN"
+```
+
+Each stage reuses complete audited publications and fails closed when it finds
+partial or inconsistent output. Plotting publishes the physical-property
+panels and summary tables without member-sweep figures.
