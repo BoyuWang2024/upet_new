@@ -81,9 +81,16 @@ def _validate_targets(
     expected_structure_limit: int | None,
 ) -> TargetArrays:
     targets = _mapping(document.get("targets"), "prediction manifest.targets")
-    if set(targets) != {"structure_limit", "path", "sha256"}:
+    target_keys = set(targets)
+    if target_keys == {"structure_limit", "path", "sha256"}:
+        actual_limit = targets["structure_limit"]
+    elif document.get("schema") == "upet.bootstrap.predictions/v1" and target_keys == {
+        "path",
+        "sha256",
+    }:
+        actual_limit = None
+    else:
         raise HardFailure("prediction manifest.targets keys do not match schema")
-    actual_limit = targets["structure_limit"]
     if expected_structure_limit is None:
         if actual_limit is not None:
             raise HardFailure("prediction manifest structure_limit differs")
