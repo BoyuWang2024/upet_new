@@ -4,7 +4,7 @@ runs:
   - {label: lr_1e-4, config: lr_1e-4.yaml, root: ../outputs/upet-bootstrap-head-posttrain-v1/lr_1e-4}
   - {label: lr_1e-6, config: lr_1e-6.yaml, root: ../outputs/upet-bootstrap-head-posttrain-v1/lr_1e-6}
 datasets:
-  - {label: matpes_test, storage_key: matpes_test, path: ../../../data/matpes_test.extxyz, reference_targets: [energy, forces, stress]}
+  - {label: matpes_test, storage_key: test, path: ../../../data/matpes_test.extxyz, reference_targets: [energy, forces, stress]}
   - {label: mad_test, storage_key: mad_test, path: ../../../data/dataset/mad-test.xyz, reference_targets: [energy, forces]}
   - {label: matpes_train, storage_key: matpes_train, path: ../../../data/matpes_train.extxyz, reference_targets: [energy, forces, stress]}
 prediction: {mode: raw, member_count: 8, device: cuda, batch_size: 64}
