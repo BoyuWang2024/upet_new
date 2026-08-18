@@ -67,7 +67,9 @@ def _energy_figure(rows: Sequence[Mapping[str, Any]], root: Path, dpi: int) -> N
                 marker="s",
                 label=dataset,
             )
-        for axis, title in zip(axes, ("Pearson r (log10)", "Spearman rho"), strict=True):
+        for axis, title in zip(
+            axes, ("Pearson r (log10)", "Spearman rho"), strict=True
+        ):
             axis.set_ylim(-1.0, 1.0)
             axis.set_xticks(range(1, 9))
             axis.set_xlabel("Energy cumulant order")
@@ -139,7 +141,9 @@ def publish_density_cross_dataset(
     if manifest_path.is_file():
         existing = verify_density_publication(manifest_path, full=True)
         if existing.get("identity") != identity:
-            raise ValueError("density comparison identity conflicts with existing output")
+            raise ValueError(
+                "density comparison identity conflicts with existing output"
+            )
         return manifest_path
     if target.exists():
         raise ValueError("density comparison target exists without a complete identity")

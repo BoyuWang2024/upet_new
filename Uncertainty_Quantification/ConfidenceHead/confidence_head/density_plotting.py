@@ -41,7 +41,7 @@ class DensitySettings:
         masses = self.contour_masses
         if not masses or any(not 0.0 < value < 1.0 for value in masses):
             raise ValueError("contour_masses must be inside (0, 1)")
-        if any(left >= right for left, right in zip(masses, masses[1:])):
+        if any(left >= right for left, right in zip(masses, masses[1:], strict=False)):
             raise ValueError("contour_masses must be strictly increasing")
 
 
@@ -93,11 +93,7 @@ def filter_density_pairs(expected: Tensor, observed: Tensor) -> FilteredDensityP
     inf_mask = (~nan_mask) & (torch.isinf(expected) | torch.isinf(observed))
     finite_mask = ~(nan_mask | inf_mask)
     zero_mask = finite_mask & ((expected == 0.0) | (observed == 0.0))
-    negative_mask = (
-        finite_mask
-        & (~zero_mask)
-        & ((expected < 0.0) | (observed < 0.0))
-    )
+    negative_mask = finite_mask & (~zero_mask) & ((expected < 0.0) | (observed < 0.0))
     valid_mask = finite_mask & (~zero_mask) & (~negative_mask)
     valid_expected = expected[valid_mask]
     valid_observed = observed[valid_mask]
@@ -264,8 +260,9 @@ def analyze_density_panel(
         log_limits=limits,
     )
 
+
 # Public rendering API is imported after the analysis types to avoid a cycle.
-from .density_rendering import (  # noqa: E402
+from .density_rendering import (  # noqa: E402, F401
     build_density_figure,
     build_energy_comparison_figure,
     render_density_panel,

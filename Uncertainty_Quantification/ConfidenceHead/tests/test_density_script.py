@@ -5,7 +5,6 @@ import importlib.util
 from pathlib import Path
 
 import pytest
-
 from confidence_head.workflows import density_commands
 
 
@@ -39,7 +38,5 @@ def test_density_script_forwards_config_and_selected_dataset(
         ),
     )
 
-    assert module.main(
-        ["--config", str(config_path), "--dataset", "mad_test"]
-    ) == 0
+    assert module.main(["--config", str(config_path), "--dataset", "mad_test"]) == 0
     assert seen == [(loaded, ("mad_test",))]

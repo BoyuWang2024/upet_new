@@ -109,7 +109,10 @@ def _ordered_energy(dataset: DatasetSeries) -> list[PlotSeries]:
         for order, value in enumerate(values, 1)
     ):
         raise ValueError("density publication energy metadata is inconsistent")
-    if dataset.force.target != "force" or dataset.force.force_target_mode != "atom_mean":
+    if (
+        dataset.force.target != "force"
+        or dataset.force.force_target_mode != "atom_mean"
+    ):
         raise ValueError("density publication requires one atom_mean force series")
     run_names = [value.run_dir.name for value in (*values, dataset.force)]
     if len(set(run_names)) != 9:

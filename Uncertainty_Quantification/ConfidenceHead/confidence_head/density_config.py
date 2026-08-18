@@ -26,7 +26,7 @@ class DensityPlotSettings(StrictModel):
     def validate_contour_masses(cls, values: tuple[float, ...]) -> tuple[float, ...]:
         if not values or any(not 0.0 < value < 1.0 for value in values):
             raise ValueError("contour_masses must be inside (0, 1)")
-        if any(left >= right for left, right in zip(values, values[1:])):
+        if any(left >= right for left, right in zip(values, values[1:], strict=False)):
             raise ValueError("contour_masses must be strictly increasing")
         return values
 
@@ -57,7 +57,9 @@ def load_density_config(path: Path) -> DensityPlotConfig:
     try:
         loaded = yaml.load(config_path.read_text(encoding="utf-8"), UniqueKeySafeLoader)
     except (OSError, yaml.YAMLError) as error:
-        raise ValueError(f"invalid density plot config {config_path}: {error}") from error
+        raise ValueError(
+            f"invalid density plot config {config_path}: {error}"
+        ) from error
     if not isinstance(loaded, dict):
         raise ValueError("density plot config must contain a mapping")
     raw: dict[str, Any] = dict(loaded)

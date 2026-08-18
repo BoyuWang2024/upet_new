@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 import torch
-
 from confidence_head.density_plotting import DensitySettings
 from confidence_head.density_publication import (
     DensityPublication,
@@ -39,8 +38,7 @@ def _dataset(root: Path, name: str) -> DatasetSeries:
         name=name,
         force=_series(root, target="force", order=None),
         energy_by_order={
-            order: _series(root, target="energy", order=order)
-            for order in range(1, 9)
+            order: _series(root, target="energy", order=order) for order in range(1, 9)
         },
         input_manifests={f"run-{index}": f"{index:064x}" for index in range(9)},
     )

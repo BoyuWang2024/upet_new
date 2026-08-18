@@ -6,7 +6,6 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import torch
-
 from confidence_head.density_plotting import (
     DensitySettings,
     build_density_figure,
@@ -73,8 +72,7 @@ def test_energy_comparison_uses_shared_limits_and_writes_png_pdf(
     tmp_path: Path,
 ) -> None:
     series = {
-        order: _series(tmp_path, target="energy", order=order)
-        for order in range(1, 9)
+        order: _series(tmp_path, target="energy", order=order) for order in range(1, 9)
     }
     settings = DensitySettings(grid_size=32, dpi=72)
     figure = build_energy_comparison_figure(series, settings)

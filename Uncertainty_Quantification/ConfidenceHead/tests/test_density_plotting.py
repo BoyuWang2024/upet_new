@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 import torch
-
 from confidence_head.density_plotting import (
     DensitySettings,
     analyze_density_panel,
@@ -24,7 +23,8 @@ def _series(
     logits = torch.zeros((len(observed), 50), dtype=torch.float64)
     logits[:, 0] = 1.0
     return PlotSeries(
-        run_dir=Path("/synthetic") / (f"energy-{order}" if target == "energy" else "force"),
+        run_dir=Path("/synthetic")
+        / (f"energy-{order}" if target == "energy" else "force"),
         structure_ids=torch.arange(len(observed)),
         target=target,  # type: ignore[arg-type]
         order=order,
@@ -38,7 +38,9 @@ def _series(
 
 
 def _series_with_invalid_pairs() -> PlotSeries:
-    observed = torch.tensor([0.02, 0.08, 0.15, 0.24, 0.0, -0.1, float("nan"), float("inf")])
+    observed = torch.tensor(
+        [0.02, 0.08, 0.15, 0.24, 0.0, -0.1, float("nan"), float("inf")]
+    )
     expected = torch.tensor([0.01, 0.10, 0.13, 0.30, 0.2, 0.2, 0.2, 0.2])
     return _series(observed, expected)
 

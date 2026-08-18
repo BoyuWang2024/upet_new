@@ -4,7 +4,6 @@ import csv
 from pathlib import Path
 
 import torch
-
 from confidence_head.density_comparisons import publish_density_cross_dataset
 from confidence_head.density_plotting import DensitySettings
 from confidence_head.density_publication import (

@@ -4,7 +4,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from confidence_head.density_config import load_density_config
 from confidence_head.workflows import density_commands
 
@@ -74,8 +73,12 @@ def test_density_command_uses_existing_sources_without_prediction(
     monkeypatch.setattr(
         density_commands,
         "publish_density_dataset",
-        lambda dataset, root, settings: seen.append(dataset.name)
-        or SimpleNamespace(dataset=dataset, manifest=root / dataset.name / "manifest.json"),
+        lambda dataset, root, settings: (
+            seen.append(dataset.name)
+            or SimpleNamespace(
+                dataset=dataset, manifest=root / dataset.name / "manifest.json"
+            )
+        ),
     )
     monkeypatch.setattr(
         density_commands,
