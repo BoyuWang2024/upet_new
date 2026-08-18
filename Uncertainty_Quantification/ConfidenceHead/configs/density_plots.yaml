@@ -1,0 +1,10 @@
+external_config: predict_external_gpu.yaml
+output_root: /home/bywang/code/UQ/upet_new/Uncertainty_Quantification/Plots/ConfidenceHead/density_scatter
+plot:
+  scatter_max_points: 20000
+  scatter_seed: 20260714
+  grid_size: 160
+  gaussian_sigma: 1.2
+  contour_masses: [0.50, 0.70, 0.85, 0.95, 0.99]
+  log_margin: 0.05
+  dpi: 300
