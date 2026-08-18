@@ -205,9 +205,9 @@ def _density_contours(
 
 
 def _finite_correlation(name: str, value: float) -> float:
-    if not math.isfinite(value) or not -1.0 <= value <= 1.0:
+    if not math.isfinite(value) or value < -1.0 - 1e-12 or value > 1.0 + 1e-12:
         raise ValueError(f"{name} correlation is undefined")
-    return float(value)
+    return float(max(-1.0, min(1.0, value)))
 
 
 def analyze_density_panel(
@@ -263,3 +263,11 @@ def analyze_density_panel(
         ),
         log_limits=limits,
     )
+
+# Public rendering API is imported after the analysis types to avoid a cycle.
+from .density_rendering import (  # noqa: E402
+    build_density_figure,
+    build_energy_comparison_figure,
+    render_density_panel,
+    render_energy_comparison,
+)
