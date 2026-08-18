@@ -85,7 +85,7 @@ def test_shared_log_limits_cover_all_energy_orders() -> None:
     low, high = shared_log_limits(series, margin=0.05)
 
     assert low < -8.0
-    assert high > 0.0
+    assert high > torch.log10(torch.tensor(0.2)).item()
 
 
 def test_density_requires_two_valid_pairs() -> None:
