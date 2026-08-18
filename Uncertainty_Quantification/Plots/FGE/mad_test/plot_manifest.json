@@ -1,0 +1,60 @@
+{
+  "analysis_identity": "51a85366f8c9d89451892c50138354b1b46e973a99c7a927257af575efc02cfd",
+  "dataset_label": "mad_test",
+  "domains": [
+    "energy",
+    "force"
+  ],
+  "outputs": [
+    {
+      "bytes": 104533,
+      "path": "energy_uncertainty_vs_absolute_residual.pdf",
+      "sha256": "ebcfc9590293481306d358799551e11416be9dae63e1811d1ca60dace5555171"
+    },
+    {
+      "bytes": 380442,
+      "path": "energy_uncertainty_vs_absolute_residual.png",
+      "sha256": "d55e45a4fcedbfbe02104e88618e9c6830758be5464b016f3783caf857be14eb"
+    },
+    {
+      "bytes": 117659,
+      "path": "force_uncertainty_vs_absolute_residual.pdf",
+      "sha256": "edc39b11362e124ea3e48b0fb0eb6de7e42c0f3a3a82899c2dc631f92537c2f7"
+    },
+    {
+      "bytes": 389310,
+      "path": "force_uncertainty_vs_absolute_residual.png",
+      "sha256": "77c8c6d1c86b0ebb66fcfafe7b1370927f2bba74258591635151bc9d8180b6c2"
+    },
+    {
+      "bytes": 1838,
+      "path": "plot_statistics.json",
+      "sha256": "271d230169ba2e6f2b7a54fdf992d0eda53f4064c62980248f60ba048213db1e"
+    }
+  ],
+  "schema_version": "upet.fge.plot-result.v1",
+  "settings": {
+    "contour_masses": [
+      0.5,
+      0.7,
+      0.85,
+      0.95,
+      0.99
+    ],
+    "dpi": 300,
+    "figure_size": [
+      7.0,
+      7.0
+    ],
+    "gaussian_sigma": 1.2,
+    "grid_size": 160,
+    "log_margin": 0.05,
+    "scatter_alpha": 0.035,
+    "scatter_max_points": 20000,
+    "scatter_seed": 20260714,
+    "scatter_size": 2.0
+  },
+  "source_identity": "daafcfa15dac641e1021660778971f3f202718c0615fb905478542656caee941",
+  "source_kind": "inference",
+  "status": "PASS"
+}

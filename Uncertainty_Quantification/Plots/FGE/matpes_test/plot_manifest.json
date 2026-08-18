@@ -1,0 +1,71 @@
+{
+  "analysis_identity": "be42c8e67bcbeebf2dcd626dad0f98f7bd21b28f567bb342f9453193db2aa98b",
+  "dataset_label": "matpes_test",
+  "domains": [
+    "energy",
+    "force",
+    "stress"
+  ],
+  "outputs": [
+    {
+      "bytes": 173605,
+      "path": "energy_uncertainty_vs_absolute_residual.pdf",
+      "sha256": "77fe01ea666f4cf79ea3d141b84f5191f8ba3e2f2df72b8f7cadd73e02955c4f"
+    },
+    {
+      "bytes": 570214,
+      "path": "energy_uncertainty_vs_absolute_residual.png",
+      "sha256": "edef566b14502e8e8b7a49efdd6fd7e64ab64f1b1eb4ad938e5c0665e6e508ad"
+    },
+    {
+      "bytes": 141082,
+      "path": "force_uncertainty_vs_absolute_residual.pdf",
+      "sha256": "8e7eaa5985993ad2e0874166a41ecdd101c4dfc42d85c23c88e585ca2a60c4d5"
+    },
+    {
+      "bytes": 498136,
+      "path": "force_uncertainty_vs_absolute_residual.png",
+      "sha256": "3d056f9db24a79abd39f43e267c9098d6157b2dc9cfbb3a881cb1fc42d0b5a47"
+    },
+    {
+      "bytes": 2648,
+      "path": "plot_statistics.json",
+      "sha256": "608cdb4dda3df48ae91c7dbd5ab7f6a370cf927f639b5665863caefd22d4562e"
+    },
+    {
+      "bytes": 169802,
+      "path": "stress_uncertainty_vs_absolute_residual.pdf",
+      "sha256": "0cd1140f5b72eb02c27d498022526c2491002a3ba92a9ef9c2633baaebb16563"
+    },
+    {
+      "bytes": 569212,
+      "path": "stress_uncertainty_vs_absolute_residual.png",
+      "sha256": "54547f848ad05fd7c67e9b72a46f502a0e8c15dd12f30a40941f6fe3aed7b6c8"
+    }
+  ],
+  "schema_version": "upet.fge.plot-result.v1",
+  "settings": {
+    "contour_masses": [
+      0.5,
+      0.7,
+      0.85,
+      0.95,
+      0.99
+    ],
+    "dpi": 300,
+    "figure_size": [
+      7.0,
+      7.0
+    ],
+    "gaussian_sigma": 1.2,
+    "grid_size": 160,
+    "log_margin": 0.05,
+    "scatter_alpha": 0.035,
+    "scatter_max_points": 20000,
+    "scatter_seed": 20260714,
+    "scatter_size": 2.0
+  },
+  "source_identity": "b1f4a3c5c7713b4be369b467e98e62d59bc23a13aefceffbd49ac51773b6dc86",
+  "source_kind": "completed_fge",
+  "status": "PASS"
+}

@@ -1,0 +1,73 @@
+{
+  "dataset_label": "mad_test",
+  "formula": "population_std_unbiased_false",
+  "panels": [
+    {
+      "actual_contour_masses": [
+        0.9900374874067611,
+        0.9500043127919149,
+        0.8500361003528294,
+        0.7010178214866523,
+        0.5014180924621607
+      ],
+      "contour_levels": [
+        4.160588198787189e-05,
+        0.000183693340246581,
+        0.0005418604728192942,
+        0.0010583568947727436,
+        0.001762875129157021
+      ],
+      "domain": "energy",
+      "excluded": {
+        "inf": 0,
+        "nan": 0,
+        "nonpositive": 0
+      },
+      "histogram_count": 9486,
+      "log_limits": [
+        -5.61889693270024,
+        2.100287092554347
+      ],
+      "original_count": 9486,
+      "pearson_log10": -0.020276653447237444,
+      "scatter_count": 9486,
+      "spearman": -0.07497944879138287,
+      "valid_count": 9486
+    },
+    {
+      "actual_contour_masses": [
+        0.9900247043637886,
+        0.9501382003393586,
+        0.8503593382580721,
+        0.7002660525837399,
+        0.5012353034356445
+      ],
+      "contour_levels": [
+        2.7692428665334462e-05,
+        0.00014272699039628276,
+        0.000523030908127259,
+        0.0012961381924698763,
+        0.002388069450181809
+      ],
+      "domain": "force",
+      "excluded": {
+        "inf": 0,
+        "nan": 0,
+        "nonpositive": 0
+      },
+      "histogram_count": 775758,
+      "log_limits": [
+        -8.65147231886221,
+        2.985603076016371
+      ],
+      "original_count": 775758,
+      "pearson_log10": 0.4059218726830238,
+      "scatter_count": 20000,
+      "spearman": 0.36718062875629814,
+      "valid_count": 775758
+    }
+  ],
+  "schema_version": "upet.fge.plot-statistics.v1",
+  "source_identity": "daafcfa15dac641e1021660778971f3f202718c0615fb905478542656caee941",
+  "source_kind": "inference"
+}

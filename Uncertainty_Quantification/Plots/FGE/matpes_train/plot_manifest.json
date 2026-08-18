@@ -1,0 +1,71 @@
+{
+  "analysis_identity": "683e781814187d77d9cd6f95d3b809d9ae02d4701ddcb3b79aa1bfad44cf8c50",
+  "dataset_label": "matpes_train",
+  "domains": [
+    "energy",
+    "force",
+    "stress"
+  ],
+  "outputs": [
+    {
+      "bytes": 140952,
+      "path": "energy_uncertainty_vs_absolute_residual.pdf",
+      "sha256": "41bf4f7ddff898e71415ca1cb913eb197f2a7b59389ded2a541748691eaa48e8"
+    },
+    {
+      "bytes": 490888,
+      "path": "energy_uncertainty_vs_absolute_residual.png",
+      "sha256": "287fa9459b2a75c3e63fdd5d4e02bd8b3de0438cdcfa55b52b0cae48ff34c0ab"
+    },
+    {
+      "bytes": 113232,
+      "path": "force_uncertainty_vs_absolute_residual.pdf",
+      "sha256": "6fa354f80acd4498ecdc9926c25b6829721eda5597ad286f92acd46bb5bb7f6a"
+    },
+    {
+      "bytes": 378006,
+      "path": "force_uncertainty_vs_absolute_residual.png",
+      "sha256": "7ecef1b827e7843a0f2b34e94386a2ce9976736212fe4facf302e60b8c49a69c"
+    },
+    {
+      "bytes": 2650,
+      "path": "plot_statistics.json",
+      "sha256": "250c74606b0df36262ddd872d15b104e7b27ce079477483df3be3d133d7c396a"
+    },
+    {
+      "bytes": 135009,
+      "path": "stress_uncertainty_vs_absolute_residual.pdf",
+      "sha256": "41a66b77dc3a2e0946e1aa2b8e8bee63ae9cacf58e06467125c0896d00b390eb"
+    },
+    {
+      "bytes": 436530,
+      "path": "stress_uncertainty_vs_absolute_residual.png",
+      "sha256": "49472ed887b947590adb182349fca1c4615ec2f0440b1ec6cef7728fa3ff07e3"
+    }
+  ],
+  "schema_version": "upet.fge.plot-result.v1",
+  "settings": {
+    "contour_masses": [
+      0.5,
+      0.7,
+      0.85,
+      0.95,
+      0.99
+    ],
+    "dpi": 300,
+    "figure_size": [
+      7.0,
+      7.0
+    ],
+    "gaussian_sigma": 1.2,
+    "grid_size": 160,
+    "log_margin": 0.05,
+    "scatter_alpha": 0.035,
+    "scatter_max_points": 20000,
+    "scatter_seed": 20260714,
+    "scatter_size": 2.0
+  },
+  "source_identity": "75d52fa5ea8c2f9337b8b08e3e6fea88c3a4882fd691529cd865f894b3e1188d",
+  "source_kind": "inference",
+  "status": "PASS"
+}
