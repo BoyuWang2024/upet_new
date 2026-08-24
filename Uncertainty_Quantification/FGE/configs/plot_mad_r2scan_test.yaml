@@ -1,0 +1,7 @@
+schema_version: upet.fge.plot.v1
+input:
+  root: ../outputs/inference_mad_r2scan_test_k8
+  kind: inference
+output:
+  root: ../../Plots/FGE/mad_r2scan_test
+plot: {}
