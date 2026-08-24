@@ -7,8 +7,8 @@ ensemble:
   member_count: 8
 dataset:
   label: mad_test
-  path: /home/bywang/code/UQ/upet_new_fge_test/data/dataset/DS_7q71mf99le0c_0/co/co_0.extxyz
-  expected_sha256: a2cfc12d3a7066f114a788621c55d79a0b6726b29e7d64947a2c40515dfba74b
+  path: /home/bywang/code/UQ/upet_new_fge_test/data/dataset/DS_7q71mf99le0c_0/co/co_0_upet_fge_supported.extxyz
+  expected_sha256: 499b479499eb56d0792360cb8bcb3397b566ac99c4e290ce0e866382c7f4d2ed
   split: test
   reference_availability:
     energy: true
