@@ -1,0 +1,21 @@
+external_config: predict_r2scan_e0_gpu.yaml
+validation_dataset: mad_r2scan_val
+test_dataset: mad_r2scan_test
+validation_expected:
+  structures: 16098
+  atoms: 310432
+  elements: 89
+test_expected:
+  structures: 16072
+  atoms: 311657
+  elements: 89
+output_root: /home/bywang/code/UQ/upet_new/Uncertainty_Quantification/ConfidenceHead/outputs/e0_postprocessing/mad_r2scan
+plots_root: /home/bywang/code/UQ/upet_new/Uncertainty_Quantification/Plots/ConfidenceHead/density_scatter_r2scan_e0
+plot:
+  scatter_max_points: 20000
+  scatter_seed: 20260714
+  grid_size: 160
+  gaussian_sigma: 1.2
+  contour_masses: [0.50, 0.70, 0.85, 0.95, 0.99]
+  log_margin: 0.05
+  dpi: 300

@@ -96,8 +96,10 @@ def _number(mapping: Mapping[str, Any], key: str) -> float:
     return float(value)
 
 
-def discover_external_runs(runs_root: Path) -> ExternalRuns:
-    """Discover exactly one force-only run and energy orders one through eight."""
+def _discover_run_targets(
+    runs_root: Path,
+) -> tuple[Path | None, dict[int, Path]]:
+    """Parse completed force and energy targets without workflow requirements."""
 
     root = Path(runs_root).resolve()
     if root.name != "runs" or not root.is_dir():
@@ -141,6 +143,22 @@ def discover_external_runs(runs_root: Path) -> ExternalRuns:
             if order in energies:
                 raise ValueError(f"duplicate energy order {order}")
             energies[order] = run
+    return force, energies
+
+
+def discover_energy_runs(runs_root: Path) -> dict[int, Path]:
+    """Discover exactly the eight completed energy runs without requiring force."""
+
+    _, energies = _discover_run_targets(runs_root)
+    if set(energies) != set(range(1, 9)):
+        raise ValueError("energy runs must cover orders 1 through 8 exactly")
+    return energies
+
+
+def discover_external_runs(runs_root: Path) -> ExternalRuns:
+    """Discover exactly one force-only run and energy orders one through eight."""
+
+    force, energies = _discover_run_targets(runs_root)
     if force is None:
         raise ValueError("force-only run was not found")
     if set(energies) != set(range(1, 9)):

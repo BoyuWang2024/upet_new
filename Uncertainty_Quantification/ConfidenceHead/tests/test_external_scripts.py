@@ -162,3 +162,78 @@ def test_slurm_template_only_runs_prediction_or_plotting() -> None:
         "matpes_train",
         "mad_test",
     }
+
+
+def test_shipped_e0_postprocessing_files_are_strict_and_remote_scoped() -> None:
+    from confidence_head.e0_config import load_e0_config
+
+    prediction = load_external_config(CONFIGS / "predict_r2scan_e0_gpu.yaml")
+    campaign = load_e0_config(CONFIGS / "e0_postprocessing_gpu.yaml")
+    submit = ROOT / "run" / "submit_e0_postprocessing.sh"
+    text = submit.read_text(encoding="utf-8")
+
+    assert prediction.profile == "postprocessing"
+    assert prediction.checkpoint.path == Path(
+        "/home/bywang/code/UQ/upet/pet-omatpes-l-v0.1.0.ckpt"
+    )
+    assert prediction.checkpoint.expected_sha256 == (
+        "879b1045391d88869522605a8b8b3cedeed74668e7062fdd7487548ab7b08004"
+    )
+    assert prediction.datasets["mad_r2scan_val"].path == Path(
+        "/home/bywang/code/UQ/upet_new/data/dataset/mad_val_r2scan_filtered.extxyz"
+    )
+    assert prediction.datasets["mad_r2scan_val"].expected_sha256 == (
+        "4f4d4807592d75cfedda4a157850d60fc1428e44762e8debf37c012a4fc060aa"
+    )
+    assert prediction.datasets["mad_r2scan_test"].path == Path(
+        "/home/bywang/code/UQ/upet_new/data/dataset/mad_test_r2scan_filtered.extxyz"
+    )
+    assert prediction.datasets["mad_r2scan_test"].expected_sha256 == (
+        "499b479499eb56d0792360cb8bcb3397b566ac99c4e290ce0e866382c7f4d2ed"
+    )
+    assert prediction.runs_root == Path(
+        "/home/bywang/code/UQ/upet_new/Uncertainty_Quantification/"
+        "ConfidenceHead/outputs/runs"
+    )
+    assert prediction.cache_root == Path(
+        "/home/bywang/code/UQ/upet_new/Uncertainty_Quantification/"
+        "ConfidenceHead/outputs/e0_postprocessing/prediction_cache"
+    )
+    assert prediction.plots_root == Path(
+        "/home/bywang/code/UQ/upet_new/Uncertainty_Quantification/"
+        "Plots/ConfidenceHead/density_scatter_r2scan_e0"
+    )
+    assert prediction.cache_batch_size == 2
+    assert prediction.batch_size == 128
+    assert prediction.device == "cuda"
+    assert campaign.external_config == CONFIGS / "predict_r2scan_e0_gpu.yaml"
+    assert campaign.validation_dataset == "mad_r2scan_val"
+    assert campaign.test_dataset == "mad_r2scan_test"
+    assert campaign.validation_expected.model_dump() == {
+        "structures": 16098,
+        "atoms": 310432,
+        "elements": 89,
+    }
+    assert campaign.test_expected.model_dump() == {
+        "structures": 16072,
+        "atoms": 311657,
+        "elements": 89,
+    }
+    assert campaign.output_root == Path(
+        "/home/bywang/code/UQ/upet_new/Uncertainty_Quantification/"
+        "ConfidenceHead/outputs/e0_postprocessing/mad_r2scan"
+    )
+    assert campaign.plots_root == Path(
+        "/home/bywang/code/UQ/upet_new/Uncertainty_Quantification/"
+        "Plots/ConfidenceHead/density_scatter_r2scan_e0"
+    )
+    assert campaign.plot.grid_size == 160
+    assert "/home/bywang/.conda/envs/upet_new/bin/python" in text
+    assert "#SBATCH --gres=gpu:1" in text
+    assert 'STAGE="${STAGE:-all}"' in text
+    assert "postprocess_r2scan_e0.py" in text
+    assert text.count(".py") == 1
+    assert "train.py" not in text
+    assert "wandb" not in text.lower()
+    assert "force" not in text.lower()
+    assert "order" not in text.lower()

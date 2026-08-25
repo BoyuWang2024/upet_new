@@ -1,0 +1,19 @@
+profile: postprocessing
+checkpoint:
+  path: /home/bywang/code/UQ/upet/pet-omatpes-l-v0.1.0.ckpt
+  expected_sha256: 879b1045391d88869522605a8b8b3cedeed74668e7062fdd7487548ab7b08004
+datasets:
+  mad_r2scan_val:
+    source: extxyz
+    path: /home/bywang/code/UQ/upet_new/data/dataset/mad_val_r2scan_filtered.extxyz
+    expected_sha256: 4f4d4807592d75cfedda4a157850d60fc1428e44762e8debf37c012a4fc060aa
+  mad_r2scan_test:
+    source: extxyz
+    path: /home/bywang/code/UQ/upet_new/data/dataset/mad_test_r2scan_filtered.extxyz
+    expected_sha256: 499b479499eb56d0792360cb8bcb3397b566ac99c4e290ce0e866382c7f4d2ed
+runs_root: /home/bywang/code/UQ/upet_new/Uncertainty_Quantification/ConfidenceHead/outputs/runs
+cache_root: /home/bywang/code/UQ/upet_new/Uncertainty_Quantification/ConfidenceHead/outputs/e0_postprocessing/prediction_cache
+plots_root: /home/bywang/code/UQ/upet_new/Uncertainty_Quantification/Plots/ConfidenceHead/density_scatter_r2scan_e0
+cache_batch_size: 2
+batch_size: 128
+device: cuda

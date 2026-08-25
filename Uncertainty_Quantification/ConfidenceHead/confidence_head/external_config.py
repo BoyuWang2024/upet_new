@@ -11,13 +11,13 @@ from pydantic import Field, field_validator, model_validator
 from .config import (
     REPO_ROOT,
     CheckpointConfig,
-    Profile,
     StrictModel,
     UniqueKeySafeLoader,
 )
 
 
 Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+ExternalProfile = Literal["smoke", "production", "postprocessing"]
 
 
 class ExistingEvaluationSource(StrictModel):
@@ -59,7 +59,7 @@ DatasetSource = Annotated[
 class ExternalPredictionConfig(StrictModel):
     """Inputs and publication roots for external ConfidenceHead inference."""
 
-    profile: Profile
+    profile: ExternalProfile
     checkpoint: CheckpointConfig
     datasets: dict[str, DatasetSource]
     runs_root: Path
@@ -84,13 +84,24 @@ class ExternalPredictionConfig(StrictModel):
         return value
 
     @model_validator(mode="after")
-    def validate_production_datasets(self) -> "ExternalPredictionConfig":
-        required = {"matpes_test", "matpes_train", "mad_test"}
-        if self.profile == "production" and set(self.datasets) != required:
+    def validate_profile_datasets(self) -> "ExternalPredictionConfig":
+        production = {"matpes_test", "matpes_train", "mad_test"}
+        if self.profile == "production" and set(self.datasets) != production:
             raise ValueError(
                 "production datasets must be exactly matpes_test, matpes_train, "
                 "mad_test"
             )
+        postprocessing = {"mad_r2scan_val", "mad_r2scan_test"}
+        if self.profile == "postprocessing":
+            if set(self.datasets) != postprocessing:
+                raise ValueError(
+                    "postprocessing datasets must be exactly mad_r2scan_val and "
+                    "mad_r2scan_test"
+                )
+            if not all(
+                isinstance(source, ExtXYZSource) for source in self.datasets.values()
+            ):
+                raise ValueError("postprocessing datasets must use extxyz sources")
         return self
 
 
